@@ -4,15 +4,40 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os/exec"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/ashon/amux/internal/agent"
+	"github.com/ashon/amux/internal/config"
+	"github.com/ashon/amux/internal/tmux"
+	"github.com/ashon/amux/internal/types"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
 
-func registerTools(srv *server.MCPServer, client *DaemonClient) {
+func registerTools(srv *server.MCPServer, client *DaemonClient, configPath string) {
+	// list_agents
+	srv.AddTool(
+		mcp.NewTool("list_agents",
+			mcp.WithDescription("List configured amux agents from amux.yaml, enriched with current active status when available. Supports filtering to help find a specific agent such as a portfolio development team agent."),
+			mcp.WithString("query", mcp.Description("Optional case-insensitive search text matched against agent name, description, runtime, command, and instructions preview")),
+			mcp.WithBoolean("active_only", mcp.Description("When true, return only currently active agents")),
+		),
+		listAgentsHandler(client, configPath),
+	)
+
+	// inspect_agent
+	srv.AddTool(
+		mcp.NewTool("inspect_agent",
+			mcp.WithDescription("Ask a specific amux agent to summarize its current operating state. Useful after list_agents finds a target such as a portfolio development team agent."),
+			mcp.WithString("name", mcp.Required(), mcp.Description("Configured agent/workspace name")),
+			mcp.WithString("question", mcp.Description("Optional custom question. Defaults to asking for current operating status, recent work, risks, and key metrics.")),
+			mcp.WithNumber("timeout", mcp.Description("Max seconds to wait for reply (default: 120)")),
+		),
+		inspectAgentHandler(client, configPath),
+	)
+
 	// send_message
 	srv.AddTool(
 		mcp.NewTool("send_message",
@@ -100,6 +125,229 @@ func registerTools(srv *server.MCPServer, client *DaemonClient) {
 		),
 		requestHandler(client),
 	)
+
+	// interrupt_agent
+	srv.AddTool(
+		mcp.NewTool("interrupt_agent",
+			mcp.WithDescription("Send Escape to a workspace tmux session to interrupt the agent's current interactive CLI action without killing the session."),
+			mcp.WithString("name", mcp.Required(), mcp.Description("Target workspace name")),
+		),
+		interruptAgentHandler(client),
+	)
+}
+
+type agentInfo struct {
+	Name        string            `json:"name"`
+	Dir         string            `json:"dir"`
+	Description string            `json:"description,omitempty"`
+	Runtime     string            `json:"runtime,omitempty"`
+	LaunchMode  string            `json:"launch_mode"`
+	Command     string            `json:"command,omitempty"`
+	Active      bool              `json:"active"`
+	Status      types.AgentStatus `json:"status,omitempty"`
+	StatusText  string            `json:"status_text,omitempty"`
+	ConnectedAt *time.Time        `json:"connected_at,omitempty"`
+	Instruction string            `json:"instruction_file,omitempty"`
+	Preview     string            `json:"instructions_preview,omitempty"`
+}
+
+type workspaceListResult struct {
+	Workspace  string                `json:"workspace"`
+	Count      int                   `json:"count"`
+	Workspaces []types.WorkspaceInfo `json:"workspaces"`
+}
+
+func listAgentsHandler(client *DaemonClient, configPath string) server.ToolHandlerFunc {
+	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		cfgPath, cfg, err := loadToolConfig(configPath)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to load amux config: %v", err)), nil
+		}
+
+		activeWorkspaces, err := client.ListWorkspaces()
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to list active workspaces: %v", err)), nil
+		}
+
+		activeByName := make(map[string]types.WorkspaceInfo, len(activeWorkspaces))
+		for _, ws := range activeWorkspaces {
+			activeByName[ws.Name] = ws
+		}
+
+		query := strings.TrimSpace(strings.ToLower(request.GetString("query", "")))
+		activeOnly := request.GetBool("active_only", false)
+
+		agents := make([]agentInfo, 0, len(cfg.Workspaces))
+		for name, ws := range cfg.Workspaces {
+			info := agentInfo{
+				Name:        name,
+				Dir:         ws.Dir,
+				Description: ws.Description,
+				Active:      false,
+				Preview:     instructionPreview(ws.Instructions),
+			}
+
+			switch {
+			case ws.Agent == "none":
+				info.LaunchMode = "manual"
+			case strings.TrimSpace(ws.Agent) != "":
+				info.LaunchMode = "custom"
+				info.Command = ws.Agent
+			default:
+				runtime := agent.NormalizeRuntime(ws.Runtime)
+				info.LaunchMode = "runtime"
+				info.Runtime = runtime
+				instructionFile, err := agent.InstructionFile(runtime)
+				if err == nil {
+					info.Instruction = instructionFile
+				}
+			}
+
+			if active, ok := activeByName[name]; ok {
+				info.Active = true
+				info.Status = active.Status
+				info.StatusText = active.StatusText
+				info.ConnectedAt = active.ConnectedAt
+			}
+
+			if activeOnly && !info.Active {
+				continue
+			}
+			if query != "" && !matchesAgentQuery(info, query) {
+				continue
+			}
+
+			agents = append(agents, info)
+		}
+
+		sort.Slice(agents, func(i, j int) bool {
+			return agents[i].Name < agents[j].Name
+		})
+
+		data, _ := json.MarshalIndent(map[string]any{
+			"project":      cfg.Project,
+			"config_path":  cfgPath,
+			"agent_count":  len(agents),
+			"active_count": len(activeWorkspaces),
+			"agents":       agents,
+		}, "", "  ")
+		return mcp.NewToolResultText(string(data)), nil
+	}
+}
+
+func inspectAgentHandler(client *DaemonClient, configPath string) server.ToolHandlerFunc {
+	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		name, _ := request.RequireString("name")
+		question := strings.TrimSpace(request.GetString("question", ""))
+		timeout := int(request.GetFloat("timeout", 120))
+
+		cfgPath, cfg, err := loadToolConfig(configPath)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to load amux config: %v", err)), nil
+		}
+
+		ws, ok := cfg.Workspaces[name]
+		if !ok {
+			return mcp.NewToolResultError(fmt.Sprintf("Agent %q is not defined in %s", name, cfgPath)), nil
+		}
+
+		if question == "" {
+			question = "현재 운영 상태를 간단히 요약해줘. 담당 역할, 최근 작업, 대기 중인 이슈, 핵심 지표나 리스크가 있으면 함께 알려줘. 포트폴리오 개발팀을 맡고 있다면 담당 서비스나 기능, 최근 변경사항, 남은 개발 과제, 배포 또는 운영 리스크를 짧게 포함해줘."
+		}
+
+		fullMessage := question + "\n\n[amux] 작업 완료 후 반드시 send_message(to=\"" + client.workspace + "\") 로 결과를 보내주세요."
+
+		_, err = client.SendMessage(name, fullMessage)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to send inspection request: %v", err)), nil
+		}
+
+		wakeAgent(name, client.workspace)
+
+		reply, err := waitForWorkspaceReply(ctx, client, name, timeout)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		data, _ := json.MarshalIndent(map[string]any{
+			"agent":        name,
+			"description":  ws.Description,
+			"question":     question,
+			"status_reply": reply,
+		}, "", "  ")
+		return mcp.NewToolResultText(string(data)), nil
+	}
+}
+
+func loadToolConfig(configPath string) (string, *config.Config, error) {
+	cfgPath := strings.TrimSpace(configPath)
+	if cfgPath == "" {
+		var err error
+		cfgPath, err = config.FindConfigFile()
+		if err != nil {
+			return "", nil, err
+		}
+	}
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return "", nil, err
+	}
+	return cfgPath, cfg, nil
+}
+
+func instructionPreview(instructions string) string {
+	if strings.TrimSpace(instructions) == "" {
+		return ""
+	}
+	parts := strings.Fields(strings.TrimSpace(instructions))
+	if len(parts) > 24 {
+		parts = parts[:24]
+	}
+	return strings.Join(parts, " ")
+}
+
+func matchesAgentQuery(info agentInfo, query string) bool {
+	fields := []string{
+		info.Name,
+		info.Dir,
+		info.Description,
+		info.Runtime,
+		info.Command,
+		info.Preview,
+		info.StatusText,
+	}
+	for _, field := range fields {
+		if strings.Contains(strings.ToLower(field), query) {
+			return true
+		}
+	}
+	return false
+}
+
+func waitForWorkspaceReply(ctx context.Context, client *DaemonClient, from string, timeout int) (string, error) {
+	deadline := time.Now().Add(time.Duration(timeout) * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return "", fmt.Errorf("Request cancelled")
+		default:
+		}
+
+		msgs, err := client.ReadMessages(10, from)
+		if err == nil && len(msgs) > 0 {
+			var sb strings.Builder
+			for _, msg := range msgs {
+				sb.WriteString(msg.Content)
+				sb.WriteString("\n")
+			}
+			return strings.TrimSpace(sb.String()), nil
+		}
+
+		time.Sleep(3 * time.Second)
+	}
+
+	return "", fmt.Errorf("Timeout: no reply from %q within %ds", from, timeout)
 }
 
 func sendMessageHandler(client *DaemonClient) server.ToolHandlerFunc {
@@ -120,12 +368,11 @@ func sendMessageHandler(client *DaemonClient) server.ToolHandlerFunc {
 }
 
 func wakeAgent(target, sender string) {
-	session := "amux-" + target
 	prompt := fmt.Sprintf(
 		"read_messages MCP 도구로 수신 메시지를 확인하고 요청된 작업을 수행해 줘. 결과는 send_message(to=\"%s\")로 보내줘.",
 		sender,
 	)
-	exec.Command("tmux", "send-keys", "-t", session, prompt, "Enter").Run()
+	_ = tmux.WakeWorkspace(target, prompt)
 }
 
 func readMessagesHandler(client *DaemonClient) server.ToolHandlerFunc {
@@ -178,11 +425,24 @@ func listWorkspacesHandler(client *DaemonClient) server.ToolHandlerFunc {
 			return mcp.NewToolResultError(fmt.Sprintf("Failed to list workspaces: %v", err)), nil
 		}
 
+		sort.Slice(workspaces, func(i, j int) bool {
+			return workspaces[i].Name < workspaces[j].Name
+		})
+
 		if len(workspaces) == 0 {
-			return mcp.NewToolResultText("No active workspaces."), nil
+			data, _ := json.MarshalIndent(workspaceListResult{
+				Workspace:  client.workspace,
+				Count:      0,
+				Workspaces: []types.WorkspaceInfo{},
+			}, "", "  ")
+			return mcp.NewToolResultText(string(data)), nil
 		}
 
-		data, _ := json.MarshalIndent(workspaces, "", "  ")
+		data, _ := json.MarshalIndent(workspaceListResult{
+			Workspace:  client.workspace,
+			Count:      len(workspaces),
+			Workspaces: workspaces,
+		}, "", "  ")
 		return mcp.NewToolResultText(string(data)), nil
 	}
 }
@@ -286,5 +546,20 @@ func requestHandler(client *DaemonClient) server.ToolHandlerFunc {
 		}
 
 		return mcp.NewToolResultError(fmt.Sprintf("Timeout: no reply from %q within %ds", to, timeout)), nil
+	}
+}
+
+func interruptAgentHandler(client *DaemonClient) server.ToolHandlerFunc {
+	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		name, _ := request.RequireString("name")
+
+		if !tmux.SessionExists(name) {
+			return mcp.NewToolResultError(fmt.Sprintf("Workspace %q is not running", name)), nil
+		}
+		if err := tmux.InterruptWorkspace(name); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to interrupt %q: %v", name, err)), nil
+		}
+
+		return mcp.NewToolResultText(fmt.Sprintf("Interrupt sent to %q", name)), nil
 	}
 }

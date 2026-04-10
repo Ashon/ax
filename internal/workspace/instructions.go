@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/ashon/amux/internal/agent"
 )
 
 const (
@@ -12,8 +14,23 @@ const (
 	amuxMarkerEnd   = "<!-- amux:instructions:end -->"
 )
 
-func WriteInstructions(dir, workspace, instructions string) error {
-	path := filepath.Join(dir, "CLAUDE.md")
+func WriteInstructions(dir, workspace, runtime, instructions string) error {
+	targetFile, err := agent.InstructionFile(runtime)
+	if err != nil {
+		return err
+	}
+	targetPath := filepath.Join(dir, targetFile)
+	for _, runtimeName := range agent.SupportedNames() {
+		file, err := agent.InstructionFile(runtimeName)
+		if err != nil {
+			return err
+		}
+		path := filepath.Join(dir, file)
+		if path == targetPath {
+			continue
+		}
+		removeInstructionsFile(path)
+	}
 
 	amuxSection := fmt.Sprintf(`%s
 ## amux workspace: %s
@@ -21,10 +38,10 @@ func WriteInstructions(dir, workspace, instructions string) error {
 %s
 %s`, amuxMarkerStart, workspace, strings.TrimSpace(instructions), amuxMarkerEnd)
 
-	existing, err := os.ReadFile(path)
+	existing, err := os.ReadFile(targetPath)
 	if err != nil {
 		// No existing file — write fresh
-		return os.WriteFile(path, []byte(amuxSection+"\n"), 0o644)
+		return os.WriteFile(targetPath, []byte(amuxSection+"\n"), 0o644)
 	}
 
 	content := string(existing)
@@ -39,12 +56,21 @@ func WriteInstructions(dir, workspace, instructions string) error {
 		content = strings.TrimRight(content, "\n") + "\n\n" + amuxSection + "\n"
 	}
 
-	return os.WriteFile(path, []byte(content), 0o644)
+	return os.WriteFile(targetPath, []byte(content), 0o644)
 }
 
 func RemoveInstructions(dir string) {
-	path := filepath.Join(dir, "CLAUDE.md")
+	for _, runtimeName := range agent.SupportedNames() {
+		file, err := agent.InstructionFile(runtimeName)
+		if err != nil {
+			continue
+		}
+		path := filepath.Join(dir, file)
+		removeInstructionsFile(path)
+	}
+}
 
+func removeInstructionsFile(path string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/ashon/amux/internal/agent"
 	"github.com/ashon/amux/internal/config"
 	"github.com/ashon/amux/internal/daemon"
 	"github.com/ashon/amux/internal/tmux"
@@ -11,28 +12,35 @@ import (
 
 type Manager struct {
 	socketPath string
+	configPath string
 }
 
-func NewManager(socketPath string) *Manager {
+func NewManager(socketPath, configPath string) *Manager {
 	return &Manager{
 		socketPath: daemon.ExpandSocketPath(socketPath),
+		configPath: configPath,
 	}
 }
 
 func (m *Manager) Create(name string, ws config.Workspace) error {
+	runtime := agent.NormalizeRuntime(ws.Runtime)
+	if _, err := agent.Get(runtime); err != nil {
+		return err
+	}
+
 	// Ensure directory exists
 	if err := os.MkdirAll(ws.Dir, 0o755); err != nil {
 		return fmt.Errorf("create workspace dir: %w", err)
 	}
 
 	// Write .mcp.json
-	if err := WriteMCPConfig(ws.Dir, name, m.socketPath); err != nil {
+	if err := WriteMCPConfig(ws.Dir, name, m.socketPath, m.configPath); err != nil {
 		return fmt.Errorf("write mcp config: %w", err)
 	}
 
 	// Write CLAUDE.md with instructions
 	if ws.Instructions != "" {
-		if err := WriteInstructions(ws.Dir, name, ws.Instructions); err != nil {
+		if err := WriteInstructions(ws.Dir, name, runtime, ws.Instructions); err != nil {
 			return fmt.Errorf("write instructions: %w", err)
 		}
 	}
@@ -41,23 +49,32 @@ func (m *Manager) Create(name string, ws config.Workspace) error {
 	if tmux.SessionExists(name) {
 		return fmt.Errorf("tmux session %q already exists", tmux.SessionName(name))
 	}
-	// Determine agent command (runs directly as tmux session command — no shell visible)
-	agent := ws.Agent
-	if agent == "" {
-		agent = "claude --dangerously-skip-permissions --continue || claude --dangerously-skip-permissions"
-	}
-
-	if agent != "none" {
-		if err := tmux.CreateSessionWithCommand(name, ws.Dir, agent); err != nil {
+	// Use an explicit agent command when configured, otherwise dispatch through amux.
+	if ws.Agent != "" {
+		if ws.Agent == "none" {
+			if err := tmux.CreateSession(name, ws.Dir, ws.Shell); err != nil {
+				return fmt.Errorf("create tmux session: %w", err)
+			}
+			return nil
+		}
+		if err := tmux.CreateSessionWithCommand(name, ws.Dir, ws.Agent); err != nil {
 			return fmt.Errorf("create tmux session: %w", err)
 		}
-	} else {
-		if err := tmux.CreateSession(name, ws.Dir, ws.Shell); err != nil {
-			return fmt.Errorf("create tmux session: %w", err)
-		}
+		return nil
 	}
 
-	return nil
+	amuxBin, err := amuxBinaryPath()
+	if err != nil {
+		return fmt.Errorf("resolve amux binary: %w", err)
+	}
+	return tmux.CreateSessionWithArgs(name, ws.Dir, []string{
+		amuxBin,
+		"run-agent",
+		"--runtime", runtime,
+		"--workspace", name,
+		"--socket", m.socketPath,
+		"--config", m.configPath,
+	})
 }
 
 func (m *Manager) Destroy(name string, dir string) error {

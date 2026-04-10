@@ -11,6 +11,7 @@ import (
 
 	"path/filepath"
 
+	"github.com/ashon/amux/internal/agent"
 	"github.com/ashon/amux/internal/config"
 	"github.com/ashon/amux/internal/daemon"
 	"github.com/ashon/amux/internal/tmux"
@@ -22,13 +23,17 @@ var upCmd = &cobra.Command{
 	Use:   "up",
 	Short: "Start daemon and all workspaces defined in amux.yaml",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfgPath, err := config.FindConfigFile()
+		cfgPath, err := resolveConfigPath()
 		if err != nil {
 			return err
 		}
 		cfg, err := config.Load(cfgPath)
 		if err != nil {
 			return err
+		}
+		exe, err := os.Executable()
+		if err != nil {
+			return fmt.Errorf("resolve amux binary: %w", err)
 		}
 
 		fmt.Printf("Project: %s\n\n", cfg.Project)
@@ -41,7 +46,7 @@ var upCmd = &cobra.Command{
 
 		// Create workspaces
 		fmt.Println("\nWorkspaces:")
-		mgr := workspace.NewManager(socketPath)
+		mgr := workspace.NewManager(socketPath, cfgPath)
 		if err := mgr.CreateAll(cfg); err != nil {
 			return err
 		}
@@ -49,8 +54,16 @@ var upCmd = &cobra.Command{
 		// Write .mcp.json for user's local claude session (registers as "user")
 		configDir := filepath.Dir(cfgPath)
 		sp := daemon.ExpandSocketPath(socketPath)
-		if err := workspace.WriteMCPConfig(configDir, "user", sp); err != nil {
+		if err := workspace.WriteMCPConfig(configDir, "user", sp, cfgPath); err != nil {
 			return fmt.Errorf("write user mcp config: %w", err)
+		}
+		claudeUserCommand, err := agent.BuildUserCommand(agent.RuntimeClaude, configDir, "user", sp, exe, cfgPath)
+		if err != nil {
+			return fmt.Errorf("build claude user command: %w", err)
+		}
+		codexUserCommand, err := agent.BuildUserCommand(agent.RuntimeCodex, configDir, "user", sp, exe, cfgPath)
+		if err != nil {
+			return fmt.Errorf("build codex user command: %w", err)
 		}
 
 		// Create orchestrator in ~/.amux/orchestrator
@@ -59,22 +72,36 @@ var upCmd = &cobra.Command{
 		os.MkdirAll(orchDir, 0o755)
 		os.MkdirAll(filepath.Join(orchDir, ".claude"), 0o755) // pre-create to skip trust prompt
 
+		orchRuntime := agent.NormalizeRuntime(cfg.OrchestratorRuntime)
+		if _, err := agent.Get(orchRuntime); err != nil {
+			return fmt.Errorf("invalid orchestrator runtime: %w", err)
+		}
+
 		if !tmux.SessionExists("orchestrator") {
-			if err := workspace.WriteMCPConfig(orchDir, "orchestrator", sp); err != nil {
+			if err := workspace.WriteMCPConfig(orchDir, "orchestrator", sp, cfgPath); err != nil {
 				return fmt.Errorf("write orchestrator mcp config: %w", err)
 			}
-			if err := workspace.WriteOrchestratorPrompt(orchDir, cfg); err != nil {
+			if err := workspace.WriteOrchestratorPrompt(orchDir, cfg, orchRuntime); err != nil {
 				return fmt.Errorf("write orchestrator prompt: %w", err)
 			}
-			if err := tmux.CreateSessionWithCommand("orchestrator", orchDir, "claude --dangerously-skip-permissions --continue || claude --dangerously-skip-permissions"); err != nil {
+			if err := tmux.CreateSessionWithArgs("orchestrator", orchDir, []string{
+				exe,
+				"run-agent",
+				"--runtime", orchRuntime,
+				"--workspace", "orchestrator",
+				"--socket", sp,
+				"--config", cfgPath,
+			}); err != nil {
 				return fmt.Errorf("create orchestrator session: %w", err)
 			}
-			fmt.Printf("\nOrchestrator: started (~/.amux/orchestrator)\n")
+			fmt.Printf("\nOrchestrator: started (~/.amux/orchestrator, runtime: %s)\n", orchRuntime)
 		} else {
 			fmt.Printf("\nOrchestrator: already running\n")
 		}
 
-		fmt.Println("User session: run 'claude' from this directory to interact as 'user'.")
+		fmt.Println("User session:")
+		fmt.Printf("  Claude: run %s\n", claudeUserCommand)
+		fmt.Printf("  Codex:  run %s\n", codexUserCommand)
 		return nil
 	},
 }

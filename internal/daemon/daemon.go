@@ -150,6 +150,9 @@ func (d *Daemon) handleEnvelope(conn net.Conn, env *Envelope, workspace *string)
 		if *workspace == "" {
 			return nil, fmt.Errorf("not registered")
 		}
+		if p.To == *workspace {
+			return nil, fmt.Errorf("cannot send message to self")
+		}
 		msg := d.queue.Enqueue(*workspace, p.To, p.Message)
 		d.history.Append(*workspace, p.To, p.Message)
 		d.logger.Printf("message %s -> %s: %s", *workspace, p.To, truncate(p.Message, 50))

@@ -33,7 +33,7 @@ var wsCreateCmd = &cobra.Command{
 			}
 		}
 
-		mgr := workspace.NewManager(socketPath)
+		mgr := workspace.NewManager(socketPath, configPath)
 		if err := mgr.Create(name, config.Workspace{Dir: dir}); err != nil {
 			return err
 		}
@@ -50,7 +50,7 @@ var wsDestroyCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
-		mgr := workspace.NewManager(socketPath)
+		mgr := workspace.NewManager(socketPath, configPath)
 		if err := mgr.Destroy(name, ""); err != nil {
 			return err
 		}
@@ -75,7 +75,7 @@ var wsListCmd = &cobra.Command{
 
 		// Try to load config for descriptions
 		descriptions := map[string]string{}
-		if cfgPath, err := config.FindConfigFile(); err == nil {
+		if cfgPath, err := resolveConfigPath(); err == nil {
 			if cfg, err := config.Load(cfgPath); err == nil {
 				for name, ws := range cfg.Workspaces {
 					descriptions[name] = ws.Description
@@ -110,8 +110,26 @@ var wsAttachCmd = &cobra.Command{
 	},
 }
 
+var wsInterruptCmd = &cobra.Command{
+	Use:   "interrupt <name>",
+	Short: "Interrupt the current interactive agent action",
+	Long:  "Sends Escape to the workspace tmux session to interrupt the current agent CLI action without killing the session.",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		name := args[0]
+		if !tmux.SessionExists(name) {
+			return fmt.Errorf("workspace %q not found (no tmux session %s)", name, tmux.SessionName(name))
+		}
+		if err := tmux.InterruptWorkspace(name); err != nil {
+			return err
+		}
+		fmt.Printf("Workspace %q interrupted\n", name)
+		return nil
+	},
+}
+
 func init() {
 	wsCreateCmd.Flags().StringVar(&wsCreateDir, "dir", "", "workspace directory (default: current dir)")
-	workspaceCmd.AddCommand(wsCreateCmd, wsDestroyCmd, wsListCmd, wsAttachCmd)
+	workspaceCmd.AddCommand(wsCreateCmd, wsDestroyCmd, wsListCmd, wsAttachCmd, wsInterruptCmd)
 	rootCmd.AddCommand(workspaceCmd)
 }

@@ -15,7 +15,7 @@ var mcpServerCmd = &cobra.Command{
 		if mcpWorkspace == "" {
 			return cmd.Help()
 		}
-		return mcpserver.Run(mcpWorkspace, socketPath)
+		return mcpserver.Run(mcpWorkspace, socketPath, configPath)
 	},
 }
 

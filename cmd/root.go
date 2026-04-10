@@ -3,11 +3,14 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
+	"github.com/ashon/amux/internal/config"
 	"github.com/spf13/cobra"
 )
 
 var socketPath string
+var configPath string
 
 var rootCmd = &cobra.Command{
 	Use:   "amux",
@@ -24,4 +27,12 @@ func Execute() {
 
 func init() {
 	rootCmd.PersistentFlags().StringVar(&socketPath, "socket", "~/.local/state/amux/daemon.sock", "daemon socket path")
+	rootCmd.PersistentFlags().StringVar(&configPath, "config", "", "amux config path (default: search upward for amux.yaml)")
+}
+
+func resolveConfigPath() (string, error) {
+	if configPath == "" {
+		return config.FindConfigFile()
+	}
+	return filepath.Abs(configPath)
 }

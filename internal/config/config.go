@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -12,20 +13,43 @@ import (
 const DefaultConfigFile = "amux.yaml"
 
 type Config struct {
-	Project    string                `yaml:"project"`
-	Workspaces map[string]Workspace `yaml:"workspaces"`
+	Project             string               `yaml:"project"`
+	OrchestratorRuntime string               `yaml:"orchestrator_runtime,omitempty"`
+	Children            map[string]Child     `yaml:"children,omitempty"`
+	Workspaces          map[string]Workspace `yaml:"workspaces"`
+}
+
+type Child struct {
+	Dir    string `yaml:"dir"`
+	Prefix string `yaml:"prefix,omitempty"`
 }
 
 type Workspace struct {
-	Dir         string            `yaml:"dir"`
-	Description string            `yaml:"description,omitempty"`
-	Shell       string            `yaml:"shell,omitempty"`
-	Agent        string            `yaml:"agent,omitempty"`        // command to auto-start (default: "claude --dangerously-skip-permissions")
-	Instructions string            `yaml:"instructions,omitempty"` // agent instructions (written to CLAUDE.md)
+	Dir          string            `yaml:"dir"`
+	Description  string            `yaml:"description,omitempty"`
+	Shell        string            `yaml:"shell,omitempty"`
+	Runtime      string            `yaml:"runtime,omitempty"`      // claude or codex (default: claude)
+	Agent        string            `yaml:"agent,omitempty"`        // custom command to auto-start instead of runtime default
+	Instructions string            `yaml:"instructions,omitempty"` // agent instructions (written to the runtime's instruction file)
 	Env          map[string]string `yaml:"env,omitempty"`
 }
 
 func Load(path string) (*Config, error) {
+	seen := make(map[string]bool)
+	return loadRecursive(path, seen)
+}
+
+func loadRecursive(path string, seen map[string]bool) (*Config, error) {
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve config path: %w", err)
+	}
+	if seen[path] {
+		return nil, fmt.Errorf("cyclic amux children reference detected at %s", path)
+	}
+	seen[path] = true
+	defer delete(seen, path)
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
@@ -39,23 +63,59 @@ func Load(path string) (*Config, error) {
 	if cfg.Project == "" {
 		cfg.Project = filepath.Base(filepath.Dir(path))
 	}
+	if cfg.Workspaces == nil {
+		cfg.Workspaces = make(map[string]Workspace)
+	}
 
-	// Resolve dirs: expand ~ and resolve relative paths
 	configDir := filepath.Dir(path)
-	home, _ := os.UserHomeDir()
 	for name, ws := range cfg.Workspaces {
-		if ws.Dir == "" {
-			ws.Dir = "."
-		}
-		if strings.HasPrefix(ws.Dir, "~/") {
-			ws.Dir = filepath.Join(home, ws.Dir[2:])
-		} else if !filepath.IsAbs(ws.Dir) {
-			ws.Dir = filepath.Join(configDir, ws.Dir)
-		}
+		ws.Dir = resolveDir(configDir, ws.Dir)
 		cfg.Workspaces[name] = ws
 	}
 
-	return &cfg, nil
+	merged := &Config{
+		Project:             cfg.Project,
+		OrchestratorRuntime: cfg.OrchestratorRuntime,
+		Children:            cfg.Children,
+		Workspaces:          make(map[string]Workspace, len(cfg.Workspaces)),
+	}
+	for name, ws := range cfg.Workspaces {
+		merged.Workspaces[name] = ws
+	}
+
+	childNames := make([]string, 0, len(cfg.Children))
+	for name := range cfg.Children {
+		childNames = append(childNames, name)
+	}
+	sort.Strings(childNames)
+
+	for _, name := range childNames {
+		child := cfg.Children[name]
+		child.Dir = resolveDir(configDir, child.Dir)
+		if child.Dir == "" {
+			return nil, fmt.Errorf("child %q is missing dir", name)
+		}
+		if child.Prefix == "" {
+			child.Prefix = name
+		}
+		cfg.Children[name] = child
+
+		childCfgPath := filepath.Join(child.Dir, DefaultConfigFile)
+		childCfg, err := loadRecursive(childCfgPath, seen)
+		if err != nil {
+			return nil, fmt.Errorf("load child %q: %w", name, err)
+		}
+
+		for childName, ws := range childCfg.Workspaces {
+			mergedName := child.Prefix + "." + childName
+			if _, exists := merged.Workspaces[mergedName]; exists {
+				return nil, fmt.Errorf("duplicate workspace name %q after importing child %q", mergedName, name)
+			}
+			merged.Workspaces[mergedName] = ws
+		}
+	}
+
+	return merged, nil
 }
 
 func FindConfigFile() (string, error) {
@@ -89,6 +149,21 @@ func DefaultConfig(projectName string) *Config {
 			},
 		},
 	}
+}
+
+func resolveDir(baseDir, value string) string {
+	if value == "" {
+		value = "."
+	}
+
+	home, _ := os.UserHomeDir()
+	if strings.HasPrefix(value, "~/") {
+		return filepath.Join(home, value[2:])
+	}
+	if filepath.IsAbs(value) {
+		return value
+	}
+	return filepath.Join(baseDir, value)
 }
 
 func (c *Config) Save(path string) error {

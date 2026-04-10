@@ -6,14 +6,15 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/ashon/amux/internal/agent"
 	"github.com/ashon/amux/internal/config"
 )
 
 const OrchestratorInstructions = "" // kept for backwards compat, use WriteOrchestratorPrompt instead
 
-// WriteOrchestratorPrompt generates a CLAUDE.md for the orchestrator
+// WriteOrchestratorPrompt generates the runtime-specific instruction file for the orchestrator
 // that includes the full workspace topology and collaboration rules.
-func WriteOrchestratorPrompt(orchDir string, cfg *config.Config) error {
+func WriteOrchestratorPrompt(orchDir string, cfg *config.Config, runtime string) error {
 	var sb strings.Builder
 
 	sb.WriteString("# amux orchestrator\n\n")
@@ -71,6 +72,20 @@ func WriteOrchestratorPrompt(orchDir string, cfg *config.Config) error {
 	sb.WriteString("- **문서 조회/업데이트** → docs\n")
 	sb.WriteString("- **여러 영역에 걸친 작업** → 관련 에이전트들에게 순차적으로 분배, 의존관계 고려\n")
 
-	path := filepath.Join(orchDir, "CLAUDE.md")
+	instructionFile, err := agent.InstructionFile(runtime)
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(orchDir, instructionFile)
+	for _, runtimeName := range agent.SupportedNames() {
+		otherFile, err := agent.InstructionFile(runtimeName)
+		if err != nil {
+			return err
+		}
+		other := filepath.Join(orchDir, otherFile)
+		if other != path {
+			os.Remove(other)
+		}
+	}
 	return os.WriteFile(path, []byte(sb.String()), 0o644)
 }

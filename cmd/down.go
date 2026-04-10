@@ -20,7 +20,7 @@ var downCmd = &cobra.Command{
 	Use:   "down",
 	Short: "Stop all workspaces and the daemon",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfgPath, err := config.FindConfigFile()
+		cfgPath, err := resolveConfigPath()
 		if err != nil {
 			return err
 		}
@@ -30,7 +30,7 @@ var downCmd = &cobra.Command{
 		}
 
 		fmt.Println("Stopping workspaces:")
-		mgr := workspace.NewManager(socketPath)
+		mgr := workspace.NewManager(socketPath, cfgPath)
 		if err := mgr.DestroyAll(cfg); err != nil {
 			return err
 		}

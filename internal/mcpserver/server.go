@@ -10,7 +10,7 @@ import (
 )
 
 // Run starts the MCP server with stdio transport, connecting to the daemon.
-func Run(workspace, socketPath string) error {
+func Run(workspace, socketPath, configPath string) error {
 	if socketPath == "" {
 		socketPath = daemon.DefaultSocketPath
 	}
@@ -34,14 +34,14 @@ func Run(workspace, socketPath string) error {
 		server.WithInstructions(fmt.Sprintf(
 			"You are the %q workspace agent in an amux multi-agent environment. "+
 				"Use these tools to coordinate with other workspace agents. "+
-				"Call list_workspaces to see who else is active, and read_messages periodically "+
+				"Call list_agents to inspect configured agents from amux.yaml, call list_workspaces to see who is currently active, and read_messages periodically "+
 				"to check for incoming messages from other agents.",
 			workspace,
 		)),
 	)
 
 	// Register tools
-	registerTools(srv, client)
+	registerTools(srv, client, configPath)
 
 	logger.Println("MCP server ready, serving on stdio")
 

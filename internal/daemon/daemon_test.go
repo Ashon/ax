@@ -165,6 +165,50 @@ func TestDaemonSendAndReadMessage(t *testing.T) {
 	t.Logf("message received: from=%s content=%s", msg.From, msg.Content)
 }
 
+func TestDaemonRejectsSelfMessage(t *testing.T) {
+	socketPath, cancel := startTestDaemon(t)
+	defer cancel()
+
+	conn, scanner := connectAndRegister(t, socketPath, "ops-monitoring")
+	defer conn.Close()
+
+	sendEnv, _ := daemon.NewEnvelope("send-self-1", daemon.MsgSendMessage, &daemon.SendMessagePayload{
+		To:      "ops-monitoring",
+		Message: "check your own queue",
+	})
+	resp := sendAndRead(t, conn, scanner, sendEnv)
+
+	if resp.Type != daemon.MsgError {
+		t.Fatalf("expected error, got %s", resp.Type)
+	}
+
+	var errPayload daemon.ErrorPayload
+	if err := resp.DecodePayload(&errPayload); err != nil {
+		t.Fatalf("decode error payload: %v", err)
+	}
+	if errPayload.Message != "cannot send message to self" {
+		t.Fatalf("unexpected error message: %q", errPayload.Message)
+	}
+
+	readEnv, _ := daemon.NewEnvelope("read-self-1", daemon.MsgReadMessages, &daemon.ReadMessagesPayload{
+		Limit: 10,
+	})
+	readResp := sendAndRead(t, conn, scanner, readEnv)
+
+	if readResp.Type != daemon.MsgResponse {
+		t.Fatalf("expected response, got %s", readResp.Type)
+	}
+
+	var respPayload daemon.ResponsePayload
+	readResp.DecodePayload(&respPayload)
+
+	var readMessagesResp daemon.ReadMessagesResponse
+	json.Unmarshal(respPayload.Data, &readMessagesResp)
+	if len(readMessagesResp.Messages) != 0 {
+		t.Fatalf("expected no queued self messages, got %d", len(readMessagesResp.Messages))
+	}
+}
+
 func TestDaemonSharedValues(t *testing.T) {
 	socketPath, cancel := startTestDaemon(t)
 	defer cancel()

@@ -18,17 +18,22 @@ type mcpServerEntry struct {
 	Args    []string `json:"args"`
 }
 
-func WriteMCPConfig(dir, workspace, socketPath string) error {
+func WriteMCPConfig(dir, workspace, socketPath, configPath string) error {
 	amuxBin, err := amuxBinaryPath()
 	if err != nil {
 		return fmt.Errorf("resolve amux binary: %w", err)
+	}
+
+	args := []string{"mcp-server", "--workspace", workspace, "--socket", socketPath}
+	if configPath != "" {
+		args = append(args, "--config", configPath)
 	}
 
 	cfg := mcpConfig{
 		MCPServers: map[string]mcpServerEntry{
 			"amux": {
 				Command: amuxBin,
-				Args:    []string{"mcp-server", "--workspace", workspace, "--socket", socketPath},
+				Args:    args,
 			},
 		},
 	}

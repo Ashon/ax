@@ -7,11 +7,14 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/ashon/amux/internal/agent"
+	"github.com/ashon/amux/internal/config"
 	"github.com/ashon/amux/internal/daemon"
 	"github.com/ashon/amux/internal/tmux"
 	"github.com/spf13/cobra"
@@ -40,6 +43,7 @@ var (
 	msgFromStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("3"))
 	msgToStyle      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("2"))
 	msgTimeStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	runtimeStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
 )
 
 // Regex for parsing agent status
@@ -52,6 +56,10 @@ var (
 
 type tickMsg time.Time
 
+const watchFPS = 60
+const watchMessagePaneMinHeight = 6
+const watchSidebarWidth = 34
+
 type watchModel struct {
 	width      int
 	height     int
@@ -60,9 +68,17 @@ type watchModel struct {
 	prevCaps   map[string]string // previous tick captures for activity detection
 	activity   map[string]time.Time // last activity time per workspace
 	sessions   []tmux.SessionInfo
+	runtimes   map[string]string
 	msgHistory []daemon.HistoryEntry
 	histPath   string
 	showStream bool
+}
+
+type sidebarEntry struct {
+	label        string
+	sessionIndex int
+	group        bool
+	level        int
 }
 
 func newWatchModel() watchModel {
@@ -70,6 +86,7 @@ func newWatchModel() watchModel {
 		captures:   make(map[string]string),
 		prevCaps:   make(map[string]string),
 		activity:   make(map[string]time.Time),
+		runtimes:   loadWatchRuntimes(),
 		histPath:   daemon.HistoryFilePath(socketPath),
 		showStream: true,
 	}
@@ -86,33 +103,28 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "q", "ctrl+c":
 			return m, tea.Quit
 		case "up", "k":
-			if m.selected > 0 {
-				m.selected--
-			}
+			m.selected = moveSelection(m.selected, m.sessions, -1)
 		case "down", "j":
-			if m.selected < len(m.sessions)-1 {
-				m.selected++
-			}
+			m.selected = moveSelection(m.selected, m.sessions, 1)
 		case "tab":
 			m.showStream = !m.showStream
+		case "x":
+			if m.selected < len(m.sessions) {
+				_ = tmux.InterruptWorkspace(m.sessions[m.selected].Workspace)
+			}
 		}
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
 	case tickMsg:
 		m.sessions, _ = tmux.ListSessions()
+		m.selected = clampSelection(m.selected, m.sessions)
 
 		// Resize selected session's tmux window to match main panel
 		if m.selected < len(m.sessions) && m.width > 0 {
-			sideW := 28
+			sideW := watchSidebarWidth
 			mainW := m.width - sideW - 2 // inner content width
-			streamH := 0
-			if m.showStream {
-				streamH = m.height / 5
-				if streamH < 4 {
-					streamH = 4
-				}
-			}
+			streamH := messagePaneHeight(m.height, m.showStream)
 			mainH := m.height - streamH - 3 // inner content height
 			if mainW > 10 && mainH > 5 {
 				selected := m.sessions[m.selected]
@@ -140,19 +152,13 @@ func (m watchModel) View() string {
 	}
 
 	// Layout: sidebar outerW + main outerW = total width
-	sideW := 28
+	sideW := watchSidebarWidth
 	mainW := m.width - sideW
 	if mainW < 20 {
 		mainW = 20
 	}
 
-	streamH := 0
-	if m.showStream {
-		streamH = m.height / 5
-		if streamH < 4 {
-			streamH = 4
-		}
-	}
+	streamH := messagePaneHeight(m.height, m.showStream)
 	contentH := m.height - streamH - 1 // -1 for help line
 
 	// === Sidebar ===
@@ -177,7 +183,7 @@ func (m watchModel) View() string {
 
 	// === Help line ===
 	help := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(
-		" ↑↓ select · tab stream · q quit")
+		" ↑↓ select · x interrupt · tab stream · q quit")
 
 	parts := []string{top}
 	if stream != "" {
@@ -206,35 +212,40 @@ func (m watchModel) renderSidebar(w, h int) string {
 	idleDot := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("○")
 
 	var lines []string
-	for i, s := range m.sessions {
-		status := parseAgentStatus(m.captures[s.Workspace])
-
-		dot := idleDot
-		lastActive, hasActivity := m.activity[s.Workspace]
-		if hasActivity && time.Since(lastActive) < 5*time.Second {
-			dot = actDot
-		}
-
-		name := s.Workspace
-		if len(name) > 14 {
-			name = name[:14]
-		}
-
-		// Build line with consistent padding
+	for _, entry := range buildSidebarEntries(m.sessions) {
 		cursor := "  "
-		nameStyle := unselectedStyle
-		if i == m.selected {
-			cursor = selectedStyle.Render("▸ ")
-			nameStyle = selectedStyle
-		}
-
-		renderedName := nameStyle.Render(name)
-		left := cursor + dot + " " + renderedName
-
-		// Status info on the right side of the same line
+		left := ""
 		right := ""
-		if status != "" {
-			right = statStyle.Render(status)
+
+		if entry.group {
+			left = sidebarStyle.Render(strings.Repeat("  ", entry.level) + entry.label)
+		} else {
+			s := m.sessions[entry.sessionIndex]
+			status := parseAgentStatus(m.captures[s.Workspace])
+			runtime := m.runtimes[s.Workspace]
+
+			dot := idleDot
+			lastActive, hasActivity := m.activity[s.Workspace]
+			if hasActivity && time.Since(lastActive) < 5*time.Second {
+				dot = actDot
+			}
+
+			nameStyle := unselectedStyle
+			if entry.sessionIndex == m.selected {
+				cursor = selectedStyle.Render("▸ ")
+				nameStyle = selectedStyle
+			}
+
+			left = cursor + strings.Repeat("  ", entry.level) + dot + " " + nameStyle.Render(entry.label)
+			if runtime != "" {
+				right = runtimeStyle.Render(runtime)
+			}
+			if status != "" {
+				if right != "" {
+					right += " "
+				}
+				right += statStyle.Render(status)
+			}
 		}
 
 		leftW := lipgloss.Width(left)
@@ -242,7 +253,6 @@ func (m watchModel) renderSidebar(w, h int) string {
 		gap := innerW - leftW - rightW
 		if gap < 1 {
 			gap = 1
-			// Truncate right if no space
 			if leftW+1+rightW > innerW {
 				right = ""
 				gap = innerW - leftW
@@ -381,9 +391,176 @@ func (m watchModel) renderStream(totalW, totalH int) string {
 // Helpers
 
 func tickCmd() tea.Cmd {
-	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
+	return tea.Tick(time.Second/watchFPS, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
+}
+
+func messagePaneHeight(totalHeight int, showStream bool) int {
+	if !showStream {
+		return 0
+	}
+
+	streamH := totalHeight / 3
+	if streamH < watchMessagePaneMinHeight {
+		streamH = watchMessagePaneMinHeight
+	}
+
+	maxStreamH := totalHeight - 8
+	if maxStreamH < watchMessagePaneMinHeight {
+		maxStreamH = watchMessagePaneMinHeight
+	}
+	if streamH > maxStreamH {
+		streamH = maxStreamH
+	}
+
+	return streamH
+}
+
+type sidebarTreeNode struct {
+	name         string
+	sessionIndex int
+	children     map[string]*sidebarTreeNode
+}
+
+func buildSidebarEntries(sessions []tmux.SessionInfo) []sidebarEntry {
+	root := &sidebarTreeNode{
+		sessionIndex: -1,
+		children:     make(map[string]*sidebarTreeNode),
+	}
+
+	for i, session := range sessions {
+		node := root
+		for _, part := range splitWorkspacePath(session.Workspace) {
+			child, ok := node.children[part]
+			if !ok {
+				child = &sidebarTreeNode{
+					name:         part,
+					sessionIndex: -1,
+					children:     make(map[string]*sidebarTreeNode),
+				}
+				node.children[part] = child
+			}
+			node = child
+		}
+		node.sessionIndex = i
+	}
+
+	var entries []sidebarEntry
+	appendSidebarEntries(root, 0, &entries)
+	return entries
+}
+
+func appendSidebarEntries(node *sidebarTreeNode, level int, entries *[]sidebarEntry) {
+	childNames := make([]string, 0, len(node.children))
+	for name := range node.children {
+		childNames = append(childNames, name)
+	}
+	sort.Strings(childNames)
+
+	for _, name := range childNames {
+		child := node.children[name]
+
+		if len(child.children) > 0 {
+			*entries = append(*entries, sidebarEntry{
+				label: "▾ " + child.name,
+				group: true,
+				level: level,
+			})
+		}
+		if child.sessionIndex >= 0 {
+			*entries = append(*entries, sidebarEntry{
+				label:        child.name,
+				sessionIndex: child.sessionIndex,
+				level:        level,
+			})
+		}
+		if len(child.children) > 0 {
+			appendSidebarEntries(child, level+1, entries)
+		}
+	}
+}
+
+func splitWorkspacePath(workspace string) []string {
+	switch {
+	case strings.Contains(workspace, "."):
+		return strings.Split(workspace, ".")
+	case strings.Count(workspace, "_") >= 2:
+		return strings.Split(workspace, "_")
+	default:
+		return []string{workspace}
+	}
+}
+
+func loadWatchRuntimes() map[string]string {
+	runtimes := map[string]string{
+		"orchestrator": agent.NormalizeRuntime(""),
+	}
+
+	cfgPath, err := resolveConfigPath()
+	if err != nil {
+		return runtimes
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return runtimes
+	}
+
+	runtimes["orchestrator"] = agent.NormalizeRuntime(cfg.OrchestratorRuntime)
+	for name, ws := range cfg.Workspaces {
+		runtime := agent.NormalizeRuntime(ws.Runtime)
+		runtimes[name] = runtime
+		runtimes[strings.ReplaceAll(name, ".", "_")] = runtime
+	}
+	return runtimes
+}
+
+func orderedLeafSessionIndices(sessions []tmux.SessionInfo) []int {
+	entries := buildSidebarEntries(sessions)
+	indices := make([]int, 0, len(sessions))
+	for _, entry := range entries {
+		if !entry.group && entry.sessionIndex >= 0 {
+			indices = append(indices, entry.sessionIndex)
+		}
+	}
+	return indices
+}
+
+func moveSelection(current int, sessions []tmux.SessionInfo, delta int) int {
+	indices := orderedLeafSessionIndices(sessions)
+	if len(indices) == 0 {
+		return 0
+	}
+
+	pos := 0
+	for i, idx := range indices {
+		if idx == current {
+			pos = i
+			break
+		}
+	}
+
+	pos += delta
+	if pos < 0 {
+		pos = 0
+	}
+	if pos >= len(indices) {
+		pos = len(indices) - 1
+	}
+	return indices[pos]
+}
+
+func clampSelection(current int, sessions []tmux.SessionInfo) int {
+	indices := orderedLeafSessionIndices(sessions)
+	if len(indices) == 0 {
+		return 0
+	}
+	for _, idx := range indices {
+		if idx == current {
+			return current
+		}
+	}
+	return indices[0]
 }
 
 func resizeTmuxWindow(sessionName string, w, h int) {

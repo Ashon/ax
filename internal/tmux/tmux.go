@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 const SessionPrefix = "amux-"
@@ -52,6 +53,21 @@ func CreateSessionWithCommand(workspace, dir, command string) error {
 	// Set remain-on-exit so session doesn't vanish if claude exits
 	exec.Command("tmux", "set-option", "-t", name, "remain-on-exit", "on").Run()
 
+	return nil
+}
+
+func CreateSessionWithArgs(workspace, dir string, argv []string) error {
+	name := SessionName(workspace)
+
+	args := []string{"new-session", "-d", "-s", name, "-c", dir}
+	args = append(args, argv...)
+
+	cmd := exec.Command("tmux", args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("tmux new-session: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+
+	exec.Command("tmux", "set-option", "-t", name, "remain-on-exit", "on").Run()
 	return nil
 }
 
@@ -138,6 +154,47 @@ func SendKeys(workspace, keys string) error {
 	cmd := exec.Command("tmux", "send-keys", "-t", name, keys, "Enter")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("tmux send-keys: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+func SendSpecialKeys(workspace string, keys ...string) error {
+	name := SessionName(workspace)
+	args := []string{"send-keys", "-t", name}
+	args = append(args, keys...)
+
+	cmd := exec.Command("tmux", args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("tmux send-keys: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+// InterruptWorkspace asks the agent CLI to cancel its current interactive action
+// without terminating the tmux session or shell process.
+func InterruptWorkspace(workspace string) error {
+	return SendSpecialKeys(workspace, "Escape")
+}
+
+// WakeWorkspace nudges a Codex TUI session to process queued amux messages.
+// Escape/C-u clears any draft or multiline composer state before the prompt is injected.
+func WakeWorkspace(workspace, prompt string) error {
+	name := SessionName(workspace)
+	clearCmd := exec.Command("tmux", "send-keys", "-t", name, "Escape", "C-u")
+	if out, err := clearCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("tmux wake workspace (clear): %s: %w", strings.TrimSpace(string(out)), err)
+	}
+
+	typeCmd := exec.Command("tmux", "send-keys", "-t", name, prompt)
+	if out, err := typeCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("tmux wake workspace (type): %s: %w", strings.TrimSpace(string(out)), err)
+	}
+
+	time.Sleep(150 * time.Millisecond)
+
+	submitCmd := exec.Command("tmux", "send-keys", "-t", name, "Enter")
+	if out, err := submitCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("tmux wake workspace: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	return nil
 }
