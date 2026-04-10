@@ -11,7 +11,7 @@ import (
 const SessionPrefix = "amux-"
 
 func SessionName(workspace string) string {
-	return SessionPrefix + workspace
+	return SessionPrefix + encodeWorkspaceName(workspace)
 }
 
 type SessionInfo struct {
@@ -105,7 +105,7 @@ func AttachSession(workspace string) error {
 }
 
 func ListSessions() ([]SessionInfo, error) {
-	cmd := exec.Command("tmux", "list-sessions", "-F", "#{session_name}\t#{session_attached}\t#{session_windows}")
+	cmd := exec.Command("tmux", "list-sessions", "-F", "#{session_name} #{session_attached} #{session_windows}")
 	out, err := cmd.Output()
 	if err != nil {
 		// No server running = no sessions
@@ -120,7 +120,7 @@ func ListSessions() ([]SessionInfo, error) {
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, "\t", 3)
+		parts := strings.Fields(line)
 		if len(parts) != 3 {
 			continue
 		}
@@ -135,7 +135,7 @@ func ListSessions() ([]SessionInfo, error) {
 
 		sessions = append(sessions, SessionInfo{
 			Name:      name,
-			Workspace: strings.TrimPrefix(name, SessionPrefix),
+			Workspace: decodeWorkspaceName(strings.TrimPrefix(name, SessionPrefix)),
 			Attached:  attached,
 			Windows:   windows,
 		})
@@ -201,4 +201,12 @@ func WakeWorkspace(workspace, prompt string) error {
 
 func isInsideTmux() bool {
 	return os.Getenv("TMUX") != ""
+}
+
+func encodeWorkspaceName(workspace string) string {
+	return strings.ReplaceAll(workspace, ".", "_")
+}
+
+func decodeWorkspaceName(name string) string {
+	return strings.ReplaceAll(name, "_", ".")
 }

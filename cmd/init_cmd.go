@@ -11,14 +11,18 @@ import (
 
 var initCmd = &cobra.Command{
 	Use:   "init",
-	Short: "Initialize amux.yaml in the current directory",
+	Short: "Initialize .amux/config.yaml in the current directory",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		path := filepath.Join(".", config.DefaultConfigFile)
+		dir := mustGetwd()
+		path := config.DefaultConfigPath(dir)
 		if _, err := os.Stat(path); err == nil {
 			return fmt.Errorf("%s already exists", path)
 		}
+		if legacyPath, ok := configPathConflict(dir); ok {
+			return fmt.Errorf("legacy config already exists at %s", legacyPath)
+		}
 
-		projectName := filepath.Base(mustGetwd())
+		projectName := filepath.Base(dir)
 		cfg := config.DefaultConfig(projectName)
 
 		if err := cfg.Save(path); err != nil {
@@ -37,6 +41,23 @@ func mustGetwd() string {
 		return "."
 	}
 	return dir
+}
+
+func configPathConflict(dir string) (string, bool) {
+	if path, ok := configPathExists(config.DefaultConfigPath(dir)); ok {
+		return path, true
+	}
+	if path, ok := configPathExists(config.LegacyConfigPath(dir)); ok {
+		return path, true
+	}
+	return "", false
+}
+
+func configPathExists(path string) (string, bool) {
+	if _, err := os.Stat(path); err == nil {
+		return path, true
+	}
+	return "", false
 }
 
 func init() {

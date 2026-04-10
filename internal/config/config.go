@@ -10,7 +10,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const DefaultConfigFile = "amux.yaml"
+const (
+	DefaultConfigDir  = ".amux"
+	DefaultConfigFile = "config.yaml"
+	LegacyConfigFile  = "amux.yaml"
+)
 
 type Config struct {
 	Project             string               `yaml:"project"`
@@ -68,8 +72,9 @@ func loadRecursive(path string, seen map[string]bool) (*Config, error) {
 	}
 
 	configDir := filepath.Dir(path)
+	projectDir := configBaseDir(configDir)
 	for name, ws := range cfg.Workspaces {
-		ws.Dir = resolveDir(configDir, ws.Dir)
+		ws.Dir = resolveDir(projectDir, ws.Dir)
 		cfg.Workspaces[name] = ws
 	}
 
@@ -91,7 +96,7 @@ func loadRecursive(path string, seen map[string]bool) (*Config, error) {
 
 	for _, name := range childNames {
 		child := cfg.Children[name]
-		child.Dir = resolveDir(configDir, child.Dir)
+		child.Dir = resolveDir(projectDir, child.Dir)
 		if child.Dir == "" {
 			return nil, fmt.Errorf("child %q is missing dir", name)
 		}
@@ -100,7 +105,10 @@ func loadRecursive(path string, seen map[string]bool) (*Config, error) {
 		}
 		cfg.Children[name] = child
 
-		childCfgPath := filepath.Join(child.Dir, DefaultConfigFile)
+		childCfgPath, err := ConfigPathInDir(child.Dir)
+		if err != nil {
+			return nil, fmt.Errorf("load child %q: %w", name, err)
+		}
 		childCfg, err := loadRecursive(childCfgPath, seen)
 		if err != nil {
 			return nil, fmt.Errorf("load child %q: %w", name, err)
@@ -125,8 +133,7 @@ func FindConfigFile() (string, error) {
 	}
 
 	for {
-		path := filepath.Join(dir, DefaultConfigFile)
-		if _, err := os.Stat(path); err == nil {
+		if path, ok := findConfigInDir(dir); ok {
 			return path, nil
 		}
 		parent := filepath.Dir(dir)
@@ -136,7 +143,7 @@ func FindConfigFile() (string, error) {
 		dir = parent
 	}
 
-	return "", fmt.Errorf("%s not found (searched from current directory upward)", DefaultConfigFile)
+	return "", fmt.Errorf(".amux/config.yaml or %s not found (searched from current directory upward)", LegacyConfigFile)
 }
 
 func DefaultConfig(projectName string) *Config {
@@ -166,10 +173,53 @@ func resolveDir(baseDir, value string) string {
 	return filepath.Join(baseDir, value)
 }
 
+func configBaseDir(configDir string) string {
+	if filepath.Base(configDir) == DefaultConfigDir {
+		return filepath.Dir(configDir)
+	}
+	return configDir
+}
+
+func DefaultConfigPath(dir string) string {
+	return filepath.Join(dir, DefaultConfigDir, DefaultConfigFile)
+}
+
+func LegacyConfigPath(dir string) string {
+	return filepath.Join(dir, LegacyConfigFile)
+}
+
+func ConfigPathInDir(dir string) (string, error) {
+	if path, ok := findConfigInDir(dir); ok {
+		return path, nil
+	}
+	return "", fmt.Errorf(".amux/config.yaml or %s not found in %s", LegacyConfigFile, dir)
+}
+
+func ConfigRootDir(path string) string {
+	return configBaseDir(filepath.Dir(path))
+}
+
+func findConfigInDir(dir string) (string, bool) {
+	preferred := DefaultConfigPath(dir)
+	if _, err := os.Stat(preferred); err == nil {
+		return preferred, true
+	}
+
+	legacy := LegacyConfigPath(dir)
+	if _, err := os.Stat(legacy); err == nil {
+		return legacy, true
+	}
+
+	return "", false
+}
+
 func (c *Config) Save(path string) error {
 	data, err := yaml.Marshal(c)
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
 	}
 	return os.WriteFile(path, data, 0o644)
 }

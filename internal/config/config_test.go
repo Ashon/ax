@@ -17,7 +17,7 @@ func TestLoadMergesChildrenRecursively(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 
-	writeConfig(t, filepath.Join(grandChildDir, "amux.yaml"), `
+	writeConfig(t, filepath.Join(grandChildDir, ".amux", "config.yaml"), `
 project: monitoring
 workspaces:
   alerts:
@@ -25,7 +25,7 @@ workspaces:
     description: alerts agent
 `)
 
-	writeConfig(t, filepath.Join(childDir, "amux.yaml"), `
+	writeConfig(t, filepath.Join(childDir, ".amux", "config.yaml"), `
 project: invest
 children:
   mon:
@@ -36,7 +36,7 @@ workspaces:
     description: research agent
 `)
 
-	rootConfigPath := filepath.Join(rootDir, "amux.yaml")
+	rootConfigPath := filepath.Join(rootDir, ".amux", "config.yaml")
 	writeConfig(t, rootConfigPath, `
 project: root
 children:
@@ -83,14 +83,14 @@ func TestLoadRejectsCyclicChildren(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 
-	rootConfigPath := filepath.Join(rootDir, "amux.yaml")
+	rootConfigPath := filepath.Join(rootDir, ".amux", "config.yaml")
 	writeConfig(t, rootConfigPath, `
 children:
   child:
     dir: ./child
 `)
 
-	writeConfig(t, filepath.Join(childDir, "amux.yaml"), `
+	writeConfig(t, filepath.Join(childDir, ".amux", "config.yaml"), `
 children:
   root:
     dir: ..
@@ -103,6 +103,9 @@ children:
 
 func writeConfig(t *testing.T, path, content string) {
 	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
 	}

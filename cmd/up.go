@@ -21,7 +21,7 @@ import (
 
 var upCmd = &cobra.Command{
 	Use:   "up",
-	Short: "Start daemon and all workspaces defined in amux.yaml",
+	Short: "Start daemon and all workspaces defined in amux config",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfgPath, err := resolveConfigPath()
 		if err != nil {
@@ -52,7 +52,7 @@ var upCmd = &cobra.Command{
 		}
 
 		// Write .mcp.json for user's local claude session (registers as "user")
-		configDir := filepath.Dir(cfgPath)
+		configDir := config.ConfigRootDir(cfgPath)
 		sp := daemon.ExpandSocketPath(socketPath)
 		if err := workspace.WriteMCPConfig(configDir, "user", sp, cfgPath); err != nil {
 			return fmt.Errorf("write user mcp config: %w", err)

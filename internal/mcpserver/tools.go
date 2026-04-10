@@ -20,7 +20,7 @@ func registerTools(srv *server.MCPServer, client *DaemonClient, configPath strin
 	// list_agents
 	srv.AddTool(
 		mcp.NewTool("list_agents",
-			mcp.WithDescription("List configured amux agents from amux.yaml, enriched with current active status when available. Supports filtering to help find a specific agent such as a portfolio development team agent."),
+			mcp.WithDescription("List configured amux agents from the active amux config, enriched with current active status when available. Supports filtering to help find a specific agent such as a portfolio development team agent."),
 			mcp.WithString("query", mcp.Description("Optional case-insensitive search text matched against agent name, description, runtime, command, and instructions preview")),
 			mcp.WithBoolean("active_only", mcp.Description("When true, return only currently active agents")),
 		),

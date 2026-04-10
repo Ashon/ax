@@ -27,7 +27,7 @@ func Execute() {
 
 func init() {
 	rootCmd.PersistentFlags().StringVar(&socketPath, "socket", "~/.local/state/amux/daemon.sock", "daemon socket path")
-	rootCmd.PersistentFlags().StringVar(&configPath, "config", "", "amux config path (default: search upward for amux.yaml)")
+	rootCmd.PersistentFlags().StringVar(&configPath, "config", "", "amux config path (default: search upward for .amux/config.yaml, then amux.yaml)")
 }
 
 func resolveConfigPath() (string, error) {

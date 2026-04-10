@@ -34,7 +34,7 @@ func Run(workspace, socketPath, configPath string) error {
 		server.WithInstructions(fmt.Sprintf(
 			"You are the %q workspace agent in an amux multi-agent environment. "+
 				"Use these tools to coordinate with other workspace agents. "+
-				"Call list_agents to inspect configured agents from amux.yaml, call list_workspaces to see who is currently active, and read_messages periodically "+
+				"Call list_agents to inspect configured agents from the active amux config, call list_workspaces to see who is currently active, and read_messages periodically "+
 				"to check for incoming messages from other agents.",
 			workspace,
 		)),
