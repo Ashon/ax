@@ -73,14 +73,25 @@ var wsListCmd = &cobra.Command{
 			return nil
 		}
 
-		fmt.Printf("%-20s %-10s %s\n", "WORKSPACE", "STATUS", "SESSION")
-		fmt.Printf("%-20s %-10s %s\n", "---------", "------", "-------")
+		// Try to load config for descriptions
+		descriptions := map[string]string{}
+		if cfgPath, err := config.FindConfigFile(); err == nil {
+			if cfg, err := config.Load(cfgPath); err == nil {
+				for name, ws := range cfg.Workspaces {
+					descriptions[name] = ws.Description
+				}
+			}
+		}
+
+		fmt.Printf("%-15s %-10s %s\n", "WORKSPACE", "STATUS", "DESCRIPTION")
+		fmt.Printf("%-15s %-10s %s\n", "---------", "------", "-----------")
 		for _, s := range sessions {
 			status := "detached"
 			if s.Attached {
 				status = "attached"
 			}
-			fmt.Printf("%-20s %-10s %s\n", s.Workspace, status, s.Name)
+			desc := descriptions[s.Workspace]
+			fmt.Printf("%-15s %-10s %s\n", s.Workspace, status, desc)
 		}
 		return nil
 	},

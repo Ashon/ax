@@ -11,6 +11,7 @@ import (
 
 	"github.com/ashon/amux/internal/config"
 	"github.com/ashon/amux/internal/daemon"
+	"github.com/ashon/amux/internal/tmux"
 	"github.com/ashon/amux/internal/workspace"
 	"github.com/spf13/cobra"
 )
@@ -32,6 +33,12 @@ var downCmd = &cobra.Command{
 		mgr := workspace.NewManager(socketPath)
 		if err := mgr.DestroyAll(cfg); err != nil {
 			return err
+		}
+
+		// Stop orchestrator session
+		if tmux.SessionExists("orchestrator") {
+			tmux.DestroySession("orchestrator")
+			fmt.Println("  orchestrator: stopped")
 		}
 
 		// Remove orchestrator .mcp.json

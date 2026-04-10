@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -34,6 +35,26 @@ func CreateSession(workspace, dir, shell string) error {
 	return nil
 }
 
+// CreateSessionWithCommand creates a tmux session that runs a command directly
+// instead of starting a shell. The command replaces the shell process so no
+// shell prompt is visible.
+func CreateSessionWithCommand(workspace, dir, command string) error {
+	name := SessionName(workspace)
+
+	// Use "sh -c 'exec <command>'" so the command replaces the shell process.
+	// remain-on-exit keeps the pane open if the command exits, allowing restart.
+	cmd := exec.Command("tmux", "new-session", "-d", "-s", name, "-c", dir,
+		"sh", "-c", command)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("tmux new-session: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+
+	// Set remain-on-exit so session doesn't vanish if claude exits
+	exec.Command("tmux", "set-option", "-t", name, "remain-on-exit", "on").Run()
+
+	return nil
+}
+
 func DestroySession(workspace string) error {
 	name := SessionName(workspace)
 	cmd := exec.Command("tmux", "kill-session", "-t", name)
@@ -49,14 +70,19 @@ func AttachSession(workspace string) error {
 	// If inside tmux, switch client; otherwise attach
 	if isInsideTmux() {
 		cmd := exec.Command("tmux", "switch-client", "-t", name)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("tmux switch-client: %s: %w", strings.TrimSpace(string(out)), err)
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("tmux switch-client: %w", err)
 		}
 	} else {
 		cmd := exec.Command("tmux", "attach-session", "-t", name)
-		cmd.Stdin = nil // inherit from parent
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("tmux attach-session: %s: %w", strings.TrimSpace(string(out)), err)
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("tmux attach-session: %w", err)
 		}
 	}
 	return nil
@@ -117,6 +143,5 @@ func SendKeys(workspace, keys string) error {
 }
 
 func isInsideTmux() bool {
-	cmd := exec.Command("tmux", "display-message", "-p", "")
-	return cmd.Run() == nil
+	return os.Getenv("TMUX") != ""
 }

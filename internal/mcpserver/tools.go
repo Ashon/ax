@@ -112,8 +112,20 @@ func sendMessageHandler(client *DaemonClient) server.ToolHandlerFunc {
 			return mcp.NewToolResultError(fmt.Sprintf("Failed to send message: %v", err)), nil
 		}
 
+		// Wake the target agent via tmux
+		wakeAgent(to, client.workspace)
+
 		return mcp.NewToolResultText(fmt.Sprintf("Message sent to %q (id: %s)", to, msgID)), nil
 	}
+}
+
+func wakeAgent(target, sender string) {
+	session := "amux-" + target
+	prompt := fmt.Sprintf(
+		"read_messages MCP 도구로 수신 메시지를 확인하고 요청된 작업을 수행해 줘. 결과는 send_message(to=\"%s\")로 보내줘.",
+		sender,
+	)
+	exec.Command("tmux", "send-keys", "-t", session, prompt, "Enter").Run()
 }
 
 func readMessagesHandler(client *DaemonClient) server.ToolHandlerFunc {
@@ -248,10 +260,8 @@ func requestHandler(client *DaemonClient) server.ToolHandlerFunc {
 			return mcp.NewToolResultError(fmt.Sprintf("Failed to send: %v", err)), nil
 		}
 
-		// Wake the target agent via tmux send-keys
-		tmuxSession := "amux-" + to
-		prompt := fmt.Sprintf("read_messages MCP 도구로 수신 메시지를 확인하고 요청된 작업을 수행해 줘. 결과는 send_message(to=\"%s\")로 보내줘.", client.workspace)
-		exec.Command("tmux", "send-keys", "-t", tmuxSession, prompt, "Enter").Run()
+		// Wake the target agent via tmux
+		wakeAgent(to, client.workspace)
 
 		// Poll for reply
 		deadline := time.Now().Add(time.Duration(timeout) * time.Second)

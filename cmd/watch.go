@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 
@@ -18,7 +19,7 @@ import (
 
 var watchCmd = &cobra.Command{
 	Use:   "watch",
-	Short: "Monitor all workspace sessions with message stream (read-only TUI)",
+	Short: "Monitor workspace sessions with interactive TUI",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		p := tea.NewProgram(newWatchModel(), tea.WithAltScreen())
 		_, err := p.Run()
@@ -26,14 +27,27 @@ var watchCmd = &cobra.Command{
 	},
 }
 
+// Styles
 var (
-	borderColor = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	activeColor = lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true)
-	streamFrom  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("3"))
-	streamTo    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("2"))
-	streamTime  = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	msgBorder   = lipgloss.NewStyle().Foreground(lipgloss.Color("5"))
-	msgTitle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("5"))
+	sidebarStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	selectedStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
+	unselectedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("7"))
+	headerStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
+	borderClr       = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	statStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
+	msgBorderClr    = lipgloss.NewStyle().Foreground(lipgloss.Color("5"))
+	msgTitleStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("5"))
+	msgFromStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("3"))
+	msgToStyle      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("2"))
+	msgTimeStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+)
+
+// Regex for parsing agent status
+var (
+	tokenUpRe   = regexp.MustCompile(`↑\s*([\d.]+[kKmM]?)\s*tokens`)
+	tokenDownRe = regexp.MustCompile(`↓\s*([\d.]+[kKmM]?)\s*tokens`)
+	costRe      = regexp.MustCompile(`\$[\d.]+`)
+	agentStateRe = regexp.MustCompile(`(thinking|Harmonizing|Crystallizing|Nesting)`)
 )
 
 type tickMsg time.Time
@@ -41,16 +55,23 @@ type tickMsg time.Time
 type watchModel struct {
 	width      int
 	height     int
+	selected   int
 	captures   map[string]string
+	prevCaps   map[string]string // previous tick captures for activity detection
+	activity   map[string]time.Time // last activity time per workspace
 	sessions   []tmux.SessionInfo
 	msgHistory []daemon.HistoryEntry
 	histPath   string
+	showStream bool
 }
 
 func newWatchModel() watchModel {
 	return watchModel{
-		captures: make(map[string]string),
-		histPath: daemon.HistoryFilePath(socketPath),
+		captures:   make(map[string]string),
+		prevCaps:   make(map[string]string),
+		activity:   make(map[string]time.Time),
+		histPath:   daemon.HistoryFilePath(socketPath),
+		showStream: true,
 	}
 }
 
@@ -62,17 +83,50 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "q", "ctrl+c", "esc":
+		case "q", "ctrl+c":
 			return m, tea.Quit
+		case "up", "k":
+			if m.selected > 0 {
+				m.selected--
+			}
+		case "down", "j":
+			if m.selected < len(m.sessions)-1 {
+				m.selected++
+			}
+		case "tab":
+			m.showStream = !m.showStream
 		}
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		return m, nil
 	case tickMsg:
 		m.sessions, _ = tmux.ListSessions()
+
+		// Resize selected session's tmux window to match main panel
+		if m.selected < len(m.sessions) && m.width > 0 {
+			sideW := 28
+			mainW := m.width - sideW - 2 // inner content width
+			streamH := 0
+			if m.showStream {
+				streamH = m.height / 5
+				if streamH < 4 {
+					streamH = 4
+				}
+			}
+			mainH := m.height - streamH - 3 // inner content height
+			if mainW > 10 && mainH > 5 {
+				selected := m.sessions[m.selected]
+				resizeTmuxWindow(selected.Name, mainW, mainH)
+			}
+		}
+
 		for _, s := range m.sessions {
-			m.captures[s.Workspace] = capturePane(s.Name)
+			content := capturePane(s.Name)
+			if prev, ok := m.prevCaps[s.Workspace]; ok && prev != content {
+				m.activity[s.Workspace] = time.Now()
+			}
+			m.prevCaps[s.Workspace] = m.captures[s.Workspace]
+			m.captures[s.Workspace] = content
 		}
 		m.msgHistory = readHistoryFile(m.histPath, 50)
 		return m, tickCmd()
@@ -82,90 +136,160 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m watchModel) View() string {
 	if m.width == 0 || len(m.sessions) == 0 {
-		return "Loading..."
+		return "Loading... (waiting for sessions)"
 	}
 
-	streamH := m.height / 4
-	if streamH < 4 {
-		streamH = 4
+	// Layout: sidebar outerW + main outerW = total width
+	sideW := 28
+	mainW := m.width - sideW
+	if mainW < 20 {
+		mainW = 20
 	}
-	gridH := m.height - streamH
 
-	n := len(m.sessions)
-	gridCols, gridRows := gridLayout(n)
-
-	// Calculate per-column widths and per-row heights to fill screen exactly
-	baseW := m.width / gridCols
-	extraW := m.width % gridCols
-	baseH := gridH / gridRows
-	extraH := gridH % gridRows
-
-	colWidths := make([]int, gridCols)
-	for c := 0; c < gridCols; c++ {
-		colWidths[c] = baseW
-		if c < extraW {
-			colWidths[c]++
+	streamH := 0
+	if m.showStream {
+		streamH = m.height / 5
+		if streamH < 4 {
+			streamH = 4
 		}
 	}
-	rowHeights := make([]int, gridRows)
-	for r := 0; r < gridRows; r++ {
-		rowHeights[r] = baseH
-		if r < extraH {
-			rowHeights[r]++
-		}
+	contentH := m.height - streamH - 1 // -1 for help line
+
+	// === Sidebar ===
+	sidebar := m.renderSidebar(sideW, contentH)
+
+	// === Main pane ===
+	var mainContent string
+	if m.selected < len(m.sessions) {
+		ws := m.sessions[m.selected].Workspace
+		content := m.captures[ws]
+		mainContent = m.renderMain(ws, content, mainW, contentH)
 	}
 
-	var gridRows2 []string
-	for row := 0; row < gridRows; row++ {
-		var paneStrs []string
-		for col := 0; col < gridCols; col++ {
-			idx := row*gridCols + col
-			outerW := colWidths[col]
-			outerH := rowHeights[row]
-			innerW := outerW - 2
-			innerH := outerH - 2
-			if innerW < 5 {
-				innerW = 5
-			}
-			if innerH < 1 {
-				innerH = 1
-			}
-			if idx >= n {
-				paneStrs = append(paneStrs, emptyPane(outerW, outerH))
-				continue
-			}
-			ws := m.sessions[idx].Workspace
-			content := m.captures[ws]
-			paneStrs = append(paneStrs, renderPane(ws, content, innerW, innerH))
-		}
-		gridRows2 = append(gridRows2, lipgloss.JoinHorizontal(lipgloss.Top, paneStrs...))
+	// Join sidebar + main
+	top := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, mainContent)
+
+	// === Message stream ===
+	var stream string
+	if m.showStream {
+		stream = m.renderStream(m.width, streamH)
 	}
 
-	grid := lipgloss.JoinVertical(lipgloss.Left, gridRows2...)
+	// === Help line ===
+	help := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(
+		" ↑↓ select · tab stream · q quit")
 
-	// Message stream — use full width
-	stream := m.renderStream(m.width, streamH)
+	parts := []string{top}
+	if stream != "" {
+		parts = append(parts, stream)
+	}
+	parts = append(parts, help)
 
-	return grid + "\n" + stream
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
-func renderPane(title, content string, innerW, innerH int) string {
-	// Header line: ╭─ title ──...──╮
-	titleStr := activeColor.Render(fmt.Sprintf(" %s ", title))
-	titleVisW := lipgloss.Width(titleStr)
-	padRight := innerW - titleVisW - 1 // -1 for the ─ after ╭
-	if padRight < 0 {
-		padRight = 0
-	}
-	topLine := borderColor.Render("╭─") + titleStr + borderColor.Render(strings.Repeat("─", padRight)+"╮")
+func (m watchModel) renderSidebar(w, h int) string {
+	innerW := w - 2
+	innerH := h - 2
 
-	// Content lines
+	// Title
+	title := headerStyle.Render(" agents ")
+	titleW := lipgloss.Width(title)
+	pad := innerW - titleW - 1
+	if pad < 0 {
+		pad = 0
+	}
+	topLine := borderClr.Render("╭─") + title + borderClr.Render(strings.Repeat("─", pad)+"╮")
+
+	// Agent list
+	actDot := lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Render("●")
+	idleDot := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("○")
+
+	var lines []string
+	for i, s := range m.sessions {
+		status := parseAgentStatus(m.captures[s.Workspace])
+
+		dot := idleDot
+		lastActive, hasActivity := m.activity[s.Workspace]
+		if hasActivity && time.Since(lastActive) < 5*time.Second {
+			dot = actDot
+		}
+
+		name := s.Workspace
+		if len(name) > 14 {
+			name = name[:14]
+		}
+
+		// Build line with consistent padding
+		cursor := "  "
+		nameStyle := unselectedStyle
+		if i == m.selected {
+			cursor = selectedStyle.Render("▸ ")
+			nameStyle = selectedStyle
+		}
+
+		renderedName := nameStyle.Render(name)
+		left := cursor + dot + " " + renderedName
+
+		// Status info on the right side of the same line
+		right := ""
+		if status != "" {
+			right = statStyle.Render(status)
+		}
+
+		leftW := lipgloss.Width(left)
+		rightW := lipgloss.Width(right)
+		gap := innerW - leftW - rightW
+		if gap < 1 {
+			gap = 1
+			// Truncate right if no space
+			if leftW+1+rightW > innerW {
+				right = ""
+				gap = innerW - leftW
+				if gap < 0 {
+					gap = 0
+				}
+			}
+		}
+
+		lines = append(lines, borderClr.Render("│")+left+strings.Repeat(" ", gap)+right+borderClr.Render("│"))
+	}
+
+	// Fill remaining height
+	for len(lines) < innerH {
+		empty := strings.Repeat(" ", innerW)
+		lines = append(lines, borderClr.Render("│")+empty+borderClr.Render("│"))
+	}
+	if len(lines) > innerH {
+		lines = lines[:innerH]
+	}
+
+	botLine := borderClr.Render("╰" + strings.Repeat("─", innerW) + "╯")
+
+	all := []string{topLine}
+	all = append(all, lines...)
+	all = append(all, botLine)
+	return strings.Join(all, "\n")
+}
+
+func (m watchModel) renderMain(ws, content string, w, h int) string {
+	innerW := w - 2 // subtract left + right border
+	innerH := h - 2
+
+	// Title
+	title := headerStyle.Render(fmt.Sprintf(" %s ", ws))
+	titleW := lipgloss.Width(title)
+	pad := innerW - titleW - 1
+	if pad < 0 {
+		pad = 0
+	}
+	topLine := borderClr.Render("╭─") + title + borderClr.Render(strings.Repeat("─", pad)+"╮")
+
+	// Content
 	lines := strings.Split(content, "\n")
-	// Trim trailing empty
 	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
 		lines = lines[:len(lines)-1]
 	}
-	// Take last innerH lines
 	if len(lines) > innerH {
 		lines = lines[len(lines)-innerH:]
 	}
@@ -176,7 +300,6 @@ func renderPane(title, content string, innerW, innerH int) string {
 		if i < len(lines) {
 			line = lines[i]
 		}
-		// Truncate to innerW visible chars, pad with spaces
 		visW := lipgloss.Width(line)
 		if visW > innerW {
 			line = ansiTruncate(line, innerW)
@@ -186,25 +309,15 @@ func renderPane(title, content string, innerW, innerH int) string {
 		if padding < 0 {
 			padding = 0
 		}
-		bodyLines = append(bodyLines,
-			borderColor.Render("│")+line+strings.Repeat(" ", padding)+borderColor.Render("│"))
+		bodyLines = append(bodyLines, borderClr.Render("│")+line+strings.Repeat(" ", padding)+borderClr.Render("│"))
 	}
 
-	// Bottom line: ╰──...──╯
-	botLine := borderColor.Render("╰" + strings.Repeat("─", innerW) + "╯")
+	botLine := borderClr.Render("╰" + strings.Repeat("─", innerW) + "╯")
 
 	all := []string{topLine}
 	all = append(all, bodyLines...)
 	all = append(all, botLine)
 	return strings.Join(all, "\n")
-}
-
-func emptyPane(outerW, outerH int) string {
-	var lines []string
-	for i := 0; i < outerH; i++ {
-		lines = append(lines, strings.Repeat(" ", outerW))
-	}
-	return strings.Join(lines, "\n")
 }
 
 func (m watchModel) renderStream(totalW, totalH int) string {
@@ -214,13 +327,13 @@ func (m watchModel) renderStream(totalW, totalH int) string {
 		innerH = 1
 	}
 
-	titleStr := msgTitle.Render(" messages ")
-	titleVisW := lipgloss.Width(titleStr)
-	padRight := innerW - titleVisW - 1
-	if padRight < 0 {
-		padRight = 0
+	title := msgTitleStyle.Render(" messages ")
+	titleW := lipgloss.Width(title)
+	pad := innerW - titleW - 1
+	if pad < 0 {
+		pad = 0
 	}
-	topLine := msgBorder.Render("╭─") + titleStr + msgBorder.Render(strings.Repeat("─", padRight)+"╮")
+	topLine := msgBorderClr.Render("╭─") + title + msgBorderClr.Render(strings.Repeat("─", pad)+"╮")
 
 	var msgLines []string
 	start := 0
@@ -228,15 +341,15 @@ func (m watchModel) renderStream(totalW, totalH int) string {
 		start = len(m.msgHistory) - innerH
 	}
 	for _, entry := range m.msgHistory[start:] {
-		ts := streamTime.Render(entry.Timestamp.Format("15:04:05"))
-		from := streamFrom.Render(entry.From)
-		to := streamTo.Render(entry.To)
+		ts := msgTimeStyle.Render(entry.Timestamp.Format("15:04:05"))
+		from := msgFromStyle.Render(entry.From)
+		to := msgToStyle.Render(entry.To)
 		content := strings.ReplaceAll(entry.Content, "\n", " ")
 		content = truncateStr(content, innerW-30)
 		msgLines = append(msgLines, fmt.Sprintf(" %s %s → %s: %s", ts, from, to, content))
 	}
 	if len(msgLines) == 0 {
-		msgLines = append(msgLines, streamTime.Render("  (no messages yet)"))
+		msgLines = append(msgLines, msgTimeStyle.Render("  (no messages yet)"))
 	}
 
 	var bodyLines []string
@@ -246,15 +359,18 @@ func (m watchModel) renderStream(totalW, totalH int) string {
 			line = msgLines[i]
 		}
 		visW := lipgloss.Width(line)
+		if visW > innerW {
+			line = truncateStr(line, innerW)
+			visW = lipgloss.Width(line)
+		}
 		padding := innerW - visW
 		if padding < 0 {
 			padding = 0
 		}
-		bodyLines = append(bodyLines,
-			msgBorder.Render("│")+line+strings.Repeat(" ", padding)+msgBorder.Render("│"))
+		bodyLines = append(bodyLines, msgBorderClr.Render("│")+line+strings.Repeat(" ", padding)+msgBorderClr.Render("│"))
 	}
 
-	botLine := msgBorder.Render("╰" + strings.Repeat("─", innerW) + "╯")
+	botLine := msgBorderClr.Render("╰" + strings.Repeat("─", innerW) + "╯")
 
 	all := []string{topLine}
 	all = append(all, bodyLines...)
@@ -270,6 +386,13 @@ func tickCmd() tea.Cmd {
 	})
 }
 
+func resizeTmuxWindow(sessionName string, w, h int) {
+	exec.Command("tmux", "resize-window", "-t", sessionName,
+		"-x", fmt.Sprintf("%d", w),
+		"-y", fmt.Sprintf("%d", h),
+	).Run()
+}
+
 func capturePane(sessionName string) string {
 	out, err := exec.Command("tmux", "capture-pane", "-t", sessionName, "-p", "-e").Output()
 	if err != nil {
@@ -278,14 +401,51 @@ func capturePane(sessionName string) string {
 	return string(out)
 }
 
-// ansiTruncate truncates a string with ANSI codes to maxW visible characters
+func parseAgentStatus(content string) string {
+	lines := strings.Split(content, "\n")
+	start := len(lines) - 30
+	if start < 0 {
+		start = 0
+	}
+
+	var up, down, cost, status string
+	for _, line := range lines[start:] {
+		if m := tokenUpRe.FindStringSubmatch(line); m != nil {
+			up = "↑" + m[1]
+		}
+		if m := tokenDownRe.FindStringSubmatch(line); m != nil {
+			down = "↓" + m[1]
+		}
+		if m := costRe.FindString(line); m != "" {
+			cost = m
+		}
+		if m := agentStateRe.FindString(line); m != "" {
+			status = m
+		}
+	}
+
+	var parts []string
+	if up != "" || down != "" {
+		parts = append(parts, strings.TrimSpace(up+" "+down))
+	}
+	if cost != "" {
+		parts = append(parts, cost)
+	}
+	if status != "" {
+		parts = append(parts, status)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, " ")
+}
+
 func ansiTruncate(s string, maxW int) string {
 	visW := 0
 	i := 0
 	runes := []rune(s)
 	for i < len(runes) {
 		if runes[i] == '\x1b' {
-			// Skip ANSI escape sequence
 			j := i + 1
 			if j < len(runes) && runes[j] == '[' {
 				j++
@@ -293,7 +453,7 @@ func ansiTruncate(s string, maxW int) string {
 					j++
 				}
 				if j < len(runes) {
-					j++ // include the final letter
+					j++
 				}
 			}
 			i = j
@@ -339,21 +499,6 @@ func truncateStr(s string, n int) string {
 		return s
 	}
 	return string(r[:n]) + "…"
-}
-
-func gridLayout(n int) (cols, rows int) {
-	switch {
-	case n <= 1:
-		return 1, 1
-	case n <= 2:
-		return 2, 1
-	case n <= 4:
-		return 2, 2
-	case n <= 6:
-		return 3, 2
-	default:
-		return 3, (n + 2) / 3
-	}
 }
 
 func init() {

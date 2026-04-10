@@ -13,6 +13,7 @@ import (
 
 	"github.com/ashon/amux/internal/config"
 	"github.com/ashon/amux/internal/daemon"
+	"github.com/ashon/amux/internal/tmux"
 	"github.com/ashon/amux/internal/workspace"
 	"github.com/spf13/cobra"
 )
@@ -45,14 +46,35 @@ var upCmd = &cobra.Command{
 			return err
 		}
 
-		// Write .mcp.json for orchestrator in the config directory
+		// Write .mcp.json for user's local claude session (registers as "user")
 		configDir := filepath.Dir(cfgPath)
 		sp := daemon.ExpandSocketPath(socketPath)
-		if err := workspace.WriteMCPConfig(configDir, "orchestrator", sp); err != nil {
-			return fmt.Errorf("write orchestrator mcp config: %w", err)
+		if err := workspace.WriteMCPConfig(configDir, "user", sp); err != nil {
+			return fmt.Errorf("write user mcp config: %w", err)
 		}
-		fmt.Printf("\nOrchestrator: %s/.mcp.json configured\n", configDir)
-		fmt.Println("Run 'claude' from this directory to act as orchestrator.")
+
+		// Create orchestrator in ~/.amux/orchestrator
+		home, _ := os.UserHomeDir()
+		orchDir := filepath.Join(home, ".amux", "orchestrator")
+		os.MkdirAll(orchDir, 0o755)
+		os.MkdirAll(filepath.Join(orchDir, ".claude"), 0o755) // pre-create to skip trust prompt
+
+		if !tmux.SessionExists("orchestrator") {
+			if err := workspace.WriteMCPConfig(orchDir, "orchestrator", sp); err != nil {
+				return fmt.Errorf("write orchestrator mcp config: %w", err)
+			}
+			if err := workspace.WriteOrchestratorPrompt(orchDir, cfg); err != nil {
+				return fmt.Errorf("write orchestrator prompt: %w", err)
+			}
+			if err := tmux.CreateSessionWithCommand("orchestrator", orchDir, "claude --dangerously-skip-permissions --continue || claude --dangerously-skip-permissions"); err != nil {
+				return fmt.Errorf("create orchestrator session: %w", err)
+			}
+			fmt.Printf("\nOrchestrator: started (~/.amux/orchestrator)\n")
+		} else {
+			fmt.Printf("\nOrchestrator: already running\n")
+		}
+
+		fmt.Println("User session: run 'claude' from this directory to interact as 'user'.")
 		return nil
 	},
 }

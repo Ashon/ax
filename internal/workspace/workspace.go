@@ -41,17 +41,20 @@ func (m *Manager) Create(name string, ws config.Workspace) error {
 	if tmux.SessionExists(name) {
 		return fmt.Errorf("tmux session %q already exists", tmux.SessionName(name))
 	}
-	if err := tmux.CreateSession(name, ws.Dir, ws.Shell); err != nil {
-		return fmt.Errorf("create tmux session: %w", err)
-	}
-
-	// Auto-start agent (default: claude --dangerously-skip-permissions)
+	// Determine agent command (runs directly as tmux session command — no shell visible)
 	agent := ws.Agent
 	if agent == "" {
-		agent = "claude --dangerously-skip-permissions"
+		agent = "claude --dangerously-skip-permissions --continue || claude --dangerously-skip-permissions"
 	}
+
 	if agent != "none" {
-		tmux.SendKeys(name, agent)
+		if err := tmux.CreateSessionWithCommand(name, ws.Dir, agent); err != nil {
+			return fmt.Errorf("create tmux session: %w", err)
+		}
+	} else {
+		if err := tmux.CreateSession(name, ws.Dir, ws.Shell); err != nil {
+			return fmt.Errorf("create tmux session: %w", err)
+		}
 	}
 
 	return nil
