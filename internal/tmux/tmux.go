@@ -199,6 +199,28 @@ func WakeWorkspace(workspace, prompt string) error {
 	return nil
 }
 
+// SendRawKey sends literal text to a tmux session without appending Enter.
+// The -l flag prevents tmux from interpreting key names.
+func SendRawKey(sessionName, key string) error {
+	cmd := exec.Command("tmux", "send-keys", "-t", sessionName, "-l", key)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("tmux send-keys: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+// SendSpecialKeyToSession sends named keys (Enter, Escape, C-c, etc.)
+// to a tmux session by session name (not workspace name).
+func SendSpecialKeyToSession(sessionName string, keys ...string) error {
+	args := []string{"send-keys", "-t", sessionName}
+	args = append(args, keys...)
+	cmd := exec.Command("tmux", args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("tmux send-keys: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
 func isInsideTmux() bool {
 	return os.Getenv("TMUX") != ""
 }
