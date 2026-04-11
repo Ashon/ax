@@ -15,16 +15,16 @@ builds:
 archives:
   - format: tar.gz
 
-brews:
-  - name: ax
-    homepage: "https://github.com/ashon/ax"
-    description: "Multi-agent LLM workspace manager built on tmux"
-    dependencies:
-      - name: tmux
-    repository:
-      owner: Ashon
-      name: homebrew-tap
-      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
-    commit_author:
-      name: goreleaserbot
-      email: goreleaserbot@users.noreply.github.com
+# brews:
+#   - name: ax
+#     homepage: "https://github.com/ashon/ax"
+#     description: "Multi-agent LLM workspace manager built on tmux"
+#     dependencies:
+#       - name: tmux
+#     repository:
+#       owner: Ashon
+#       name: homebrew-tap
+#       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+#     commit_author:
+#       name: goreleaserbot
+#       email: goreleaserbot@users.noreply.github.com
