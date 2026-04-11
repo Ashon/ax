@@ -11,9 +11,9 @@ import (
 )
 
 const (
-	DefaultConfigDir  = ".amux"
+	DefaultConfigDir  = ".ax"
 	DefaultConfigFile = "config.yaml"
-	LegacyConfigFile  = "amux.yaml"
+	LegacyConfigFile  = "ax.yaml"
 )
 
 type Config struct {
@@ -49,7 +49,7 @@ func loadRecursive(path string, seen map[string]bool) (*Config, error) {
 		return nil, fmt.Errorf("resolve config path: %w", err)
 	}
 	if seen[path] {
-		return nil, fmt.Errorf("cyclic amux children reference detected at %s", path)
+		return nil, fmt.Errorf("cyclic ax children reference detected at %s", path)
 	}
 	seen[path] = true
 	defer delete(seen, path)
@@ -143,7 +143,7 @@ func FindConfigFile() (string, error) {
 		dir = parent
 	}
 
-	return "", fmt.Errorf(".amux/config.yaml or %s not found (searched from current directory upward)", LegacyConfigFile)
+	return "", fmt.Errorf(".ax/config.yaml or %s not found (searched from current directory upward)", LegacyConfigFile)
 }
 
 func DefaultConfig(projectName string) *Config {
@@ -192,7 +192,7 @@ func ConfigPathInDir(dir string) (string, error) {
 	if path, ok := findConfigInDir(dir); ok {
 		return path, nil
 	}
-	return "", fmt.Errorf(".amux/config.yaml or %s not found in %s", LegacyConfigFile, dir)
+	return "", fmt.Errorf(".ax/config.yaml or %s not found in %s", LegacyConfigFile, dir)
 }
 
 func ConfigRootDir(path string) string {

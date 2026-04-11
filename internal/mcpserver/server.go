@@ -5,7 +5,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/ashon/amux/internal/daemon"
+	"github.com/ashon/ax/internal/daemon"
 	"github.com/mark3labs/mcp-go/server"
 )
 
@@ -15,7 +15,7 @@ func Run(workspace, socketPath, configPath string) error {
 		socketPath = daemon.DefaultSocketPath
 	}
 
-	logger := log.New(os.Stderr, fmt.Sprintf("[amux-mcp:%s] ", workspace), log.LstdFlags)
+	logger := log.New(os.Stderr, fmt.Sprintf("[ax-mcp:%s] ", workspace), log.LstdFlags)
 
 	// Connect to daemon
 	client := NewDaemonClient(socketPath, workspace)
@@ -28,13 +28,13 @@ func Run(workspace, socketPath, configPath string) error {
 
 	// Create MCP server
 	srv := server.NewMCPServer(
-		"amux",
+		"ax",
 		"0.1.0",
 		server.WithToolCapabilities(true),
 		server.WithInstructions(fmt.Sprintf(
-			"You are the %q workspace agent in an amux multi-agent environment. "+
+			"You are the %q workspace agent in an ax multi-agent environment. "+
 				"Use these tools to coordinate with other workspace agents. "+
-				"Call list_agents to inspect configured agents from the active amux config, call list_workspaces to see who is currently active, and read_messages periodically "+
+				"Call list_agents to inspect configured agents from the active ax config, call list_workspaces to see who is currently active, and read_messages periodically "+
 				"to check for incoming messages from other agents.",
 			workspace,
 		)),

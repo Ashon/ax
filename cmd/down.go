@@ -9,10 +9,10 @@ import (
 	"os"
 	"syscall"
 
-	"github.com/ashon/amux/internal/config"
-	"github.com/ashon/amux/internal/daemon"
-	"github.com/ashon/amux/internal/tmux"
-	"github.com/ashon/amux/internal/workspace"
+	"github.com/ashon/ax/internal/config"
+	"github.com/ashon/ax/internal/daemon"
+	"github.com/ashon/ax/internal/tmux"
+	"github.com/ashon/ax/internal/workspace"
 	"github.com/spf13/cobra"
 )
 

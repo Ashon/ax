@@ -10,18 +10,18 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/ashon/amux/internal/daemon"
+	"github.com/ashon/ax/internal/daemon"
 	"github.com/spf13/cobra"
 )
 
 var daemonCmd = &cobra.Command{
 	Use:   "daemon",
-	Short: "Manage the amux daemon",
+	Short: "Manage the ax daemon",
 }
 
 var daemonStartCmd = &cobra.Command{
 	Use:   "start",
-	Short: "Start the amux daemon",
+	Short: "Start the ax daemon",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -40,7 +40,7 @@ var daemonStartCmd = &cobra.Command{
 
 var daemonStopCmd = &cobra.Command{
 	Use:   "stop",
-	Short: "Stop the amux daemon",
+	Short: "Stop the ax daemon",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		pidPath := filepath.Join(filepath.Dir(daemon.ExpandSocketPath(socketPath)), "daemon.pid")
 		data, err := os.ReadFile(pidPath)

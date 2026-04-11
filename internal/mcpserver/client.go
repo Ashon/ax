@@ -8,12 +8,12 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/ashon/amux/internal/daemon"
-	"github.com/ashon/amux/internal/types"
+	"github.com/ashon/ax/internal/daemon"
+	"github.com/ashon/ax/internal/types"
 	"github.com/google/uuid"
 )
 
-// DaemonClient connects to the amux daemon via Unix socket.
+// DaemonClient connects to the ax daemon via Unix socket.
 type DaemonClient struct {
 	socketPath string
 	workspace  string

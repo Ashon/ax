@@ -1,6 +1,6 @@
 package main
 
-import "github.com/ashon/amux/cmd"
+import "github.com/ashon/ax/cmd"
 
 func main() {
 	cmd.Execute()

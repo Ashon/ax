@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ashon/amux/internal/daemon"
+	"github.com/ashon/ax/internal/daemon"
 )
 
 func startTestDaemon(t *testing.T) (string, context.CancelFunc) {

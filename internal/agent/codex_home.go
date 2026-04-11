@@ -10,13 +10,13 @@ import (
 	"strings"
 )
 
-func PrepareCodexHome(workspace, dir, socketPath, amuxBin, configPath string) (string, error) {
+func PrepareCodexHome(workspace, dir, socketPath, axBin, configPath string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve home dir: %w", err)
 	}
 
-	codexHome := filepath.Join(home, ".amux", "codex", codexHomeKey(workspace, dir))
+	codexHome := filepath.Join(home, ".ax", "codex", codexHomeKey(workspace, dir))
 	if err := os.MkdirAll(codexHome, 0o755); err != nil {
 		return "", fmt.Errorf("create codex home: %w", err)
 	}
@@ -31,13 +31,13 @@ func PrepareCodexHome(workspace, dir, socketPath, amuxBin, configPath string) (s
 	}
 
 	content = upsertKeyInSection(content, fmt.Sprintf("[projects.%s]", strconv.Quote(dir)), "trust_level", `"trusted"`)
-	content = upsertKeyInSection(content, "[mcp_servers.amux]", "command", strconv.Quote(amuxBin))
+	content = upsertKeyInSection(content, "[mcp_servers.ax]", "command", strconv.Quote(axBin))
 	args := fmt.Sprintf(`["mcp-server","--workspace",%s,"--socket",%s`, strconv.Quote(workspace), strconv.Quote(socketPath))
 	if configPath != "" {
 		args += fmt.Sprintf(`,"--config",%s`, strconv.Quote(configPath))
 	}
 	args += `]`
-	content = upsertKeyInSection(content, "[mcp_servers.amux]", "args", args)
+	content = upsertKeyInSection(content, "[mcp_servers.ax]", "args", args)
 
 	if err := os.WriteFile(filepath.Join(codexHome, "config.toml"), []byte(ensureTrailingNewline(content)), 0o644); err != nil {
 		return "", fmt.Errorf("write codex config: %w", err)

@@ -20,8 +20,8 @@ var supportedRuntimeNames = []string{
 type Runtime interface {
 	Name() string
 	InstructionFile() string
-	Launch(dir, workspace, socketPath, amuxBin, configPath string) error
-	UserCommand(dir, workspace, socketPath, amuxBin, configPath string) (string, error)
+	Launch(dir, workspace, socketPath, axBin, configPath string) error
+	UserCommand(dir, workspace, socketPath, axBin, configPath string) (string, error)
 }
 
 func NormalizeRuntime(name string) string {
@@ -60,10 +60,10 @@ func CurrentDir() (string, error) {
 	return dir, nil
 }
 
-func ResolveAmuxBinary() (string, error) {
+func ResolveAxBinary() (string, error) {
 	path, err := os.Executable()
 	if err != nil {
-		return "", fmt.Errorf("resolve amux binary: %w", err)
+		return "", fmt.Errorf("resolve ax binary: %w", err)
 	}
 	return path, nil
 }
@@ -85,17 +85,17 @@ func Run(name, workspace, socketPath, configPath string) error {
 	if err != nil {
 		return err
 	}
-	amuxBin, err := ResolveAmuxBinary()
+	axBin, err := ResolveAxBinary()
 	if err != nil {
 		return err
 	}
-	return runtime.Launch(dir, workspace, socketPath, amuxBin, configPath)
+	return runtime.Launch(dir, workspace, socketPath, axBin, configPath)
 }
 
-func BuildUserCommand(name, dir, workspace, socketPath, amuxBin, configPath string) (string, error) {
+func BuildUserCommand(name, dir, workspace, socketPath, axBin, configPath string) (string, error) {
 	runtime, err := Get(name)
 	if err != nil {
 		return "", err
 	}
-	return runtime.UserCommand(filepath.Clean(dir), workspace, socketPath, amuxBin, configPath)
+	return runtime.UserCommand(filepath.Clean(dir), workspace, socketPath, axBin, configPath)
 }

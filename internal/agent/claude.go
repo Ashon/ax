@@ -15,7 +15,7 @@ func (claudeRuntime) InstructionFile() string {
 	return "CLAUDE.md"
 }
 
-func (claudeRuntime) Launch(dir, workspace, socketPath, amuxBin, configPath string) error {
+func (claudeRuntime) Launch(dir, workspace, socketPath, axBin, configPath string) error {
 	cmd := exec.Command("claude", "--dangerously-skip-permissions", "--continue")
 	cmd.Dir = dir
 	cmd.Stdin = os.Stdin
@@ -33,6 +33,6 @@ func (claudeRuntime) Launch(dir, workspace, socketPath, amuxBin, configPath stri
 	return fallback.Run()
 }
 
-func (claudeRuntime) UserCommand(dir, workspace, socketPath, amuxBin, configPath string) (string, error) {
+func (claudeRuntime) UserCommand(dir, workspace, socketPath, axBin, configPath string) (string, error) {
 	return "claude", nil
 }

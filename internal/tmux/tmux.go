@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-const SessionPrefix = "amux-"
+const SessionPrefix = "ax-"
 
 func SessionName(workspace string) string {
 	return SessionPrefix + encodeWorkspaceName(workspace)
@@ -176,7 +176,7 @@ func InterruptWorkspace(workspace string) error {
 	return SendSpecialKeys(workspace, "Escape")
 }
 
-// WakeWorkspace nudges a Codex TUI session to process queued amux messages.
+// WakeWorkspace nudges a Codex TUI session to process queued ax messages.
 // Escape/C-u clears any draft or multiline composer state before the prompt is injected.
 func WakeWorkspace(workspace, prompt string) error {
 	name := SessionName(workspace)

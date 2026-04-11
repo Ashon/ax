@@ -1,7 +1,7 @@
 package cmd
 
 import (
-	"github.com/ashon/amux/internal/mcpserver"
+	"github.com/ashon/ax/internal/mcpserver"
 	"github.com/spf13/cobra"
 )
 

@@ -12,7 +12,7 @@ import (
 	"sync"
 )
 
-const DefaultSocketPath = "~/.local/state/amux/daemon.sock"
+const DefaultSocketPath = "~/.local/state/ax/daemon.sock"
 
 func ExpandSocketPath(path string) string {
 	if len(path) > 0 && path[0] == '~' {
@@ -42,7 +42,7 @@ func New(socketPath string) *Daemon {
 		queue:        NewMessageQueue(),
 		history:      NewHistory(stateDir, 500),
 		sharedValues: make(map[string]string),
-		logger:       log.New(os.Stderr, "[amux-daemon] ", log.LstdFlags),
+		logger:       log.New(os.Stderr, "[ax-daemon] ", log.LstdFlags),
 	}
 }
 

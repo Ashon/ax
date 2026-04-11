@@ -11,17 +11,17 @@ import (
 
 	"path/filepath"
 
-	"github.com/ashon/amux/internal/agent"
-	"github.com/ashon/amux/internal/config"
-	"github.com/ashon/amux/internal/daemon"
-	"github.com/ashon/amux/internal/tmux"
-	"github.com/ashon/amux/internal/workspace"
+	"github.com/ashon/ax/internal/agent"
+	"github.com/ashon/ax/internal/config"
+	"github.com/ashon/ax/internal/daemon"
+	"github.com/ashon/ax/internal/tmux"
+	"github.com/ashon/ax/internal/workspace"
 	"github.com/spf13/cobra"
 )
 
 var upCmd = &cobra.Command{
 	Use:   "up",
-	Short: "Start daemon and all workspaces defined in amux config",
+	Short: "Start daemon and all workspaces defined in ax config",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfgPath, err := resolveConfigPath()
 		if err != nil {
@@ -33,7 +33,7 @@ var upCmd = &cobra.Command{
 		}
 		exe, err := os.Executable()
 		if err != nil {
-			return fmt.Errorf("resolve amux binary: %w", err)
+			return fmt.Errorf("resolve ax binary: %w", err)
 		}
 
 		fmt.Printf("Project: %s\n\n", cfg.Project)
@@ -66,9 +66,9 @@ var upCmd = &cobra.Command{
 			return fmt.Errorf("build codex user command: %w", err)
 		}
 
-		// Create orchestrator in ~/.amux/orchestrator
+		// Create orchestrator in ~/.ax/orchestrator
 		home, _ := os.UserHomeDir()
-		orchDir := filepath.Join(home, ".amux", "orchestrator")
+		orchDir := filepath.Join(home, ".ax", "orchestrator")
 		os.MkdirAll(orchDir, 0o755)
 		os.MkdirAll(filepath.Join(orchDir, ".claude"), 0o755) // pre-create to skip trust prompt
 
@@ -94,7 +94,7 @@ var upCmd = &cobra.Command{
 			}); err != nil {
 				return fmt.Errorf("create orchestrator session: %w", err)
 			}
-			fmt.Printf("\nOrchestrator: started (~/.amux/orchestrator, runtime: %s)\n", orchRuntime)
+			fmt.Printf("\nOrchestrator: started (~/.ax/orchestrator, runtime: %s)\n", orchRuntime)
 		} else {
 			fmt.Printf("\nOrchestrator: already running\n")
 		}

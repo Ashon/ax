@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ashon/amux/internal/agent"
-	"github.com/ashon/amux/internal/config"
-	"github.com/ashon/amux/internal/tmux"
-	"github.com/ashon/amux/internal/types"
+	"github.com/ashon/ax/internal/agent"
+	"github.com/ashon/ax/internal/config"
+	"github.com/ashon/ax/internal/tmux"
+	"github.com/ashon/ax/internal/types"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -20,7 +20,7 @@ func registerTools(srv *server.MCPServer, client *DaemonClient, configPath strin
 	// list_agents
 	srv.AddTool(
 		mcp.NewTool("list_agents",
-			mcp.WithDescription("List configured amux agents from the active amux config, enriched with current active status when available. Supports filtering to help find a specific agent such as a portfolio development team agent."),
+			mcp.WithDescription("List configured ax agents from the active ax config, enriched with current active status when available. Supports filtering to help find a specific agent such as a portfolio development team agent."),
 			mcp.WithString("query", mcp.Description("Optional case-insensitive search text matched against agent name, description, runtime, command, and instructions preview")),
 			mcp.WithBoolean("active_only", mcp.Description("When true, return only currently active agents")),
 		),
@@ -30,7 +30,7 @@ func registerTools(srv *server.MCPServer, client *DaemonClient, configPath strin
 	// inspect_agent
 	srv.AddTool(
 		mcp.NewTool("inspect_agent",
-			mcp.WithDescription("Ask a specific amux agent to summarize its current operating state. Useful after list_agents finds a target such as a portfolio development team agent."),
+			mcp.WithDescription("Ask a specific ax agent to summarize its current operating state. Useful after list_agents finds a target such as a portfolio development team agent."),
 			mcp.WithString("name", mcp.Required(), mcp.Description("Configured agent/workspace name")),
 			mcp.WithString("question", mcp.Description("Optional custom question. Defaults to asking for current operating status, recent work, risks, and key metrics.")),
 			mcp.WithNumber("timeout", mcp.Description("Max seconds to wait for reply (default: 120)")),
@@ -161,7 +161,7 @@ func listAgentsHandler(client *DaemonClient, configPath string) server.ToolHandl
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		cfgPath, cfg, err := loadToolConfig(configPath)
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Failed to load amux config: %v", err)), nil
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to load ax config: %v", err)), nil
 		}
 
 		activeWorkspaces, err := client.ListWorkspaces()
@@ -243,7 +243,7 @@ func inspectAgentHandler(client *DaemonClient, configPath string) server.ToolHan
 
 		cfgPath, cfg, err := loadToolConfig(configPath)
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Failed to load amux config: %v", err)), nil
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to load ax config: %v", err)), nil
 		}
 
 		ws, ok := cfg.Workspaces[name]
@@ -255,7 +255,7 @@ func inspectAgentHandler(client *DaemonClient, configPath string) server.ToolHan
 			question = "현재 운영 상태를 간단히 요약해줘. 담당 역할, 최근 작업, 대기 중인 이슈, 핵심 지표나 리스크가 있으면 함께 알려줘. 포트폴리오 개발팀을 맡고 있다면 담당 서비스나 기능, 최근 변경사항, 남은 개발 과제, 배포 또는 운영 리스크를 짧게 포함해줘."
 		}
 
-		fullMessage := question + "\n\n[amux] 작업 완료 후 반드시 send_message(to=\"" + client.workspace + "\") 로 결과를 보내주세요."
+		fullMessage := question + "\n\n[ax] 작업 완료 후 반드시 send_message(to=\"" + client.workspace + "\") 로 결과를 보내주세요."
 
 		_, err = client.SendMessage(name, fullMessage)
 		if err != nil {
@@ -512,7 +512,7 @@ func requestHandler(client *DaemonClient) server.ToolHandlerFunc {
 		timeout := int(request.GetFloat("timeout", 120))
 
 		// Include reply instruction in the message
-		fullMessage := message + "\n\n[amux] 작업 완료 후 반드시 send_message(to=\"" + client.workspace + "\") 로 결과를 보내주세요."
+		fullMessage := message + "\n\n[ax] 작업 완료 후 반드시 send_message(to=\"" + client.workspace + "\") 로 결과를 보내주세요."
 
 		// Send message via daemon
 		_, err := client.SendMessage(to, fullMessage)

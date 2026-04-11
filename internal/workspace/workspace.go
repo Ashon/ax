@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/ashon/amux/internal/agent"
-	"github.com/ashon/amux/internal/config"
-	"github.com/ashon/amux/internal/daemon"
-	"github.com/ashon/amux/internal/tmux"
+	"github.com/ashon/ax/internal/agent"
+	"github.com/ashon/ax/internal/config"
+	"github.com/ashon/ax/internal/daemon"
+	"github.com/ashon/ax/internal/tmux"
 )
 
 type Manager struct {
@@ -49,7 +49,7 @@ func (m *Manager) Create(name string, ws config.Workspace) error {
 	if tmux.SessionExists(name) {
 		return fmt.Errorf("tmux session %q already exists", tmux.SessionName(name))
 	}
-	// Use an explicit agent command when configured, otherwise dispatch through amux.
+	// Use an explicit agent command when configured, otherwise dispatch through ax.
 	if ws.Agent != "" {
 		if ws.Agent == "none" {
 			if err := tmux.CreateSession(name, ws.Dir, ws.Shell); err != nil {
@@ -63,12 +63,12 @@ func (m *Manager) Create(name string, ws config.Workspace) error {
 		return nil
 	}
 
-	amuxBin, err := amuxBinaryPath()
+	axBin, err := axBinaryPath()
 	if err != nil {
-		return fmt.Errorf("resolve amux binary: %w", err)
+		return fmt.Errorf("resolve ax binary: %w", err)
 	}
 	return tmux.CreateSessionWithArgs(name, ws.Dir, []string{
-		amuxBin,
+		axBin,
 		"run-agent",
 		"--runtime", runtime,
 		"--workspace", name,
@@ -85,7 +85,7 @@ func (m *Manager) Destroy(name string, dir string) error {
 		}
 	}
 
-	// Remove .mcp.json entry and amux instructions
+	// Remove .mcp.json entry and ax instructions
 	if dir != "" {
 		RemoveMCPConfig(dir)
 		RemoveInstructions(dir)

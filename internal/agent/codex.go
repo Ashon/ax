@@ -15,8 +15,8 @@ func (codexRuntime) InstructionFile() string {
 	return "AGENTS.md"
 }
 
-func (codexRuntime) Launch(dir, workspace, socketPath, amuxBin, configPath string) error {
-	codexHome, err := PrepareCodexHome(workspace, dir, socketPath, amuxBin, configPath)
+func (codexRuntime) Launch(dir, workspace, socketPath, axBin, configPath string) error {
+	codexHome, err := PrepareCodexHome(workspace, dir, socketPath, axBin, configPath)
 	if err != nil {
 		return err
 	}
@@ -29,8 +29,8 @@ func (codexRuntime) Launch(dir, workspace, socketPath, amuxBin, configPath strin
 	return cmd.Run()
 }
 
-func (codexRuntime) UserCommand(dir, workspace, socketPath, amuxBin, configPath string) (string, error) {
-	codexHome, err := PrepareCodexHome(workspace, dir, socketPath, amuxBin, configPath)
+func (codexRuntime) UserCommand(dir, workspace, socketPath, axBin, configPath string) (string, error) {
+	codexHome, err := PrepareCodexHome(workspace, dir, socketPath, axBin, configPath)
 	if err != nil {
 		return "", err
 	}

@@ -19,9 +19,9 @@ type mcpServerEntry struct {
 }
 
 func WriteMCPConfig(dir, workspace, socketPath, configPath string) error {
-	amuxBin, err := amuxBinaryPath()
+	axBin, err := axBinaryPath()
 	if err != nil {
-		return fmt.Errorf("resolve amux binary: %w", err)
+		return fmt.Errorf("resolve ax binary: %w", err)
 	}
 
 	args := []string{"mcp-server", "--workspace", workspace, "--socket", socketPath}
@@ -31,8 +31,8 @@ func WriteMCPConfig(dir, workspace, socketPath, configPath string) error {
 
 	cfg := mcpConfig{
 		MCPServers: map[string]mcpServerEntry{
-			"amux": {
-				Command: amuxBin,
+			"ax": {
+				Command: axBin,
 				Args:    args,
 			},
 		},
@@ -44,7 +44,7 @@ func WriteMCPConfig(dir, workspace, socketPath, configPath string) error {
 	if existing, err := os.ReadFile(path); err == nil {
 		var existingCfg mcpConfig
 		if json.Unmarshal(existing, &existingCfg) == nil && existingCfg.MCPServers != nil {
-			existingCfg.MCPServers["amux"] = cfg.MCPServers["amux"]
+			existingCfg.MCPServers["ax"] = cfg.MCPServers["ax"]
 			cfg = existingCfg
 		}
 	}
@@ -70,7 +70,7 @@ func RemoveMCPConfig(dir string) error {
 		return nil
 	}
 
-	delete(cfg.MCPServers, "amux")
+	delete(cfg.MCPServers, "ax")
 
 	if len(cfg.MCPServers) == 0 {
 		return os.Remove(path)
@@ -80,6 +80,6 @@ func RemoveMCPConfig(dir string) error {
 	return os.WriteFile(path, append(newData, '\n'), 0o644)
 }
 
-func amuxBinaryPath() (string, error) {
+func axBinaryPath() (string, error) {
 	return os.Executable()
 }

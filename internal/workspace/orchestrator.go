@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/ashon/amux/internal/agent"
-	"github.com/ashon/amux/internal/config"
+	"github.com/ashon/ax/internal/agent"
+	"github.com/ashon/ax/internal/config"
 )
 
 const OrchestratorInstructions = "" // kept for backwards compat, use WriteOrchestratorPrompt instead
@@ -17,8 +17,8 @@ const OrchestratorInstructions = "" // kept for backwards compat, use WriteOrche
 func WriteOrchestratorPrompt(orchDir string, cfg *config.Config, runtime string) error {
 	var sb strings.Builder
 
-	sb.WriteString("# amux orchestrator\n\n")
-	sb.WriteString("당신은 amux 멀티 에이전트 시스템의 오케스트레이터입니다.\n\n")
+	sb.WriteString("# ax orchestrator\n\n")
+	sb.WriteString("당신은 ax 멀티 에이전트 시스템의 오케스트레이터입니다.\n\n")
 
 	sb.WriteString("## 역할\n")
 	sb.WriteString("- user로부터 작업 요청을 받아 적절한 워크스페이스 에이전트에게 분배합니다.\n")

@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ashon/amux/internal/mcpserver"
-	"github.com/ashon/amux/internal/tmux"
+	"github.com/ashon/ax/internal/mcpserver"
+	"github.com/ashon/ax/internal/tmux"
 	"github.com/spf13/cobra"
 )
 

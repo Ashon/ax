@@ -6,12 +6,12 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/ashon/amux/internal/agent"
+	"github.com/ashon/ax/internal/agent"
 )
 
 const (
-	amuxMarkerStart = "<!-- amux:instructions:start -->"
-	amuxMarkerEnd   = "<!-- amux:instructions:end -->"
+	axMarkerStart = "<!-- ax:instructions:start -->"
+	axMarkerEnd   = "<!-- ax:instructions:end -->"
 )
 
 func WriteInstructions(dir, workspace, runtime, instructions string) error {
@@ -32,28 +32,28 @@ func WriteInstructions(dir, workspace, runtime, instructions string) error {
 		removeInstructionsFile(path)
 	}
 
-	amuxSection := fmt.Sprintf(`%s
-## amux workspace: %s
+	axSection := fmt.Sprintf(`%s
+## ax workspace: %s
 
 %s
-%s`, amuxMarkerStart, workspace, strings.TrimSpace(instructions), amuxMarkerEnd)
+%s`, axMarkerStart, workspace, strings.TrimSpace(instructions), axMarkerEnd)
 
 	existing, err := os.ReadFile(targetPath)
 	if err != nil {
 		// No existing file — write fresh
-		return os.WriteFile(targetPath, []byte(amuxSection+"\n"), 0o644)
+		return os.WriteFile(targetPath, []byte(axSection+"\n"), 0o644)
 	}
 
 	content := string(existing)
-	startIdx := strings.Index(content, amuxMarkerStart)
-	endIdx := strings.Index(content, amuxMarkerEnd)
+	startIdx := strings.Index(content, axMarkerStart)
+	endIdx := strings.Index(content, axMarkerEnd)
 
 	if startIdx >= 0 && endIdx >= 0 {
-		// Replace existing amux section
-		content = content[:startIdx] + amuxSection + content[endIdx+len(amuxMarkerEnd):]
+		// Replace existing ax section
+		content = content[:startIdx] + axSection + content[endIdx+len(axMarkerEnd):]
 	} else {
-		// Append amux section
-		content = strings.TrimRight(content, "\n") + "\n\n" + amuxSection + "\n"
+		// Append ax section
+		content = strings.TrimRight(content, "\n") + "\n\n" + axSection + "\n"
 	}
 
 	return os.WriteFile(targetPath, []byte(content), 0o644)
@@ -77,16 +77,16 @@ func removeInstructionsFile(path string) {
 	}
 
 	content := string(data)
-	startIdx := strings.Index(content, amuxMarkerStart)
-	endIdx := strings.Index(content, amuxMarkerEnd)
+	startIdx := strings.Index(content, axMarkerStart)
+	endIdx := strings.Index(content, axMarkerEnd)
 
 	if startIdx < 0 || endIdx < 0 {
 		return
 	}
 
-	// Remove the amux section and surrounding blank lines
+	// Remove the ax section and surrounding blank lines
 	before := strings.TrimRight(content[:startIdx], "\n")
-	after := strings.TrimLeft(content[endIdx+len(amuxMarkerEnd):], "\n")
+	after := strings.TrimLeft(content[endIdx+len(axMarkerEnd):], "\n")
 
 	if before == "" && after == "" {
 		os.Remove(path)

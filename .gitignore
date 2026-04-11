@@ -1,3 +1,4 @@
-amux
+ax
 *.exe
 .DS_Store
+dist/

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/ashon/amux/internal/mcpserver"
+	"github.com/ashon/ax/internal/mcpserver"
 	"github.com/spf13/cobra"
 )
 

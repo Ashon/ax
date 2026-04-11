@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ashon/amux/internal/types"
+	"github.com/ashon/ax/internal/types"
 )
 
 type connEntry struct {

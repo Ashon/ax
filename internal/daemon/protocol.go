@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/ashon/amux/internal/types"
+	"github.com/ashon/ax/internal/types"
 )
 
 type MessageType string

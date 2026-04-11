@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/ashon/amux/internal/config"
+	"github.com/ashon/ax/internal/config"
 )
 
 func TestLoadMergesChildrenRecursively(t *testing.T) {
@@ -17,7 +17,7 @@ func TestLoadMergesChildrenRecursively(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 
-	writeConfig(t, filepath.Join(grandChildDir, ".amux", "config.yaml"), `
+	writeConfig(t, filepath.Join(grandChildDir, ".ax", "config.yaml"), `
 project: monitoring
 workspaces:
   alerts:
@@ -25,7 +25,7 @@ workspaces:
     description: alerts agent
 `)
 
-	writeConfig(t, filepath.Join(childDir, ".amux", "config.yaml"), `
+	writeConfig(t, filepath.Join(childDir, ".ax", "config.yaml"), `
 project: invest
 children:
   mon:
@@ -36,7 +36,7 @@ workspaces:
     description: research agent
 `)
 
-	rootConfigPath := filepath.Join(rootDir, ".amux", "config.yaml")
+	rootConfigPath := filepath.Join(rootDir, ".ax", "config.yaml")
 	writeConfig(t, rootConfigPath, `
 project: root
 children:
@@ -83,14 +83,14 @@ func TestLoadRejectsCyclicChildren(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 
-	rootConfigPath := filepath.Join(rootDir, ".amux", "config.yaml")
+	rootConfigPath := filepath.Join(rootDir, ".ax", "config.yaml")
 	writeConfig(t, rootConfigPath, `
 children:
   child:
     dir: ./child
 `)
 
-	writeConfig(t, filepath.Join(childDir, ".amux", "config.yaml"), `
+	writeConfig(t, filepath.Join(childDir, ".ax", "config.yaml"), `
 children:
   root:
     dir: ..

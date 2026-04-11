@@ -5,13 +5,13 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/ashon/amux/internal/config"
+	"github.com/ashon/ax/internal/config"
 	"github.com/spf13/cobra"
 )
 
 var initCmd = &cobra.Command{
 	Use:   "init",
-	Short: "Initialize .amux/config.yaml in the current directory",
+	Short: "Initialize .ax/config.yaml in the current directory",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		dir := mustGetwd()
 		path := config.DefaultConfigPath(dir)
@@ -30,7 +30,7 @@ var initCmd = &cobra.Command{
 		}
 
 		fmt.Printf("Created %s\n", path)
-		fmt.Println("Edit it to define your workspaces, then run: amux up")
+		fmt.Println("Edit it to define your workspaces, then run: ax up")
 		return nil
 	},
 }

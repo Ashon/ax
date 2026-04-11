@@ -13,10 +13,10 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/ashon/amux/internal/agent"
-	"github.com/ashon/amux/internal/config"
-	"github.com/ashon/amux/internal/daemon"
-	"github.com/ashon/amux/internal/tmux"
+	"github.com/ashon/ax/internal/agent"
+	"github.com/ashon/ax/internal/config"
+	"github.com/ashon/ax/internal/daemon"
+	"github.com/ashon/ax/internal/tmux"
 	"github.com/spf13/cobra"
 )
 

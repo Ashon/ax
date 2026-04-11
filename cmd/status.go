@@ -3,14 +3,14 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/ashon/amux/internal/daemon"
-	"github.com/ashon/amux/internal/tmux"
+	"github.com/ashon/ax/internal/daemon"
+	"github.com/ashon/ax/internal/tmux"
 	"github.com/spf13/cobra"
 )
 
 var statusCmd = &cobra.Command{
 	Use:   "status",
-	Short: "Show overall amux status",
+	Short: "Show overall ax status",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		sp := daemon.ExpandSocketPath(socketPath)
 

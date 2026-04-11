@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/ashon/amux/internal/config"
-	"github.com/ashon/amux/internal/tmux"
-	"github.com/ashon/amux/internal/workspace"
+	"github.com/ashon/ax/internal/config"
+	"github.com/ashon/ax/internal/tmux"
+	"github.com/ashon/ax/internal/workspace"
 	"github.com/spf13/cobra"
 )
 
@@ -39,7 +39,7 @@ var wsCreateCmd = &cobra.Command{
 		}
 
 		fmt.Printf("Workspace %q created (session: %s, dir: %s)\n", name, tmux.SessionName(name), dir)
-		fmt.Printf("Attach with: amux workspace attach %s\n", name)
+		fmt.Printf("Attach with: ax workspace attach %s\n", name)
 		return nil
 	},
 }
