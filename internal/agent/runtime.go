@@ -77,11 +77,15 @@ func InstructionFile(name string) (string, error) {
 }
 
 func Run(name, workspace, socketPath, configPath string) error {
-	runtime, err := Get(name)
+	dir, err := CurrentDir()
 	if err != nil {
 		return err
 	}
-	dir, err := CurrentDir()
+	return RunInDir(name, dir, workspace, socketPath, configPath)
+}
+
+func RunInDir(name, dir, workspace, socketPath, configPath string) error {
+	runtime, err := Get(name)
 	if err != nil {
 		return err
 	}
