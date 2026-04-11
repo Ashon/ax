@@ -9,20 +9,37 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var initGlobal bool
+
 var initCmd = &cobra.Command{
 	Use:   "init",
-	Short: "Initialize .ax/config.yaml in the current directory",
+	Short: "Initialize .ax/config.yaml in the current directory or globally",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		dir := mustGetwd()
-		path := config.DefaultConfigPath(dir)
+		var dir, path, projectName string
+
+		if initGlobal {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return fmt.Errorf("resolve home directory: %w", err)
+			}
+			dir = home
+			path = config.DefaultConfigPath(dir)
+			projectName = "global"
+		} else {
+			dir = mustGetwd()
+			path = config.DefaultConfigPath(dir)
+			projectName = filepath.Base(dir)
+		}
+
 		if _, err := os.Stat(path); err == nil {
 			return fmt.Errorf("%s already exists", path)
 		}
-		if legacyPath, ok := configPathConflict(dir); ok {
-			return fmt.Errorf("legacy config already exists at %s", legacyPath)
+		if !initGlobal {
+			if legacyPath, ok := configPathConflict(dir); ok {
+				return fmt.Errorf("legacy config already exists at %s", legacyPath)
+			}
 		}
 
-		projectName := filepath.Base(dir)
 		cfg := config.DefaultConfig(projectName)
 
 		if err := cfg.Save(path); err != nil {
@@ -61,5 +78,6 @@ func configPathExists(path string) (string, bool) {
 }
 
 func init() {
+	initCmd.Flags().BoolVarP(&initGlobal, "global", "g", false, "initialize global config at ~/.ax/config.yaml")
 	rootCmd.AddCommand(initCmd)
 }
