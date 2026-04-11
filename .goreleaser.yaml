@@ -1,0 +1,30 @@
+version: 2
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X github.com/ashon/ax/cmd.version={{.Version}}
+
+archives:
+  - format: tar.gz
+
+brews:
+  - name: ax
+    homepage: "https://github.com/ashon/ax"
+    description: "Multi-agent LLM workspace manager built on tmux"
+    dependencies:
+      - name: tmux
+    repository:
+      owner: Ashon
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    commit_author:
+      name: goreleaserbot
+      email: goreleaserbot@users.noreply.github.com
