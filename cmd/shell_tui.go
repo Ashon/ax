@@ -106,28 +106,34 @@ func (m shellModel) handleInputMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m shellModel) handleControlMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	m.mode = modeInput
-
 	switch msg.String() {
-	case "q":
-		return m, tea.Quit
+	// Navigation — stay in control mode
 	case "k", "up":
 		m.selected = moveSelection(m.selected, m.sessions, -1)
 	case "j", "down":
 		m.selected = moveSelection(m.selected, m.sessions, 1)
+
+	// Actions — execute and return to input mode
+	case "q":
+		return m, tea.Quit
 	case "t":
 		m.showStream = !m.showStream
+		m.mode = modeInput
 	case "x":
 		if m.selected < len(m.sessions) {
 			_ = tmux.InterruptWorkspace(m.sessions[m.selected].Workspace)
 		}
+		m.mode = modeInput
 	case "v":
 		if m.selected < len(m.sessions) {
 			m.viewTarget = m.sessions[m.selected].Workspace
 		}
+		m.mode = modeInput
 	case "o":
 		m.viewTarget = "orchestrator"
+		m.mode = modeInput
 	case "ctrl+a":
+		m.mode = modeInput
 		session := m.currentViewSession()
 		if session != "" {
 			return m, func() tea.Msg {
@@ -135,6 +141,10 @@ func (m shellModel) handleControlMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return nil
 			}
 		}
+
+	// Escape or any other key — return to input mode
+	default:
+		m.mode = modeInput
 	}
 	return m, nil
 }
@@ -264,7 +274,7 @@ func (m shellModel) renderHelp() string {
 	if m.mode == modeControl {
 		return modeControlStyle.Render(" [CTRL] ") +
 			lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(
-				"j/k select · v view · o orchestrator · t stream · x interrupt · q quit")
+				"j/k select · v view · o orch · t stream · x interrupt · q quit · esc back")
 	}
 	return modeInputStyle.Render(" [INPUT] ") +
 		lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(
