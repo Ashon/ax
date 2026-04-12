@@ -71,15 +71,18 @@ func (m shellModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sessions, _ = tmux.ListSessions()
 		m.selected = clampSelection(m.selected, m.sessions)
 
-		// Resize the viewed pane's tmux window to match main panel
-		viewSession := m.currentViewSession()
-		if viewSession != "" && m.width > 0 {
-			sideW := watchSidebarWidth
-			mainW := m.width - sideW - 2
-			streamH := messagePaneHeight(m.height, m.showStream)
-			mainH := m.height - streamH - 3
+		// Resize main pane (viewTarget) and preview pane (selected) to match
+		if m.width > 0 {
+			mainW, mainH, previewH := m.layoutHeights()
 			if mainW > 10 && mainH > 5 {
-				resizeTmuxWindow(viewSession, mainW, mainH)
+				if viewSession := m.currentViewSession(); viewSession != "" {
+					resizeTmuxWindow(viewSession, mainW, mainH)
+				}
+			}
+			if previewH > 5 {
+				if previewSession := m.previewSession(); previewSession != "" {
+					resizeTmuxWindow(previewSession, mainW, previewH)
+				}
 			}
 		}
 
@@ -230,6 +233,69 @@ func (m shellModel) currentViewSession() string {
 	return ""
 }
 
+// previewWorkspace returns the workspace name that should be shown in the
+// preview pane, or empty string if no preview should be shown.
+func (m shellModel) previewWorkspace() string {
+	if m.selected >= len(m.sessions) {
+		return ""
+	}
+	ws := m.sessions[m.selected].Workspace
+	if ws == m.viewTarget {
+		return ""
+	}
+	return ws
+}
+
+func (m shellModel) previewSession() string {
+	ws := m.previewWorkspace()
+	if ws == "" {
+		return ""
+	}
+	for _, s := range m.sessions {
+		if s.Workspace == ws {
+			return s.Name
+		}
+	}
+	return ""
+}
+
+// layoutHeights computes the inner dimensions for the main pane and preview
+// pane based on the current terminal size. Returns (mainW, mainH, previewH).
+// previewH is 0 when no preview pane is shown.
+func (m shellModel) layoutHeights() (int, int, int) {
+	sideW := watchSidebarWidth
+	mainW := m.width - sideW - 2 // inner content width
+	streamH := messagePaneHeight(m.height, m.showStream)
+	totalInner := m.height - streamH - 3
+
+	if m.previewWorkspace() == "" {
+		return mainW, totalInner, 0
+	}
+
+	// Split: main = 60%, preview = remaining. Each pane has 2 rows of border.
+	// totalInner is the sum of both panes' inner heights + border overhead.
+	// We allocate outer heights, then subtract borders for inner.
+	outerTotal := totalInner + 2 // total outer rows available for the two stacked panes + their borders
+	mainOuter := (outerTotal * 6) / 10
+	if mainOuter < 7 {
+		mainOuter = 7
+	}
+	previewOuter := outerTotal - mainOuter
+	if previewOuter < 5 {
+		previewOuter = 5
+		mainOuter = outerTotal - previewOuter
+	}
+	mainH := mainOuter - 2
+	previewH := previewOuter - 2
+	if mainH < 3 {
+		mainH = 3
+	}
+	if previewH < 3 {
+		previewH = 3
+	}
+	return mainW, mainH, previewH
+}
+
 func (m shellModel) View() string {
 	if m.width == 0 || len(m.sessions) == 0 {
 		return "Loading... (waiting for sessions)"
@@ -244,15 +310,25 @@ func (m shellModel) View() string {
 	streamH := messagePaneHeight(m.height, m.showStream)
 	contentH := m.height - streamH - 1
 
-	// Sidebar — reuse watch rendering with shell's state
 	sidebar := m.renderSidebar(sideW, contentH)
 
-	// Main pane — show viewTarget's capture
-	var mainContent string
-	content := m.captures[m.viewTarget]
-	mainContent = m.renderMain(m.viewTarget, content, mainW, contentH)
+	// Right column: main pane (+ optional preview pane below)
+	var rightCol string
+	previewWs := m.previewWorkspace()
+	if previewWs == "" {
+		mainContent := m.renderMain(m.viewTarget, m.captures[m.viewTarget], mainW, contentH)
+		rightCol = mainContent
+	} else {
+		_, mainInnerH, previewInnerH := m.layoutHeights()
+		mainOuterH := mainInnerH + 2
+		previewOuterH := previewInnerH + 2
 
-	top := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, mainContent)
+		mainContent := m.renderMain(m.viewTarget, m.captures[m.viewTarget], mainW, mainOuterH)
+		previewContent := m.renderMain(previewWs+" (preview)", m.captures[previewWs], mainW, previewOuterH)
+		rightCol = lipgloss.JoinVertical(lipgloss.Left, mainContent, previewContent)
+	}
+
+	top := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, rightCol)
 
 	var stream string
 	if m.showStream {
