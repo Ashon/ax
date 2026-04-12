@@ -3,6 +3,7 @@ package agent
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 )
 
 type claudeRuntime struct{}
@@ -16,7 +17,13 @@ func (claudeRuntime) InstructionFile() string {
 }
 
 func (claudeRuntime) Launch(dir, workspace, socketPath, axBin, configPath string) error {
-	cmd := exec.Command("claude", "--dangerously-skip-permissions", "--continue")
+	args := []string{"--dangerously-skip-permissions"}
+	if sys := loadInstructionsFile(dir, "CLAUDE.md"); sys != "" {
+		args = append(args, "--append-system-prompt", sys)
+	}
+	args = append(args, "--continue")
+
+	cmd := exec.Command("claude", args...)
 	cmd.Dir = dir
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -25,12 +32,25 @@ func (claudeRuntime) Launch(dir, workspace, socketPath, axBin, configPath string
 		return nil
 	}
 
-	fallback := exec.Command("claude", "--dangerously-skip-permissions")
+	// Fallback without --continue
+	fallbackArgs := []string{"--dangerously-skip-permissions"}
+	if sys := loadInstructionsFile(dir, "CLAUDE.md"); sys != "" {
+		fallbackArgs = append(fallbackArgs, "--append-system-prompt", sys)
+	}
+	fallback := exec.Command("claude", fallbackArgs...)
 	fallback.Dir = dir
 	fallback.Stdin = os.Stdin
 	fallback.Stdout = os.Stdout
 	fallback.Stderr = os.Stderr
 	return fallback.Run()
+}
+
+func loadInstructionsFile(dir, name string) string {
+	data, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 func (claudeRuntime) UserCommand(dir, workspace, socketPath, axBin, configPath string) (string, error) {
