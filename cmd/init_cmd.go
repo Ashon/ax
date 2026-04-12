@@ -3,17 +3,21 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 
 	"github.com/ashon/ax/internal/config"
 	"github.com/spf13/cobra"
 )
 
-var initGlobal bool
+var (
+	initGlobal  bool
+	initNoSetup bool
+)
 
 var initCmd = &cobra.Command{
 	Use:   "init",
-	Short: "Initialize .ax/config.yaml in the current directory or globally",
+	Short: "Initialize .ax/config.yaml (interactively via a setup agent by default)",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		var dir, path, projectName string
 
@@ -41,15 +45,71 @@ var initCmd = &cobra.Command{
 		}
 
 		cfg := config.DefaultConfig(projectName)
-
 		if err := cfg.Save(path); err != nil {
 			return err
 		}
-
 		fmt.Printf("Created %s\n", path)
-		fmt.Println("Edit it to define your workspaces, then run: ax up")
-		return nil
+
+		if initNoSetup {
+			fmt.Println("Edit it to define your workspaces, then run: ax up")
+			return nil
+		}
+
+		// Launch setup agent to analyze the project and flesh out the config
+		fmt.Println("\nLaunching setup agent (claude)...")
+		fmt.Println("The agent will analyze your project and help define workspaces.")
+		fmt.Println()
+		return runSetupAgent(dir, path)
 	},
+}
+
+func runSetupAgent(projectDir, configPath string) error {
+	prompt := buildSetupPrompt(configPath)
+
+	claudeBin, err := exec.LookPath("claude")
+	if err != nil {
+		fmt.Println("claude CLI not found — skipping interactive setup.")
+		fmt.Printf("Edit %s manually and run: ax up\n", configPath)
+		return nil
+	}
+
+	cmd := exec.Command(claudeBin, "--dangerously-skip-permissions", prompt)
+	cmd.Dir = projectDir
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func buildSetupPrompt(configPath string) string {
+	return fmt.Sprintf(`당신은 ax 프로젝트 셋업 에이전트입니다. 현재 디렉토리의 프로젝트를 분석해서 멀티 에이전트 워크스페이스 구성을 제안하고 %s 파일을 편집해주세요.
+
+## 절차
+1. 프로젝트 구조를 파악하세요 (Glob으로 디렉토리 구조, README/package.json/go.mod/pyproject.toml 등 주요 파일 확인).
+2. 모노레포인지, 어떤 도메인들이 있는지, 어떤 역할의 에이전트가 필요한지 판단하세요.
+3. 제안할 워크스페이스 목록을 사용자에게 먼저 보여주고 확인을 받으세요.
+4. 사용자가 승인하면 %s 파일을 직접 편집하세요.
+5. 사용자가 원하는 조정 사항이 있으면 반영하세요.
+
+## config.yaml 형식
+` + "```yaml" + `
+project: <프로젝트 이름>
+workspaces:
+  <name>:
+    dir: <프로젝트 루트 기준 상대 경로>
+    description: <해당 에이전트의 역할 한 문장>
+    runtime: claude  # 또는 codex
+    instructions: |
+      <해당 워크스페이스 에이전트가 받을 지침 — 무엇을 해야 하는지, 어떤 파일을 건드려야 하는지 등>
+` + "```" + `
+
+## 주의사항
+- 워크스페이스 이름은 kebab-case 또는 snake_case로 짧고 명확하게 (예: backend, frontend, infra, docs).
+- description은 한 문장으로 역할을 명확히 설명.
+- instructions는 구체적으로 작성 — 그 에이전트가 어떤 디렉토리에서 작업하고, 어떤 원칙을 따라야 하는지.
+- 기존 %s 파일은 최소 stub만 있는 상태입니다. workspaces 섹션을 채워주세요.
+
+먼저 프로젝트 구조를 파악하고 제안해주세요.`, configPath, configPath, configPath)
 }
 
 func mustGetwd() string {
@@ -79,5 +139,6 @@ func configPathExists(path string) (string, bool) {
 
 func init() {
 	initCmd.Flags().BoolVarP(&initGlobal, "global", "g", false, "initialize global config at ~/.ax/config.yaml")
+	initCmd.Flags().BoolVar(&initNoSetup, "no-setup", false, "skip the interactive setup agent")
 	rootCmd.AddCommand(initCmd)
 }
