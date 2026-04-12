@@ -1,7 +1,10 @@
 package cmd
 
 import (
+	"bufio"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -77,14 +80,71 @@ func runSetupAgent(projectDir, configPath string) error {
 	cmd := exec.Command(claudeBin,
 		"-p",
 		"--dangerously-skip-permissions",
+		"--output-format", "stream-json",
+		"--verbose",
 		"--append-system-prompt", systemPrompt,
 		userPrompt,
 	)
 	cmd.Dir = projectDir
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
+	cmd.Stdin = nil
 	cmd.Stderr = os.Stderr
-	return cmd.Run()
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("stdout pipe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start claude: %w", err)
+	}
+	streamClaudeOutput(stdout)
+	return cmd.Wait()
+}
+
+// streamClaudeOutput parses claude's stream-json output and prints
+// human-readable progress (tool uses + final text).
+func streamClaudeOutput(r io.Reader) {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var evt map[string]any
+		if err := json.Unmarshal(line, &evt); err != nil {
+			continue
+		}
+
+		msgType, _ := evt["type"].(string)
+		if msgType != "assistant" {
+			continue
+		}
+		msg, ok := evt["message"].(map[string]any)
+		if !ok {
+			continue
+		}
+		content, ok := msg["content"].([]any)
+		if !ok {
+			continue
+		}
+
+		for _, item := range content {
+			block, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			switch block["type"] {
+			case "text":
+				if text, ok := block["text"].(string); ok && text != "" {
+					fmt.Println(text)
+				}
+			case "tool_use":
+				name, _ := block["name"].(string)
+				fmt.Printf("  → %s\n", name)
+			}
+		}
+	}
 }
 
 func buildSetupSystemPrompt(configPath string) string {
