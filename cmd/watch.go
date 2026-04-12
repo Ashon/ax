@@ -219,6 +219,11 @@ func (m watchModel) renderSidebar(w, h int) string {
 
 		if entry.group {
 			left = sidebarStyle.Render(strings.Repeat("  ", entry.level) + entry.label)
+		} else if entry.sessionIndex < 0 || entry.sessionIndex >= len(m.sessions) {
+			// Workspace defined but not running
+			dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+			left = "  " + strings.Repeat("  ", entry.level) + "○ " + dimStyle.Render(entry.label)
+			right = dimStyle.Render("offline")
 		} else {
 			s := m.sessions[entry.sessionIndex]
 			status := parseAgentStatus(m.captures[s.Workspace])
@@ -424,6 +429,14 @@ type sidebarTreeNode struct {
 }
 
 func buildSidebarEntries(sessions []tmux.SessionInfo) []sidebarEntry {
+	// Try config-driven tree first; fall back to name-based splitting
+	// when no config is available.
+	if cfgPath, err := resolveConfigPath(); err == nil {
+		if tree, err := config.LoadTree(cfgPath); err == nil && tree != nil {
+			return buildSidebarFromTree(tree, sessions)
+		}
+	}
+
 	root := &sidebarTreeNode{
 		sessionIndex: -1,
 		children:     make(map[string]*sidebarTreeNode),
@@ -449,6 +462,67 @@ func buildSidebarEntries(sessions []tmux.SessionInfo) []sidebarEntry {
 	var entries []sidebarEntry
 	appendSidebarEntries(root, 0, &entries)
 	return entries
+}
+
+// buildSidebarFromTree renders a project tree into sidebar entries.
+// Each project becomes a group header. Workspaces are leaf entries.
+// The orchestrator session (when present) is pinned to the top level.
+func buildSidebarFromTree(tree *config.ProjectNode, sessions []tmux.SessionInfo) []sidebarEntry {
+	sessionByWorkspace := make(map[string]int, len(sessions))
+	for i, s := range sessions {
+		sessionByWorkspace[s.Workspace] = i
+	}
+
+	var entries []sidebarEntry
+
+	// Orchestrator at the top if it's running
+	if idx, ok := sessionByWorkspace["orchestrator"]; ok {
+		entries = append(entries, sidebarEntry{
+			label:        "orchestrator",
+			sessionIndex: idx,
+			level:        0,
+		})
+	}
+
+	appendProjectEntries(tree, 0, sessionByWorkspace, &entries)
+	return entries
+}
+
+func appendProjectEntries(node *config.ProjectNode, level int, sessionByWorkspace map[string]int, entries *[]sidebarEntry) {
+	if node == nil {
+		return
+	}
+
+	hasContent := len(node.Workspaces) > 0 || len(node.Children) > 0
+	if hasContent {
+		*entries = append(*entries, sidebarEntry{
+			label: "▾ " + node.Name,
+			group: true,
+			level: level,
+		})
+	}
+
+	for _, ws := range node.Workspaces {
+		idx, ok := sessionByWorkspace[ws.MergedName]
+		if !ok {
+			// Workspace defined but not running; show as unavailable
+			*entries = append(*entries, sidebarEntry{
+				label:        ws.Name,
+				sessionIndex: -1,
+				level:        level + 1,
+			})
+			continue
+		}
+		*entries = append(*entries, sidebarEntry{
+			label:        ws.Name,
+			sessionIndex: idx,
+			level:        level + 1,
+		})
+	}
+
+	for _, child := range node.Children {
+		appendProjectEntries(child, level+1, sessionByWorkspace, entries)
+	}
 }
 
 func appendSidebarEntries(node *sidebarTreeNode, level int, entries *[]sidebarEntry) {
