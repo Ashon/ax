@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -43,13 +44,15 @@ func Load(path string) (*Config, error) {
 	return loadRecursive(path, seen)
 }
 
+var ErrCyclicChildren = fmt.Errorf("cyclic ax children reference")
+
 func loadRecursive(path string, seen map[string]bool) (*Config, error) {
 	path, err := filepath.Abs(path)
 	if err != nil {
 		return nil, fmt.Errorf("resolve config path: %w", err)
 	}
 	if seen[path] {
-		return nil, fmt.Errorf("cyclic ax children reference detected at %s", path)
+		return nil, fmt.Errorf("%w at %s", ErrCyclicChildren, path)
 	}
 	seen[path] = true
 	defer delete(seen, path)
@@ -98,7 +101,8 @@ func loadRecursive(path string, seen map[string]bool) (*Config, error) {
 		child := cfg.Children[name]
 		child.Dir = resolveDir(projectDir, child.Dir)
 		if child.Dir == "" {
-			return nil, fmt.Errorf("child %q is missing dir", name)
+			fmt.Fprintf(os.Stderr, "warning: child %q is missing dir, skipping\n", name)
+			continue
 		}
 		if child.Prefix == "" {
 			child.Prefix = name
@@ -107,17 +111,26 @@ func loadRecursive(path string, seen map[string]bool) (*Config, error) {
 
 		childCfgPath, err := ConfigPathInDir(child.Dir)
 		if err != nil {
-			return nil, fmt.Errorf("load child %q: %w", name, err)
+			// Stale entry — config file no longer exists at that path.
+			// Skip so the rest of the tree still loads.
+			fmt.Fprintf(os.Stderr, "warning: child %q at %s has no config, skipping\n", name, child.Dir)
+			continue
 		}
 		childCfg, err := loadRecursive(childCfgPath, seen)
 		if err != nil {
-			return nil, fmt.Errorf("load child %q: %w", name, err)
+			// Cycles are fatal; other errors are degraded to warnings.
+			if errors.Is(err, ErrCyclicChildren) {
+				return nil, err
+			}
+			fmt.Fprintf(os.Stderr, "warning: failed to load child %q: %v\n", name, err)
+			continue
 		}
 
 		for childName, ws := range childCfg.Workspaces {
 			mergedName := child.Prefix + "." + childName
 			if _, exists := merged.Workspaces[mergedName]; exists {
-				return nil, fmt.Errorf("duplicate workspace name %q after importing child %q", mergedName, name)
+				fmt.Fprintf(os.Stderr, "warning: duplicate workspace %q from child %q, skipping\n", mergedName, name)
+				continue
 			}
 			merged.Workspaces[mergedName] = ws
 		}
