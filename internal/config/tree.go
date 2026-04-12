@@ -12,18 +12,22 @@ import (
 // Each node knows its own workspaces and its child projects so callers
 // can render a tree without flattening workspace names.
 type ProjectNode struct {
-	Name       string
-	Dir        string
-	Workspaces []WorkspaceRef
-	Children   []*ProjectNode
+	Name                string
+	Prefix              string // fully-qualified prefix used for merged names
+	Dir                 string
+	OrchestratorRuntime string
+	Workspaces          []WorkspaceRef
+	Children            []*ProjectNode
 }
 
 // WorkspaceRef is a workspace belonging to a project, with the merged
 // "prefix.workspace" name that identifies its tmux session at runtime.
 type WorkspaceRef struct {
-	Name       string // original workspace name inside its project
-	MergedName string // fully-qualified name used by the daemon/tmux
-	Runtime    string
+	Name         string // original workspace name inside its project
+	MergedName   string // fully-qualified name used by the daemon/tmux
+	Runtime      string
+	Description  string
+	Instructions string
 }
 
 // LoadTree reads a config and recursively walks its children to produce a
@@ -61,8 +65,10 @@ func loadTreeRecursive(path, prefix string, seen map[string]bool) (*ProjectNode,
 	}
 
 	node := &ProjectNode{
-		Name: projectName,
-		Dir:  projectDir,
+		Name:                projectName,
+		Prefix:              prefix,
+		Dir:                 projectDir,
+		OrchestratorRuntime: raw.OrchestratorRuntime,
 	}
 
 	// Workspaces defined directly in this project
@@ -78,9 +84,11 @@ func loadTreeRecursive(path, prefix string, seen map[string]bool) (*ProjectNode,
 			merged = prefix + "." + name
 		}
 		node.Workspaces = append(node.Workspaces, WorkspaceRef{
-			Name:       name,
-			MergedName: merged,
-			Runtime:    ws.Runtime,
+			Name:         name,
+			MergedName:   merged,
+			Runtime:      ws.Runtime,
+			Description:  ws.Description,
+			Instructions: ws.Instructions,
 		})
 	}
 

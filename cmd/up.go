@@ -43,7 +43,18 @@ var upCmd = &cobra.Command{
 			return err
 		}
 
-		fmt.Println("\nRun 'ax shell' to start a conversation with the orchestrator.")
+		// Create orchestrator sessions for the full project tree
+		tree, err := config.LoadTree(cfgPath)
+		if err != nil {
+			return fmt.Errorf("load config tree: %w", err)
+		}
+		sp := daemon.ExpandSocketPath(socketPath)
+		fmt.Println("\nOrchestrators:")
+		if err := ensureOrchestrators(tree, sp, cfgPath); err != nil {
+			return err
+		}
+
+		fmt.Println("\nRun 'ax shell' to start a conversation with the root orchestrator.")
 		return nil
 	},
 }

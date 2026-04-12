@@ -10,67 +10,105 @@ import (
 	"github.com/ashon/ax/internal/config"
 )
 
-const OrchestratorInstructions = "" // kept for backwards compat, use WriteOrchestratorPrompt instead
+// OrchestratorName is the fully-qualified identity of an orchestrator given
+// its project prefix ("" for the root).
+func OrchestratorName(prefix string) string {
+	if prefix == "" {
+		return "orchestrator"
+	}
+	return prefix + ".orchestrator"
+}
 
-// WriteOrchestratorPrompt generates the runtime-specific instruction file for the orchestrator
-// that includes the full workspace topology and collaboration rules.
-func WriteOrchestratorPrompt(orchDir string, cfg *config.Config, runtime string) error {
+// WriteOrchestratorPrompt generates a scope-specific instruction file for
+// the orchestrator of a project. The root orchestrator learns about
+// sub-orchestrators as delegation targets; sub-orchestrators learn about
+// their parent for escalation.
+func WriteOrchestratorPrompt(orchDir string, node *config.ProjectNode, prefix, parentName, runtime string) error {
 	var sb strings.Builder
 
-	sb.WriteString("# ax orchestrator\n\n")
-	sb.WriteString("당신은 ax 멀티 에이전트 시스템의 오케스트레이터입니다.\n\n")
+	selfName := OrchestratorName(prefix)
+	isRoot := parentName == ""
+
+	if isRoot {
+		sb.WriteString("# ax root orchestrator\n\n")
+		sb.WriteString(fmt.Sprintf("당신은 `%s` 프로젝트 트리의 루트 오케스트레이터입니다.\n", node.Name))
+		sb.WriteString(fmt.Sprintf("당신의 ID는 `%s`입니다.\n\n", selfName))
+	} else {
+		sb.WriteString(fmt.Sprintf("# ax sub orchestrator: %s\n\n", node.Name))
+		sb.WriteString(fmt.Sprintf("당신은 `%s` 프로젝트의 서브 오케스트레이터입니다.\n", node.Name))
+		sb.WriteString(fmt.Sprintf("당신의 ID는 `%s`입니다.\n", selfName))
+		sb.WriteString(fmt.Sprintf("상위 오케스트레이터: `%s`\n\n", parentName))
+	}
 
 	sb.WriteString("## 역할\n")
-	sb.WriteString("- user로부터 작업 요청을 받아 적절한 워크스페이스 에이전트에게 분배합니다.\n")
-	sb.WriteString("- 에이전트들의 작업 결과를 수집하고 user에게 보고합니다.\n")
-	sb.WriteString("- 여러 에이전트 간 협업이 필요한 작업을 조율합니다.\n")
-	sb.WriteString("- 에이전트 간 충돌이나 의존성 문제를 해결합니다.\n\n")
+	if isRoot {
+		sb.WriteString("- user의 요청을 받아 적절한 워크스페이스 또는 서브 오케스트레이터에게 분배합니다.\n")
+		sb.WriteString("- 여러 프로젝트에 걸친 작업은 서브 오케스트레이터들을 조율합니다.\n")
+		sb.WriteString("- 결과를 수집해 user에게 보고합니다.\n\n")
+	} else {
+		sb.WriteString(fmt.Sprintf("- `%s` 프로젝트 내부의 작업을 자체 워크스페이스들에게 분배합니다.\n", node.Name))
+		sb.WriteString(fmt.Sprintf("- 상위 오케스트레이터(`%s`)로부터 오는 요청을 처리합니다.\n", parentName))
+		sb.WriteString(fmt.Sprintf("- 프로젝트 범위를 벗어나는 요청은 `%s`에게 에스컬레이션합니다.\n", parentName))
+		sb.WriteString("- 결과를 수집해 상위 오케스트레이터에게 보고합니다.\n\n")
+	}
 
 	sb.WriteString("## 행동 규칙\n")
-	sb.WriteString("- read_messages를 주기적으로 확인하여 user와 에이전트들의 메시지를 처리하세요.\n")
-	sb.WriteString("- 작업을 에이전트에게 보낼 때는 send_message를 사용하세요.\n")
-	sb.WriteString("- 결과를 user에게 보고할 때는 send_message(to=\"user\")를 사용하세요.\n")
-	sb.WriteString("- 복잡한 작업은 단계별로 나누어 여러 에이전트에게 분배하세요.\n")
-	sb.WriteString("- 에이전트 작업 완료 후 품질을 확인하고, 필요하면 수정을 요청하세요.\n\n")
-
-	// Workspace topology
-	sb.WriteString("## 워크스페이스 목록\n\n")
-	sb.WriteString("| 워크스페이스 | 설명 | 디렉토리 |\n")
-	sb.WriteString("|------------|------|----------|\n")
-	for name, ws := range cfg.Workspaces {
-		sb.WriteString(fmt.Sprintf("| **%s** | %s | `%s` |\n", name, ws.Description, ws.Dir))
+	sb.WriteString("- read_messages를 주기적으로 확인하여 메시지를 처리하세요.\n")
+	sb.WriteString("- 작업을 보낼 때는 send_message를 사용하세요.\n")
+	if isRoot {
+		sb.WriteString("- user에게 응답할 때는 send_message(to=\"user\")를 사용하세요.\n")
+	} else {
+		sb.WriteString(fmt.Sprintf("- 상위 오케스트레이터에게 응답할 때는 send_message(to=\"%s\")를 사용하세요.\n", parentName))
 	}
-	sb.WriteString("\n")
+	sb.WriteString("- 복잡한 작업은 단계별로 나누어 분배하세요.\n")
+	sb.WriteString("- 작업 완료 후 품질을 확인하고, 필요하면 수정을 요청하세요.\n\n")
 
-	// Per-workspace capabilities
-	sb.WriteString("## 에이전트별 역할 상세\n\n")
-	for name, ws := range cfg.Workspaces {
-		sb.WriteString(fmt.Sprintf("### %s\n", name))
-		sb.WriteString(fmt.Sprintf("- 설명: %s\n", ws.Description))
-		if ws.Instructions != "" {
-			// Extract first few lines as summary
-			lines := strings.Split(strings.TrimSpace(ws.Instructions), "\n")
-			maxLines := 5
-			if len(lines) < maxLines {
-				maxLines = len(lines)
+	// Direct workspaces (at this project level)
+	if len(node.Workspaces) > 0 {
+		sb.WriteString("## 직접 관리하는 워크스페이스\n\n")
+		sb.WriteString("| 이름 | ID | 설명 |\n|---|---|---|\n")
+		for _, ws := range node.Workspaces {
+			desc := ws.Description
+			if desc == "" {
+				desc = "-"
 			}
-			for _, line := range lines[:maxLines] {
-				sb.WriteString(fmt.Sprintf("  %s\n", strings.TrimSpace(line)))
-			}
+			sb.WriteString(fmt.Sprintf("| **%s** | `%s` | %s |\n", ws.Name, ws.MergedName, desc))
 		}
 		sb.WriteString("\n")
 	}
 
-	// Collaboration patterns
-	sb.WriteString("## 작업 분배 가이드\n\n")
-	sb.WriteString("- **백엔드 API 작업** → udcd-backend\n")
-	sb.WriteString("- **프론트엔드 UI 작업** → udcd-frontend\n")
-	sb.WriteString("- **백엔드+프론트엔드 연동 작업** → udcd-backend 먼저 (API 구현) → udcd-frontend (UI 연동)\n")
-	sb.WriteString("- **DNS/인증/벤치마크** → udcd-ops\n")
-	sb.WriteString("- **K8s 매니페스트** → udc-k8s\n")
-	sb.WriteString("- **인프라 프로비저닝** → fransible\n")
-	sb.WriteString("- **문서 조회/업데이트** → docs\n")
-	sb.WriteString("- **여러 영역에 걸친 작업** → 관련 에이전트들에게 순차적으로 분배, 의존관계 고려\n")
+	// Sub-orchestrators (one per child project)
+	if len(node.Children) > 0 {
+		sb.WriteString("## 서브 오케스트레이터 (프로젝트 단위 위임 대상)\n\n")
+		sb.WriteString("| 프로젝트 | ID | 담당 |\n|---|---|---|\n")
+		for _, child := range node.Children {
+			childOrchID := OrchestratorName(child.Prefix)
+			scope := summarizeWorkspaces(child)
+			sb.WriteString(fmt.Sprintf("| **%s** | `%s` | %s |\n", child.Name, childOrchID, scope))
+		}
+		sb.WriteString("\n")
+		if isRoot {
+			sb.WriteString("프로젝트 범위 작업은 해당 서브 오케스트레이터에게 위임하세요. ")
+			sb.WriteString("여러 프로젝트가 관련된 경우 서브 오케스트레이터들을 순차 조율하세요.\n\n")
+		}
+	}
+
+	// Workspace instructions detail
+	if len(node.Workspaces) > 0 {
+		sb.WriteString("## 워크스페이스 상세 지침\n\n")
+		for _, ws := range node.Workspaces {
+			sb.WriteString(fmt.Sprintf("### %s (`%s`)\n", ws.Name, ws.MergedName))
+			if ws.Description != "" {
+				sb.WriteString("- " + ws.Description + "\n")
+			}
+			if ws.Instructions != "" {
+				for _, line := range strings.Split(strings.TrimSpace(ws.Instructions), "\n") {
+					sb.WriteString("  " + strings.TrimSpace(line) + "\n")
+				}
+			}
+			sb.WriteString("\n")
+		}
+	}
 
 	instructionFile, err := agent.InstructionFile(runtime)
 	if err != nil {
@@ -88,4 +126,21 @@ func WriteOrchestratorPrompt(orchDir string, cfg *config.Config, runtime string)
 		}
 	}
 	return os.WriteFile(path, []byte(sb.String()), 0o644)
+}
+
+func summarizeWorkspaces(node *config.ProjectNode) string {
+	if node == nil {
+		return "-"
+	}
+	names := make([]string, 0, len(node.Workspaces))
+	for _, ws := range node.Workspaces {
+		names = append(names, ws.Name)
+	}
+	if len(node.Children) > 0 {
+		names = append(names, fmt.Sprintf("+%d sub-project(s)", len(node.Children)))
+	}
+	if len(names) == 0 {
+		return "-"
+	}
+	return strings.Join(names, ", ")
 }

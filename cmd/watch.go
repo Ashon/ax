@@ -465,8 +465,8 @@ func buildSidebarEntries(sessions []tmux.SessionInfo) []sidebarEntry {
 }
 
 // buildSidebarFromTree renders a project tree into sidebar entries.
-// Each project becomes a group header. Workspaces are leaf entries.
-// The orchestrator session (when present) is pinned to the top level.
+// Each project becomes a group header. Its orchestrator is the first
+// leaf under it, followed by workspaces, then nested projects.
 func buildSidebarFromTree(tree *config.ProjectNode, sessions []tmux.SessionInfo) []sidebarEntry {
 	sessionByWorkspace := make(map[string]int, len(sessions))
 	for i, s := range sessions {
@@ -474,16 +474,6 @@ func buildSidebarFromTree(tree *config.ProjectNode, sessions []tmux.SessionInfo)
 	}
 
 	var entries []sidebarEntry
-
-	// Orchestrator at the top if it's running
-	if idx, ok := sessionByWorkspace["orchestrator"]; ok {
-		entries = append(entries, sidebarEntry{
-			label:        "orchestrator",
-			sessionIndex: idx,
-			level:        0,
-		})
-	}
-
 	appendProjectEntries(tree, 0, sessionByWorkspace, &entries)
 	return entries
 }
@@ -493,19 +483,35 @@ func appendProjectEntries(node *config.ProjectNode, level int, sessionByWorkspac
 		return
 	}
 
-	hasContent := len(node.Workspaces) > 0 || len(node.Children) > 0
-	if hasContent {
+	*entries = append(*entries, sidebarEntry{
+		label: "▾ " + node.Name,
+		group: true,
+		level: level,
+	})
+
+	// Project orchestrator first
+	orchName := "orchestrator"
+	if node.Prefix != "" {
+		orchName = node.Prefix + ".orchestrator"
+	}
+	orchLabel := "◆ orchestrator"
+	if idx, ok := sessionByWorkspace[orchName]; ok {
 		*entries = append(*entries, sidebarEntry{
-			label: "▾ " + node.Name,
-			group: true,
-			level: level,
+			label:        orchLabel,
+			sessionIndex: idx,
+			level:        level + 1,
+		})
+	} else {
+		*entries = append(*entries, sidebarEntry{
+			label:        orchLabel,
+			sessionIndex: -1,
+			level:        level + 1,
 		})
 	}
 
 	for _, ws := range node.Workspaces {
 		idx, ok := sessionByWorkspace[ws.MergedName]
 		if !ok {
-			// Workspace defined but not running; show as unavailable
 			*entries = append(*entries, sidebarEntry{
 				label:        ws.Name,
 				sessionIndex: -1,

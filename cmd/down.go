@@ -35,8 +35,11 @@ var downCmd = &cobra.Command{
 			return err
 		}
 
-		// Stop orchestrator session
-		if tmux.SessionExists("orchestrator") {
+		// Stop orchestrator sessions (root + any sub-orchestrators)
+		if tree, err := config.LoadTree(cfgPath); err == nil {
+			fmt.Println("\nStopping orchestrators:")
+			destroyOrchestrators(tree)
+		} else if tmux.SessionExists("orchestrator") {
 			tmux.DestroySession("orchestrator")
 			fmt.Println("  orchestrator: stopped")
 		}
