@@ -126,15 +126,19 @@ func loadRecursive(path string, seen map[string]bool) (*Config, error) {
 	return merged, nil
 }
 
+// FindConfigFile walks upward from the current directory and returns the
+// topmost ancestor .ax/config.yaml it finds. Also checks the user's home
+// directory so a global config always acts as the tree root when present.
 func FindConfigFile() (string, error) {
 	dir, err := os.Getwd()
 	if err != nil {
 		return "", err
 	}
 
+	var topMost string
 	for {
 		if path, ok := findConfigInDir(dir); ok {
-			return path, nil
+			topMost = path
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
@@ -143,6 +147,15 @@ func FindConfigFile() (string, error) {
 		dir = parent
 	}
 
+	if home, err := os.UserHomeDir(); err == nil {
+		if path, ok := findConfigInDir(home); ok {
+			topMost = path
+		}
+	}
+
+	if topMost != "" {
+		return topMost, nil
+	}
 	return "", fmt.Errorf(".ax/config.yaml or %s not found (searched from current directory upward)", LegacyConfigFile)
 }
 
