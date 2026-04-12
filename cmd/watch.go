@@ -467,15 +467,60 @@ func buildSidebarEntries(sessions []tmux.SessionInfo) []sidebarEntry {
 // buildSidebarFromTree renders a project tree into sidebar entries.
 // Each project becomes a group header. Its orchestrator is the first
 // leaf under it, followed by workspaces, then nested projects.
+// Running sessions not in the tree are appended under an "unregistered"
+// group so they stay visible.
 func buildSidebarFromTree(tree *config.ProjectNode, sessions []tmux.SessionInfo) []sidebarEntry {
 	sessionByWorkspace := make(map[string]int, len(sessions))
 	for i, s := range sessions {
 		sessionByWorkspace[s.Workspace] = i
 	}
 
+	known := make(map[string]bool)
+	collectKnownFromTree(tree, known)
+
 	var entries []sidebarEntry
 	appendProjectEntries(tree, 0, sessionByWorkspace, &entries)
+
+	// Append any running session that wasn't part of the config tree
+	var unregistered []int
+	for i, s := range sessions {
+		if !known[s.Workspace] {
+			unregistered = append(unregistered, i)
+		}
+	}
+	if len(unregistered) > 0 {
+		entries = append(entries, sidebarEntry{
+			label: "▾ unregistered",
+			group: true,
+			level: 0,
+		})
+		for _, idx := range unregistered {
+			entries = append(entries, sidebarEntry{
+				label:        sessions[idx].Workspace,
+				sessionIndex: idx,
+				level:        1,
+			})
+		}
+	}
+
 	return entries
+}
+
+func collectKnownFromTree(node *config.ProjectNode, known map[string]bool) {
+	if node == nil {
+		return
+	}
+	orchName := "orchestrator"
+	if node.Prefix != "" {
+		orchName = node.Prefix + ".orchestrator"
+	}
+	known[orchName] = true
+	for _, ws := range node.Workspaces {
+		known[ws.MergedName] = true
+	}
+	for _, child := range node.Children {
+		collectKnownFromTree(child, known)
+	}
 }
 
 func appendProjectEntries(node *config.ProjectNode, level int, sessionByWorkspace map[string]int, entries *[]sidebarEntry) {
