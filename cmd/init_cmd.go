@@ -8,7 +8,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/ashon/ax/internal/config"
 	"github.com/spf13/cobra"
 )
@@ -96,16 +100,103 @@ func runSetupAgent(projectDir, configPath string) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start claude: %w", err)
 	}
-	streamClaudeOutput(stdout)
-	return cmd.Wait()
+
+	finalText, uiErr := streamClaudeOutput(stdout)
+	waitErr := cmd.Wait()
+
+	if finalText != "" {
+		fmt.Println(finalText)
+	}
+	if uiErr != nil {
+		return uiErr
+	}
+	return waitErr
 }
 
-// streamClaudeOutput parses claude's stream-json output and prints
-// human-readable progress (tool uses + final text).
-func streamClaudeOutput(r io.Reader) {
+// streamClaudeOutput runs a bubbletea spinner UI while parsing
+// claude's stream-json output in a background goroutine. Returns
+// the final assistant text so the caller can print it after the UI exits.
+func streamClaudeOutput(r io.Reader) (string, error) {
+	m := newSetupModel()
+	p := tea.NewProgram(m)
+
+	go func() {
+		parseClaudeStream(r, p)
+		p.Send(setupDoneMsg{})
+	}()
+
+	finalModel, err := p.Run()
+	if err != nil {
+		return "", err
+	}
+	if sm, ok := finalModel.(setupModel); ok {
+		return sm.finalText, nil
+	}
+	return "", nil
+}
+
+type setupStatusMsg string
+type setupTextMsg string
+type setupDoneMsg struct{}
+type setupTickMsg time.Time
+
+var (
+	setupSpinnerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
+	setupStatusStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("7"))
+)
+
+type setupModel struct {
+	status    string
+	finalText string
+	frame     int
+	done      bool
+}
+
+func newSetupModel() setupModel {
+	return setupModel{status: "Analyzing project..."}
+}
+
+func (m setupModel) Init() tea.Cmd {
+	return setupTickCmd()
+}
+
+func setupTickCmd() tea.Cmd {
+	return tea.Tick(80*time.Millisecond, func(t time.Time) tea.Msg {
+		return setupTickMsg(t)
+	})
+}
+
+func (m setupModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case setupTickMsg:
+		m.frame++
+		if m.done {
+			return m, nil
+		}
+		return m, setupTickCmd()
+	case setupStatusMsg:
+		m.status = string(msg)
+	case setupTextMsg:
+		m.finalText = string(msg)
+	case setupDoneMsg:
+		m.done = true
+		return m, tea.Quit
+	}
+	return m, nil
+}
+
+func (m setupModel) View() string {
+	if m.done {
+		return ""
+	}
+	frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+	spinner := setupSpinnerStyle.Render(frames[m.frame%len(frames)])
+	return spinner + " " + setupStatusStyle.Render(m.status)
+}
+
+func parseClaudeStream(r io.Reader, p *tea.Program) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
-
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
@@ -137,14 +228,61 @@ func streamClaudeOutput(r io.Reader) {
 			switch block["type"] {
 			case "text":
 				if text, ok := block["text"].(string); ok && text != "" {
-					fmt.Println(text)
+					p.Send(setupTextMsg(text))
+					first := strings.SplitN(strings.TrimSpace(text), "\n", 2)[0]
+					if len(first) > 60 {
+						first = first[:57] + "..."
+					}
+					p.Send(setupStatusMsg("Thinking: " + first))
 				}
 			case "tool_use":
 				name, _ := block["name"].(string)
-				fmt.Printf("  → %s\n", name)
+				p.Send(setupStatusMsg(describeToolUse(name, block)))
 			}
 		}
 	}
+}
+
+func describeToolUse(name string, block map[string]any) string {
+	input, _ := block["input"].(map[string]any)
+	switch name {
+	case "Read":
+		if p, ok := input["file_path"].(string); ok {
+			return "Reading " + shortPath(p)
+		}
+	case "Write":
+		if p, ok := input["file_path"].(string); ok {
+			return "Writing " + shortPath(p)
+		}
+	case "Edit":
+		if p, ok := input["file_path"].(string); ok {
+			return "Editing " + shortPath(p)
+		}
+	case "Glob":
+		if pat, ok := input["pattern"].(string); ok {
+			return "Searching " + pat
+		}
+	case "Grep":
+		if pat, ok := input["pattern"].(string); ok {
+			return "Grepping " + pat
+		}
+	case "Bash":
+		if d, ok := input["description"].(string); ok && d != "" {
+			return "Running: " + d
+		}
+	}
+	return "Using " + name
+}
+
+func shortPath(p string) string {
+	if home, err := os.UserHomeDir(); err == nil && strings.HasPrefix(p, home) {
+		p = "~" + strings.TrimPrefix(p, home)
+	}
+	parts := strings.Split(p, "/")
+	if len(parts) > 3 {
+		return ".../" + strings.Join(parts[len(parts)-3:], "/")
+	}
+	return p
 }
 
 func buildSetupSystemPrompt(configPath string) string {
