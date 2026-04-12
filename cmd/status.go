@@ -33,11 +33,32 @@ var statusCmd = &cobra.Command{
 
 		fmt.Printf("\nWorkspaces: %d active\n\n", len(sessions))
 
-		// Try to render as a config tree
+		// Try to render as a config tree, then list any unregistered sessions
 		cfgPath, cfgErr := resolveConfigPath()
 		if cfgErr == nil {
 			if tree, err := config.LoadTree(cfgPath); err == nil && tree != nil {
+				known := make(map[string]bool)
+				collectKnownWorkspaces(tree, known)
 				printProjectTree(tree, 0, sessionByWorkspace)
+
+				// Any running sessions not in the tree
+				var unregistered []tmux.SessionInfo
+				for _, s := range sessions {
+					if !known[s.Workspace] {
+						unregistered = append(unregistered, s)
+					}
+				}
+				if len(unregistered) > 0 {
+					fmt.Println("\n▾ unregistered (not in config tree)")
+					for _, s := range unregistered {
+						status := "detached"
+						if s.Attached {
+							status = "attached"
+						}
+						fmt.Printf("  ● %-26s %-10s %s\n", s.Workspace, status, s.Name)
+					}
+					fmt.Println("\nRun 'ax init' in the project directory to register these.")
+				}
 				return nil
 			}
 		}
@@ -56,6 +77,23 @@ var statusCmd = &cobra.Command{
 		}
 		return nil
 	},
+}
+
+func collectKnownWorkspaces(node *config.ProjectNode, known map[string]bool) {
+	if node == nil {
+		return
+	}
+	orchName := "orchestrator"
+	if node.Prefix != "" {
+		orchName = node.Prefix + ".orchestrator"
+	}
+	known[orchName] = true
+	for _, ws := range node.Workspaces {
+		known[ws.MergedName] = true
+	}
+	for _, child := range node.Children {
+		collectKnownWorkspaces(child, known)
+	}
 }
 
 func printProjectTree(node *config.ProjectNode, level int, sessionByWorkspace map[string]tmux.SessionInfo) {
