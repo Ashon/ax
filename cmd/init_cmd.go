@@ -43,31 +43,35 @@ var initCmd = &cobra.Command{
 			projectName = filepath.Base(dir)
 		}
 
+		alreadyExists := false
 		if _, err := os.Stat(path); err == nil {
-			return fmt.Errorf("%s already exists", path)
-		}
-		if !initGlobal {
+			alreadyExists = true
+			fmt.Printf("%s already exists — skipping creation\n", path)
+		} else if !initGlobal {
 			if legacyPath, ok := configPathConflict(dir); ok {
 				return fmt.Errorf("legacy config already exists at %s", legacyPath)
 			}
 		}
 
-		cfg := config.DefaultConfig(projectName)
-		if err := cfg.Save(path); err != nil {
-			return err
+		if !alreadyExists {
+			cfg := config.DefaultConfig(projectName)
+			if err := cfg.Save(path); err != nil {
+				return err
+			}
+			fmt.Printf("Created %s\n", path)
 		}
-		fmt.Printf("Created %s\n", path)
 
-		// If this is not a global init, look for an ancestor config and
-		// register this dir as a child in its tree.
+		// Ensure this dir is registered as a child of any ancestor config.
 		if !initGlobal {
 			if parentPath, added := registerAsChild(dir, projectName); added {
 				fmt.Printf("Registered as child of %s\n", parentPath)
 			}
 		}
 
-		if initNoSetup {
-			fmt.Println("Edit it to define your workspaces, then run: ax up")
+		if alreadyExists || initNoSetup {
+			if !alreadyExists {
+				fmt.Println("Edit it to define your workspaces, then run: ax up")
+			}
 			return nil
 		}
 
@@ -323,8 +327,8 @@ workspaces:
 }
 
 // registerAsChild searches upward from dir for an ancestor .ax/config.yaml
-// and registers dir as a child entry. Returns the parent config path and
-// true if the registration succeeded.
+// and registers dir as a child entry if not already present.
+// Returns the parent config path and whether a new entry was added.
 func registerAsChild(dir, name string) (string, bool) {
 	parent := filepath.Dir(dir)
 	for {
@@ -332,7 +336,8 @@ func registerAsChild(dir, name string) (string, bool) {
 			break
 		}
 		if path, ok := findConfigInDir(parent); ok {
-			if err := addChildToConfig(path, parent, dir, name); err == nil {
+			added, _ := addChildToConfig(path, parent, dir, name)
+			if added {
 				return path, true
 			}
 			return "", false
@@ -359,36 +364,43 @@ func findConfigInDir(dir string) (string, bool) {
 	return "", false
 }
 
-func addChildToConfig(parentConfigPath, parentDir, childDir, childName string) error {
+// addChildToConfig adds childDir to the parent config's children map.
+// Returns (added, err): added=true if a new entry was written.
+func addChildToConfig(parentConfigPath, parentDir, childDir, childName string) (bool, error) {
 	parentCfg, err := loadRawConfig(parentConfigPath)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if parentCfg.Children == nil {
 		parentCfg.Children = make(map[string]config.Child)
 	}
 
-	// Compute relative path from parent project root to child dir
 	relDir, err := filepath.Rel(parentDir, childDir)
 	if err != nil {
 		relDir = childDir
 	}
 
-	// Avoid overwriting existing entry with same name
+	// Check if any existing entry already points to this directory
+	for _, existing := range parentCfg.Children {
+		if existing.Dir == relDir {
+			return false, nil
+		}
+	}
+
+	// Pick a unique entry name
 	entryName := childName
 	for i := 2; ; i++ {
 		if _, exists := parentCfg.Children[entryName]; !exists {
 			break
 		}
-		if existing := parentCfg.Children[entryName]; existing.Dir == relDir {
-			// Already registered at same path
-			return nil
-		}
 		entryName = fmt.Sprintf("%s-%d", childName, i)
 	}
 
 	parentCfg.Children[entryName] = config.Child{Dir: relDir}
-	return parentCfg.Save(parentConfigPath)
+	if err := parentCfg.Save(parentConfigPath); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // loadRawConfig reads and parses a config file without resolving children,
