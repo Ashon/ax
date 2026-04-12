@@ -66,6 +66,11 @@ var initCmd = &cobra.Command{
 			if parentPath, added := registerAsChild(dir, projectName); added {
 				fmt.Printf("Registered as child of %s\n", parentPath)
 			}
+			// Refresh orchestrator tree so the new sub-project becomes
+			// visible to the running root orchestrator.
+			if err := refreshOrchestratorTree(projectName); err != nil {
+				fmt.Printf("note: orchestrator tree refresh skipped: %v\n", err)
+			}
 		}
 
 		// Ensure .mcp.json is gitignored (it has user-specific paths).

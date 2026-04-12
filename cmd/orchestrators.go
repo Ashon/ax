@@ -8,6 +8,8 @@ import (
 
 	"github.com/ashon/ax/internal/agent"
 	"github.com/ashon/ax/internal/config"
+	"github.com/ashon/ax/internal/daemon"
+	"github.com/ashon/ax/internal/mcpserver"
 	"github.com/ashon/ax/internal/tmux"
 	"github.com/ashon/ax/internal/workspace"
 )
@@ -103,4 +105,71 @@ func destroyOrchestratorForNode(node *config.ProjectNode) {
 		tmux.DestroySession(selfName)
 		fmt.Printf("  %s: stopped\n", selfName)
 	}
+}
+
+// refreshOrchestratorTree is called after registering a new sub-project.
+// It reloads the topmost config, regenerates all orchestrator prompt files
+// so they mention the new child, creates any missing sub-orchestrator
+// sessions, and notifies the running root orchestrator of the new child.
+func refreshOrchestratorTree(newChildName string) error {
+	cfgPath, err := resolveConfigPath()
+	if err != nil {
+		return err
+	}
+	tree, err := config.LoadTree(cfgPath)
+	if err != nil {
+		return err
+	}
+	sp := daemon.ExpandSocketPath(socketPath)
+
+	// Only create sessions / send messages if the daemon is running
+	if !isDaemonRunning(sp) {
+		// Still regenerate prompt files so next ax up picks them up
+		return writeOrchestratorPromptsOnly(tree, "")
+	}
+
+	if err := ensureOrchestrators(tree, sp, cfgPath); err != nil {
+		return err
+	}
+
+	// Notify the root orchestrator so it can pick up the new sub-project
+	rootName := workspace.OrchestratorName(tree.Prefix)
+	if tmux.SessionExists(rootName) {
+		client := mcpserver.NewDaemonClient(sp, "cli")
+		if err := client.Connect(); err == nil {
+			defer client.Close()
+			msg := fmt.Sprintf(
+				"New sub-project `%s` registered. Run list_agents/list_workspaces to see its workspaces and sub-orchestrator.",
+				newChildName,
+			)
+			_, _ = client.SendMessage(rootName, msg)
+		}
+	}
+	return nil
+}
+
+// writeOrchestratorPromptsOnly walks the tree and regenerates prompt files
+// without touching tmux sessions. Used when the daemon isn't running.
+func writeOrchestratorPromptsOnly(node *config.ProjectNode, parentName string) error {
+	if node == nil {
+		return nil
+	}
+	selfName := workspace.OrchestratorName(node.Prefix)
+	orchDir, err := orchestratorDir(node)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(orchDir, 0o755); err != nil {
+		return err
+	}
+	runtime := agent.NormalizeRuntime(node.OrchestratorRuntime)
+	if err := workspace.WriteOrchestratorPrompt(orchDir, node, node.Prefix, parentName, runtime); err != nil {
+		return err
+	}
+	for _, child := range node.Children {
+		if err := writeOrchestratorPromptsOnly(child, selfName); err != nil {
+			return err
+		}
+	}
+	return nil
 }
