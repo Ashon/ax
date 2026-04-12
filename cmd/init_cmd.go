@@ -68,6 +68,13 @@ var initCmd = &cobra.Command{
 			}
 		}
 
+		// Ensure .mcp.json is gitignored (it has user-specific paths).
+		if !initGlobal {
+			if added, _ := ensureGitignore(dir, ".mcp.json"); added {
+				fmt.Println("Added .mcp.json to .gitignore")
+			}
+		}
+
 		if alreadyExists || initNoSetup {
 			if !alreadyExists {
 				fmt.Println("Edit it to define your workspaces, then run: ax up")
@@ -415,6 +422,44 @@ func loadRawConfig(path string) (*config.Config, error) {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// ensureGitignore appends pattern to .gitignore in dir if it's not already
+// present. Returns (added, err): added=true if the file was modified.
+// If .gitignore does not exist and the directory is not a git repository,
+// no file is created.
+func ensureGitignore(dir, pattern string) (bool, error) {
+	gitignorePath := filepath.Join(dir, ".gitignore")
+
+	data, err := os.ReadFile(gitignorePath)
+	if err != nil && !os.IsNotExist(err) {
+		return false, err
+	}
+	if os.IsNotExist(err) {
+		// Only create if this directory has a .git folder
+		if _, gitErr := os.Stat(filepath.Join(dir, ".git")); gitErr != nil {
+			return false, nil
+		}
+		data = nil
+	}
+
+	// Check if pattern already present (exact line match)
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == pattern {
+			return false, nil
+		}
+	}
+
+	content := string(data)
+	if len(content) > 0 && !strings.HasSuffix(content, "\n") {
+		content += "\n"
+	}
+	content += pattern + "\n"
+
+	if err := os.WriteFile(gitignorePath, []byte(content), 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func mustGetwd() string {
