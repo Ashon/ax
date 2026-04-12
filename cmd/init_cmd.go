@@ -65,16 +65,17 @@ var initCmd = &cobra.Command{
 
 func runSetupAgent(projectDir, configPath string) error {
 	systemPrompt := buildSetupSystemPrompt(configPath)
-	userPrompt := "프로젝트 구조를 파악해서 워크스페이스 구성을 결정하고 바로 config.yaml에 작성해주세요. 작성 후 사용자에게 결과를 보여주고 조정이 필요하면 말씀해달라고 안내하세요."
+	userPrompt := "프로젝트 구조를 파악해서 워크스페이스 구성을 결정하고 config.yaml에 작성해주세요. 작성 완료 후 어떤 워크스페이스를 만들었는지 요약해주세요."
 
 	claudeBin, err := exec.LookPath("claude")
 	if err != nil {
-		fmt.Println("claude CLI not found — skipping interactive setup.")
+		fmt.Println("claude CLI not found — skipping setup.")
 		fmt.Printf("Edit %s manually and run: ax up\n", configPath)
 		return nil
 	}
 
 	cmd := exec.Command(claudeBin,
+		"-p",
 		"--dangerously-skip-permissions",
 		"--append-system-prompt", systemPrompt,
 		userPrompt,
