@@ -64,7 +64,8 @@ var initCmd = &cobra.Command{
 }
 
 func runSetupAgent(projectDir, configPath string) error {
-	prompt := buildSetupPrompt(configPath)
+	systemPrompt := buildSetupSystemPrompt(configPath)
+	userPrompt := "프로젝트 구조를 파악하고 워크스페이스 구성을 제안해주세요."
 
 	claudeBin, err := exec.LookPath("claude")
 	if err != nil {
@@ -73,7 +74,11 @@ func runSetupAgent(projectDir, configPath string) error {
 		return nil
 	}
 
-	cmd := exec.Command(claudeBin, "--dangerously-skip-permissions", prompt)
+	cmd := exec.Command(claudeBin,
+		"--dangerously-skip-permissions",
+		"--append-system-prompt", systemPrompt,
+		userPrompt,
+	)
 	cmd.Dir = projectDir
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -81,8 +86,8 @@ func runSetupAgent(projectDir, configPath string) error {
 	return cmd.Run()
 }
 
-func buildSetupPrompt(configPath string) string {
-	return fmt.Sprintf(`당신은 ax 프로젝트 셋업 에이전트입니다. 현재 디렉토리의 프로젝트를 분석해서 멀티 에이전트 워크스페이스 구성을 제안하고 %s 파일을 편집해주세요.
+func buildSetupSystemPrompt(configPath string) string {
+	return fmt.Sprintf(`당신은 ax 프로젝트 셋업 에이전트입니다. 사용자가 요청하면 현재 디렉토리의 프로젝트를 분석해서 멀티 에이전트 워크스페이스 구성을 제안하고 %s 파일을 편집하세요.
 
 ## 절차
 1. 프로젝트 구조를 파악하세요 (Glob으로 디렉토리 구조, README/package.json/go.mod/pyproject.toml 등 주요 파일 확인).
@@ -107,9 +112,7 @@ workspaces:
 - 워크스페이스 이름은 kebab-case 또는 snake_case로 짧고 명확하게 (예: backend, frontend, infra, docs).
 - description은 한 문장으로 역할을 명확히 설명.
 - instructions는 구체적으로 작성 — 그 에이전트가 어떤 디렉토리에서 작업하고, 어떤 원칙을 따라야 하는지.
-- 기존 %s 파일은 최소 stub만 있는 상태입니다. workspaces 섹션을 채워주세요.
-
-먼저 프로젝트 구조를 파악하고 제안해주세요.`, configPath, configPath, configPath)
+- 기존 %s 파일은 최소 stub만 있는 상태입니다. workspaces 섹션을 채워주세요.`, configPath, configPath, configPath)
 }
 
 func mustGetwd() string {
