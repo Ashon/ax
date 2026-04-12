@@ -341,25 +341,45 @@ workspaces:
 // registerAsChild searches upward from dir for an ancestor .ax/config.yaml
 // and registers dir as a child entry if not already present.
 // Returns the parent config path and whether a new entry was added.
-func registerAsChild(dir, name string) (string, bool) {
-	parent := filepath.Dir(dir)
+// registerAsChild finds the topmost ancestor .ax/config.yaml (or the home
+// directory's global config) and adds childDir as a child entry.
+// Returns the parent config path and whether a new entry was added.
+func registerAsChild(childDir, name string) (string, bool) {
+	var (
+		topMostCfgPath string
+		topMostDir     string
+	)
+
+	// Walk from childDir's parent upward, remembering the topmost match.
+	cur := filepath.Dir(childDir)
 	for {
-		if parent == dir || parent == "" {
+		if path, ok := findConfigInDir(cur); ok {
+			topMostCfgPath = path
+			topMostDir = cur
+		}
+		next := filepath.Dir(cur)
+		if next == cur {
 			break
 		}
-		if path, ok := findConfigInDir(parent); ok {
-			added, _ := addChildToConfig(path, parent, dir, name)
-			if added {
-				return path, true
-			}
-			return "", false
+		cur = next
+	}
+
+	// Also check the home directory explicitly so the global config
+	// always wins when present, even if it's not on the CWD's ancestor path.
+	if home, err := os.UserHomeDir(); err == nil {
+		if path, ok := findConfigInDir(home); ok {
+			topMostCfgPath = path
+			topMostDir = home
 		}
-		next := filepath.Dir(parent)
-		if next == parent {
-			break
-		}
-		dir = parent
-		parent = next
+	}
+
+	if topMostCfgPath == "" {
+		return "", false
+	}
+
+	added, _ := addChildToConfig(topMostCfgPath, topMostDir, childDir, name)
+	if added {
+		return topMostCfgPath, true
 	}
 	return "", false
 }
@@ -378,6 +398,7 @@ func findConfigInDir(dir string) (string, bool) {
 
 // addChildToConfig adds childDir to the parent config's children map.
 // Returns (added, err): added=true if a new entry was written.
+// Prunes stale entries (pointing to dirs without a valid ax config) along the way.
 func addChildToConfig(parentConfigPath, parentDir, childDir, childName string) (bool, error) {
 	parentCfg, err := loadRawConfig(parentConfigPath)
 	if err != nil {
@@ -392,9 +413,26 @@ func addChildToConfig(parentConfigPath, parentDir, childDir, childName string) (
 		relDir = childDir
 	}
 
+	// Prune stale children (broken paths)
+	pruned := false
+	for entryName, existing := range parentCfg.Children {
+		resolvedDir := existing.Dir
+		if !filepath.IsAbs(resolvedDir) {
+			resolvedDir = filepath.Join(parentDir, resolvedDir)
+		}
+		if _, ok := findConfigInDir(resolvedDir); !ok {
+			delete(parentCfg.Children, entryName)
+			pruned = true
+			fmt.Printf("Pruned stale child %q -> %s\n", entryName, existing.Dir)
+		}
+	}
+
 	// Check if any existing entry already points to this directory
 	for _, existing := range parentCfg.Children {
 		if existing.Dir == relDir {
+			if pruned {
+				parentCfg.Save(parentConfigPath)
+			}
 			return false, nil
 		}
 	}
