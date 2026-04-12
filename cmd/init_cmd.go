@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/ashon/ax/internal/config"
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 )
 
 var (
@@ -56,6 +57,14 @@ var initCmd = &cobra.Command{
 			return err
 		}
 		fmt.Printf("Created %s\n", path)
+
+		// If this is not a global init, look for an ancestor config and
+		// register this dir as a child in its tree.
+		if !initGlobal {
+			if parentPath, added := registerAsChild(dir, projectName); added {
+				fmt.Printf("Registered as child of %s\n", parentPath)
+			}
+		}
 
 		if initNoSetup {
 			fmt.Println("Edit it to define your workspaces, then run: ax up")
@@ -311,6 +320,89 @@ workspaces:
 - description은 한 문장으로 역할을 명확히 설명.
 - instructions는 구체적으로 작성 — 그 에이전트가 어떤 디렉토리에서 작업하고, 어떤 원칙을 따라야 하는지.
 - 기존 %s 파일은 최소 stub만 있는 상태입니다. workspaces 섹션을 채워주세요.`, configPath, configPath, configPath)
+}
+
+// registerAsChild searches upward from dir for an ancestor .ax/config.yaml
+// and registers dir as a child entry. Returns the parent config path and
+// true if the registration succeeded.
+func registerAsChild(dir, name string) (string, bool) {
+	parent := filepath.Dir(dir)
+	for {
+		if parent == dir || parent == "" {
+			break
+		}
+		if path, ok := findConfigInDir(parent); ok {
+			if err := addChildToConfig(path, parent, dir, name); err == nil {
+				return path, true
+			}
+			return "", false
+		}
+		next := filepath.Dir(parent)
+		if next == parent {
+			break
+		}
+		dir = parent
+		parent = next
+	}
+	return "", false
+}
+
+func findConfigInDir(dir string) (string, bool) {
+	preferred := config.DefaultConfigPath(dir)
+	if _, err := os.Stat(preferred); err == nil {
+		return preferred, true
+	}
+	legacy := config.LegacyConfigPath(dir)
+	if _, err := os.Stat(legacy); err == nil {
+		return legacy, true
+	}
+	return "", false
+}
+
+func addChildToConfig(parentConfigPath, parentDir, childDir, childName string) error {
+	parentCfg, err := loadRawConfig(parentConfigPath)
+	if err != nil {
+		return err
+	}
+	if parentCfg.Children == nil {
+		parentCfg.Children = make(map[string]config.Child)
+	}
+
+	// Compute relative path from parent project root to child dir
+	relDir, err := filepath.Rel(parentDir, childDir)
+	if err != nil {
+		relDir = childDir
+	}
+
+	// Avoid overwriting existing entry with same name
+	entryName := childName
+	for i := 2; ; i++ {
+		if _, exists := parentCfg.Children[entryName]; !exists {
+			break
+		}
+		if existing := parentCfg.Children[entryName]; existing.Dir == relDir {
+			// Already registered at same path
+			return nil
+		}
+		entryName = fmt.Sprintf("%s-%d", childName, i)
+	}
+
+	parentCfg.Children[entryName] = config.Child{Dir: relDir}
+	return parentCfg.Save(parentConfigPath)
+}
+
+// loadRawConfig reads and parses a config file without resolving children,
+// so we can edit and re-save it without merging the tree.
+func loadRawConfig(path string) (*config.Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var cfg config.Config
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
 }
 
 func mustGetwd() string {
