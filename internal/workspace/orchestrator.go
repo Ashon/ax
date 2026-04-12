@@ -65,6 +65,14 @@ func WriteOrchestratorPrompt(orchDir string, node *config.ProjectNode, prefix, p
 	sb.WriteString("- 복잡한 작업은 단계별로 나누어 분배하세요.\n")
 	sb.WriteString("- 작업 완료 후 품질을 확인하고, 필요하면 수정을 요청하세요.\n\n")
 
+	sb.WriteString("## 응답 종결 규칙 (중요)\n")
+	sb.WriteString("ACK 루프를 방지하기 위해 다음을 반드시 지키세요:\n")
+	sb.WriteString("- **단순 확인/수신(ACK) 메시지를 보내지 마세요.** `[ack]`, `[received]`, `\"잘 받았습니다\"` 같은 내용만의 메시지는 절대 보내지 않습니다.\n")
+	sb.WriteString("- 메시지에 **새로운 작업/정보가 포함되지 않았다면** 회신하지 마세요 (대화 종료).\n")
+	sb.WriteString("- `request` 툴의 결과는 도구 반환값으로 받은 것이지 새 메시지가 아닙니다. 그 응답을 받았다고 해서 다시 메시지를 보내지 마세요.\n")
+	sb.WriteString("- 작업 완료 보고를 보낸 후에는 상대의 확인/감사 메시지가 오더라도 다시 회신하지 마세요.\n")
+	sb.WriteString("- 상태 알림은 `set_status`를 사용하고, `send_message`로 상태 핑을 보내지 마세요.\n\n")
+
 	// Direct workspaces (at this project level)
 	if len(node.Workspaces) > 0 {
 		sb.WriteString("## 직접 관리하는 워크스페이스\n\n")
