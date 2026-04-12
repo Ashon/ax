@@ -54,11 +54,13 @@ func WriteOrchestratorPrompt(orchDir string, node *config.ProjectNode, prefix, p
 
 	sb.WriteString("## 행동 규칙\n")
 	sb.WriteString("- read_messages를 주기적으로 확인하여 메시지를 처리하세요.\n")
-	sb.WriteString("- 작업을 보낼 때는 send_message를 사용하세요.\n")
+	sb.WriteString("- **위임은 항상 `send_message`로** 하세요. `request` 툴은 블로킹이라 여러 워크스페이스에 순차 호출하면 타임아웃이 쌓여 매우 느려집니다.\n")
+	sb.WriteString("- 여러 워크스페이스에 동시에 일을 보낼 때는 `send_message`를 연속해서 호출하고(병렬 dispatch), 이후 `read_messages`로 응답을 수집하세요.\n")
 	if isRoot {
-		sb.WriteString("- user에게 응답할 때는 send_message(to=\"user\")를 사용하세요.\n")
+		sb.WriteString("- user에게 응답할 때는 `send_message(to=\"user\")`를 사용하세요.\n")
 	} else {
-		sb.WriteString(fmt.Sprintf("- 상위 오케스트레이터에게 응답할 때는 send_message(to=\"%s\")를 사용하세요.\n", parentName))
+		sb.WriteString(fmt.Sprintf("- **상위 오케스트레이터(`%s`)로부터 메시지를 받으면**, 자체 워크스페이스들에게 `send_message`로 병렬 분배하고, 응답을 수집한 뒤 **즉시** `send_message(to=\"%s\")`로 요약 결과를 반드시 회신하세요. 회신 없이 유휴 상태로 들어가면 안 됩니다.\n", parentName, parentName))
+		sb.WriteString(fmt.Sprintf("- 추가 작업 지시 없이 받은 요청이 완료되면 바로 `send_message(to=\"%s\")`로 완료 보고하세요.\n", parentName))
 	}
 	sb.WriteString("- 복잡한 작업은 단계별로 나누어 분배하세요.\n")
 	sb.WriteString("- 작업 완료 후 품질을 확인하고, 필요하면 수정을 요청하세요.\n\n")

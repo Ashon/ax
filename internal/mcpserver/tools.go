@@ -512,7 +512,7 @@ func requestHandler(client *DaemonClient) server.ToolHandlerFunc {
 		timeout := int(request.GetFloat("timeout", 120))
 
 		// Include reply instruction in the message
-		fullMessage := message + "\n\n[ax] 작업 완료 후 반드시 send_message(to=\"" + client.workspace + "\") 로 결과를 보내주세요."
+		fullMessage := message + "\n\n[ax/request] 이 메시지는 동기 요청입니다. `" + client.workspace + "`가 당신의 응답을 기다리고 있습니다. 작업이 끝나면 즉시 `send_message(to=\"" + client.workspace + "\")`로 결과를 회신하세요. 하위 워크스페이스에 위임할 때는 `request`가 아닌 `send_message`를 병렬로 사용한 뒤 `read_messages`로 수집하세요."
 
 		// Send message via daemon
 		_, err := client.SendMessage(to, fullMessage)
