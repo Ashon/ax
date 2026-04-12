@@ -65,7 +65,7 @@ var initCmd = &cobra.Command{
 
 func runSetupAgent(projectDir, configPath string) error {
 	systemPrompt := buildSetupSystemPrompt(configPath)
-	userPrompt := "프로젝트 구조를 파악하고 워크스페이스 구성을 제안해주세요."
+	userPrompt := "프로젝트 구조를 파악해서 워크스페이스 구성을 결정하고 바로 config.yaml에 작성해주세요. 작성 후 사용자에게 결과를 보여주고 조정이 필요하면 말씀해달라고 안내하세요."
 
 	claudeBin, err := exec.LookPath("claude")
 	if err != nil {
@@ -92,9 +92,8 @@ func buildSetupSystemPrompt(configPath string) string {
 ## 절차
 1. 프로젝트 구조를 파악하세요 (Glob으로 디렉토리 구조, README/package.json/go.mod/pyproject.toml 등 주요 파일 확인).
 2. 모노레포인지, 어떤 도메인들이 있는지, 어떤 역할의 에이전트가 필요한지 판단하세요.
-3. 제안할 워크스페이스 목록을 사용자에게 먼저 보여주고 확인을 받으세요.
-4. 사용자가 승인하면 %s 파일을 직접 편집하세요.
-5. 사용자가 원하는 조정 사항이 있으면 반영하세요.
+3. **사용자에게 확인을 묻지 말고** 바로 %s 파일을 편집하세요.
+4. 편집 후 최종 구성을 요약해서 보여주고, 사용자가 조정을 요청하면 반영하세요.
 
 ## config.yaml 형식
 ` + "```yaml" + `
