@@ -2,3 +2,4 @@ ax
 *.exe
 .DS_Store
 dist/
+.mcp.json

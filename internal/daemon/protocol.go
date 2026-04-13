@@ -20,6 +20,10 @@ const (
 	MsgSetShared      MessageType = "set_shared"
 	MsgGetShared      MessageType = "get_shared"
 	MsgListShared     MessageType = "list_shared"
+	MsgCreateTask     MessageType = "create_task"
+	MsgUpdateTask     MessageType = "update_task"
+	MsgGetTask        MessageType = "get_task"
+	MsgListTasks      MessageType = "list_tasks"
 	MsgPushMessage    MessageType = "push_message"
 	MsgResponse       MessageType = "response"
 	MsgError          MessageType = "error"
@@ -68,6 +72,31 @@ type GetSharedPayload struct {
 	Key string `json:"key"`
 }
 
+// Task payloads
+
+type CreateTaskPayload struct {
+	Title       string `json:"title"`
+	Description string `json:"description,omitempty"`
+	Assignee    string `json:"assignee"`
+}
+
+type UpdateTaskPayload struct {
+	ID     string           `json:"id"`
+	Status *types.TaskStatus `json:"status,omitempty"`
+	Result *string          `json:"result,omitempty"`
+	Log    *string          `json:"log,omitempty"`
+}
+
+type GetTaskPayload struct {
+	ID string `json:"id"`
+}
+
+type ListTasksPayload struct {
+	Assignee  string           `json:"assignee,omitempty"`
+	CreatedBy string           `json:"created_by,omitempty"`
+	Status    *types.TaskStatus `json:"status,omitempty"`
+}
+
 // Response payloads
 
 type ResponsePayload struct {
@@ -95,6 +124,16 @@ type GetSharedResponse struct {
 
 type ListSharedResponse struct {
 	Values map[string]string `json:"values"`
+}
+
+// Task responses
+
+type TaskResponse struct {
+	Task types.Task `json:"task"`
+}
+
+type ListTasksResponse struct {
+	Tasks []types.Task `json:"tasks"`
 }
 
 // Helper functions

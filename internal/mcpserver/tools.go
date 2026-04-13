@@ -134,6 +134,49 @@ func registerTools(srv *server.MCPServer, client *DaemonClient, configPath strin
 		),
 		interruptAgentHandler(client),
 	)
+
+	// create_task
+	srv.AddTool(
+		mcp.NewTool("create_task",
+			mcp.WithDescription("Create a task and assign it to a workspace agent. The task tracks status (pending/in_progress/completed/failed), progress logs, and results."),
+			mcp.WithString("title", mcp.Required(), mcp.Description("Short task title")),
+			mcp.WithString("description", mcp.Description("Detailed task description")),
+			mcp.WithString("assignee", mcp.Required(), mcp.Description("Workspace name to assign the task to")),
+		),
+		createTaskHandler(client),
+	)
+
+	// update_task
+	srv.AddTool(
+		mcp.NewTool("update_task",
+			mcp.WithDescription("Update a task's status, result, or append a progress log entry."),
+			mcp.WithString("id", mcp.Required(), mcp.Description("Task ID")),
+			mcp.WithString("status", mcp.Description("New status: pending, in_progress, completed, or failed")),
+			mcp.WithString("result", mcp.Description("Task result summary (typically set on completion)")),
+			mcp.WithString("log", mcp.Description("Progress log message to append")),
+		),
+		updateTaskHandler(client),
+	)
+
+	// get_task
+	srv.AddTool(
+		mcp.NewTool("get_task",
+			mcp.WithDescription("Get detailed information about a specific task including its logs."),
+			mcp.WithString("id", mcp.Required(), mcp.Description("Task ID")),
+		),
+		getTaskHandler(client),
+	)
+
+	// list_tasks
+	srv.AddTool(
+		mcp.NewTool("list_tasks",
+			mcp.WithDescription("List tasks with optional filters. Returns all tasks if no filters are specified."),
+			mcp.WithString("assignee", mcp.Description("Filter by assigned workspace")),
+			mcp.WithString("created_by", mcp.Description("Filter by creator workspace")),
+			mcp.WithString("status", mcp.Description("Filter by status: pending, in_progress, completed, or failed")),
+		),
+		listTasksHandler(client),
+	)
 }
 
 type agentInfo struct {
@@ -561,5 +604,106 @@ func interruptAgentHandler(client *DaemonClient) server.ToolHandlerFunc {
 		}
 
 		return mcp.NewToolResultText(fmt.Sprintf("Interrupt sent to %q", name)), nil
+	}
+}
+
+func createTaskHandler(client *DaemonClient) server.ToolHandlerFunc {
+	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		title, _ := request.RequireString("title")
+		description := request.GetString("description", "")
+		assignee, _ := request.RequireString("assignee")
+
+		task, err := client.CreateTask(title, description, assignee)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to create task: %v", err)), nil
+		}
+
+		data, _ := json.MarshalIndent(task, "", "  ")
+		return mcp.NewToolResultText(string(data)), nil
+	}
+}
+
+func updateTaskHandler(client *DaemonClient) server.ToolHandlerFunc {
+	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		id, _ := request.RequireString("id")
+		statusStr := request.GetString("status", "")
+		resultStr := request.GetString("result", "")
+		logStr := request.GetString("log", "")
+
+		var status *types.TaskStatus
+		if statusStr != "" {
+			s := types.TaskStatus(statusStr)
+			switch s {
+			case types.TaskPending, types.TaskInProgress, types.TaskCompleted, types.TaskFailed:
+				status = &s
+			default:
+				return mcp.NewToolResultError(fmt.Sprintf("Invalid status: %q (must be pending, in_progress, completed, or failed)", statusStr)), nil
+			}
+		}
+
+		var result *string
+		if resultStr != "" {
+			result = &resultStr
+		}
+		var logMsg *string
+		if logStr != "" {
+			logMsg = &logStr
+		}
+
+		task, err := client.UpdateTask(id, status, result, logMsg)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to update task: %v", err)), nil
+		}
+
+		data, _ := json.MarshalIndent(task, "", "  ")
+		return mcp.NewToolResultText(string(data)), nil
+	}
+}
+
+func getTaskHandler(client *DaemonClient) server.ToolHandlerFunc {
+	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		id, _ := request.RequireString("id")
+
+		task, err := client.GetTask(id)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to get task: %v", err)), nil
+		}
+
+		data, _ := json.MarshalIndent(task, "", "  ")
+		return mcp.NewToolResultText(string(data)), nil
+	}
+}
+
+func listTasksHandler(client *DaemonClient) server.ToolHandlerFunc {
+	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		assignee := request.GetString("assignee", "")
+		createdBy := request.GetString("created_by", "")
+		statusStr := request.GetString("status", "")
+
+		var status *types.TaskStatus
+		if statusStr != "" {
+			s := types.TaskStatus(statusStr)
+			switch s {
+			case types.TaskPending, types.TaskInProgress, types.TaskCompleted, types.TaskFailed:
+				status = &s
+			default:
+				return mcp.NewToolResultError(fmt.Sprintf("Invalid status filter: %q", statusStr)), nil
+			}
+		}
+
+		tasks, err := client.ListTasks(assignee, createdBy, status)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to list tasks: %v", err)), nil
+		}
+
+		if len(tasks) == 0 {
+			return mcp.NewToolResultText("No tasks found."), nil
+		}
+
+		data, _ := json.MarshalIndent(map[string]any{
+			"count": len(tasks),
+			"tasks": tasks,
+		}, "", "  ")
+		return mcp.NewToolResultText(string(data)), nil
 	}
 }

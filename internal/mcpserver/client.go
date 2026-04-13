@@ -259,3 +259,68 @@ func (c *DaemonClient) ListSharedValues() (map[string]string, error) {
 	json.Unmarshal(respPayload.Data, &result)
 	return result.Values, nil
 }
+
+// Task operations
+
+func (c *DaemonClient) CreateTask(title, description, assignee string) (*types.Task, error) {
+	resp, err := c.sendRequest(daemon.MsgCreateTask, &daemon.CreateTaskPayload{
+		Title:       title,
+		Description: description,
+		Assignee:    assignee,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var respPayload daemon.ResponsePayload
+	resp.DecodePayload(&respPayload)
+	var result daemon.TaskResponse
+	json.Unmarshal(respPayload.Data, &result)
+	return &result.Task, nil
+}
+
+func (c *DaemonClient) UpdateTask(id string, status *types.TaskStatus, result *string, logMsg *string) (*types.Task, error) {
+	resp, err := c.sendRequest(daemon.MsgUpdateTask, &daemon.UpdateTaskPayload{
+		ID:     id,
+		Status: status,
+		Result: result,
+		Log:    logMsg,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var respPayload daemon.ResponsePayload
+	resp.DecodePayload(&respPayload)
+	var taskResp daemon.TaskResponse
+	json.Unmarshal(respPayload.Data, &taskResp)
+	return &taskResp.Task, nil
+}
+
+func (c *DaemonClient) GetTask(id string) (*types.Task, error) {
+	resp, err := c.sendRequest(daemon.MsgGetTask, &daemon.GetTaskPayload{
+		ID: id,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var respPayload daemon.ResponsePayload
+	resp.DecodePayload(&respPayload)
+	var result daemon.TaskResponse
+	json.Unmarshal(respPayload.Data, &result)
+	return &result.Task, nil
+}
+
+func (c *DaemonClient) ListTasks(assignee, createdBy string, status *types.TaskStatus) ([]types.Task, error) {
+	resp, err := c.sendRequest(daemon.MsgListTasks, &daemon.ListTasksPayload{
+		Assignee:  assignee,
+		CreatedBy: createdBy,
+		Status:    status,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var respPayload daemon.ResponsePayload
+	resp.DecodePayload(&respPayload)
+	var result daemon.ListTasksResponse
+	json.Unmarshal(respPayload.Data, &result)
+	return result.Tasks, nil
+}

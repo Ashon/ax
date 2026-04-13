@@ -29,6 +29,7 @@ type Daemon struct {
 	history      *History
 	sharedValues map[string]string
 	sharedMu     sync.RWMutex
+	taskStore    *TaskStore
 	listener     net.Listener
 	logger       *log.Logger
 }
@@ -42,6 +43,7 @@ func New(socketPath string) *Daemon {
 		queue:        NewMessageQueue(),
 		history:      NewHistory(stateDir, 500),
 		sharedValues: make(map[string]string),
+		taskStore:    NewTaskStore(),
 		logger:       log.New(os.Stderr, "[ax-daemon] ", log.LstdFlags),
 	}
 }
@@ -259,6 +261,52 @@ func (d *Daemon) handleEnvelope(conn net.Conn, env *Envelope, workspace *string)
 		}
 		d.sharedMu.RUnlock()
 		return NewResponseEnvelope(env.ID, &ListSharedResponse{Values: vals})
+
+	case MsgCreateTask:
+		var p CreateTaskPayload
+		if err := env.DecodePayload(&p); err != nil {
+			return nil, fmt.Errorf("decode create_task: %w", err)
+		}
+		if *workspace == "" {
+			return nil, fmt.Errorf("not registered")
+		}
+		task := d.taskStore.Create(p.Title, p.Description, p.Assignee, *workspace)
+		d.logger.Printf("task created: %s (assignee=%s, by=%s)", task.ID, task.Assignee, *workspace)
+		return NewResponseEnvelope(env.ID, &TaskResponse{Task: *task})
+
+	case MsgUpdateTask:
+		var p UpdateTaskPayload
+		if err := env.DecodePayload(&p); err != nil {
+			return nil, fmt.Errorf("decode update_task: %w", err)
+		}
+		if *workspace == "" {
+			return nil, fmt.Errorf("not registered")
+		}
+		task, err := d.taskStore.Update(p.ID, p.Status, p.Result, p.Log, *workspace)
+		if err != nil {
+			return nil, err
+		}
+		d.logger.Printf("task updated: %s (status=%s)", task.ID, task.Status)
+		return NewResponseEnvelope(env.ID, &TaskResponse{Task: *task})
+
+	case MsgGetTask:
+		var p GetTaskPayload
+		if err := env.DecodePayload(&p); err != nil {
+			return nil, fmt.Errorf("decode get_task: %w", err)
+		}
+		task, found := d.taskStore.Get(p.ID)
+		if !found {
+			return nil, fmt.Errorf("task %q not found", p.ID)
+		}
+		return NewResponseEnvelope(env.ID, &TaskResponse{Task: *task})
+
+	case MsgListTasks:
+		var p ListTasksPayload
+		if err := env.DecodePayload(&p); err != nil {
+			return nil, fmt.Errorf("decode list_tasks: %w", err)
+		}
+		tasks := d.taskStore.List(p.Assignee, p.CreatedBy, p.Status)
+		return NewResponseEnvelope(env.ID, &ListTasksResponse{Tasks: tasks})
 
 	default:
 		return nil, fmt.Errorf("unknown message type: %s", env.Type)
