@@ -17,6 +17,7 @@ import (
 	"github.com/ashon/ax/internal/config"
 	"github.com/ashon/ax/internal/daemon"
 	"github.com/ashon/ax/internal/tmux"
+	"github.com/ashon/ax/internal/types"
 	"github.com/spf13/cobra"
 )
 
@@ -44,6 +45,20 @@ var (
 	msgToStyle      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("2"))
 	msgTimeStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	runtimeStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
+	taskBorderClr   = lipgloss.NewStyle().Foreground(lipgloss.Color("4"))
+	taskTitleStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("4"))
+	taskPendingClr  = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	taskActiveClr   = lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
+	taskDoneClr     = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
+	taskFailClr     = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+)
+
+type streamView int
+
+const (
+	streamMessages streamView = iota
+	streamTasks
+	streamHidden
 )
 
 // Regex for parsing agent status
@@ -71,7 +86,9 @@ type watchModel struct {
 	runtimes   map[string]string
 	msgHistory []daemon.HistoryEntry
 	histPath   string
-	showStream bool
+	tasks      []types.Task
+	tasksPath  string
+	stream     streamView
 }
 
 type sidebarEntry struct {
@@ -83,12 +100,13 @@ type sidebarEntry struct {
 
 func newWatchModel() watchModel {
 	return watchModel{
-		captures:   make(map[string]string),
-		prevCaps:   make(map[string]string),
-		activity:   make(map[string]time.Time),
-		runtimes:   loadWatchRuntimes(),
-		histPath:   daemon.HistoryFilePath(socketPath),
-		showStream: true,
+		captures:  make(map[string]string),
+		prevCaps:  make(map[string]string),
+		activity:  make(map[string]time.Time),
+		runtimes:  loadWatchRuntimes(),
+		histPath:  daemon.HistoryFilePath(socketPath),
+		tasksPath: daemon.TasksFilePath(socketPath),
+		stream:   streamMessages,
 	}
 }
 
@@ -107,7 +125,7 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "down", "j":
 			m.selected = moveSelection(m.selected, m.sessions, 1)
 		case "tab":
-			m.showStream = !m.showStream
+			m.stream = (m.stream + 1) % 3
 		case "x":
 			if m.selected < len(m.sessions) {
 				_ = tmux.InterruptWorkspace(m.sessions[m.selected].Workspace)
@@ -124,7 +142,7 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.selected < len(m.sessions) && m.width > 0 {
 			sideW := watchSidebarWidth
 			mainW := m.width - sideW - 2 // inner content width
-			streamH := messagePaneHeight(m.height, m.showStream)
+			streamH := streamPaneHeight(m.height, m.stream)
 			mainH := m.height - streamH - 3 // inner content height
 			if mainW > 10 && mainH > 5 {
 				selected := m.sessions[m.selected]
@@ -141,6 +159,7 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.captures[s.Workspace] = content
 		}
 		m.msgHistory = readHistoryFile(m.histPath, 50)
+		m.tasks = readTasksFile(m.tasksPath)
 		return m, tickCmd()
 	}
 	return m, nil
@@ -158,7 +177,7 @@ func (m watchModel) View() string {
 		mainW = 20
 	}
 
-	streamH := messagePaneHeight(m.height, m.showStream)
+	streamH := streamPaneHeight(m.height, m.stream)
 	contentH := m.height - streamH - 1 // -1 for help line
 
 	// === Sidebar ===
@@ -175,15 +194,18 @@ func (m watchModel) View() string {
 	// Join sidebar + main
 	top := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, mainContent)
 
-	// === Message stream ===
+	// === Stream pane (messages or tasks) ===
 	var stream string
-	if m.showStream {
+	switch m.stream {
+	case streamMessages:
 		stream = m.renderStream(m.width, streamH)
+	case streamTasks:
+		stream = m.renderTasks(m.width, streamH)
 	}
 
 	// === Help line ===
 	help := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(
-		" ↑↓ select · x interrupt · tab stream · q quit")
+		" ↑↓ select · x interrupt · tab messages/tasks/off · q quit")
 
 	parts := []string{top}
 	if stream != "" {
@@ -401,8 +423,8 @@ func tickCmd() tea.Cmd {
 	})
 }
 
-func messagePaneHeight(totalHeight int, showStream bool) int {
-	if !showStream {
+func streamPaneHeight(totalHeight int, sv streamView) int {
+	if sv == streamHidden {
 		return 0
 	}
 
@@ -790,6 +812,122 @@ func readHistoryFile(path string, maxEntries int) []daemon.HistoryEntry {
 		entries = entries[len(entries)-maxEntries:]
 	}
 	return entries
+}
+
+func readTasksFile(path string) []types.Task {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var tasks []types.Task
+	if json.Unmarshal(data, &tasks) != nil {
+		return nil
+	}
+	// Sort: in_progress first, then pending, then completed/failed
+	sort.Slice(tasks, func(i, j int) bool {
+		return taskSortOrder(tasks[i].Status) < taskSortOrder(tasks[j].Status)
+	})
+	return tasks
+}
+
+func taskSortOrder(s types.TaskStatus) int {
+	switch s {
+	case types.TaskInProgress:
+		return 0
+	case types.TaskPending:
+		return 1
+	case types.TaskFailed:
+		return 2
+	case types.TaskCompleted:
+		return 3
+	default:
+		return 4
+	}
+}
+
+func taskStatusStyle(s types.TaskStatus) lipgloss.Style {
+	switch s {
+	case types.TaskPending:
+		return taskPendingClr
+	case types.TaskInProgress:
+		return taskActiveClr
+	case types.TaskCompleted:
+		return taskDoneClr
+	case types.TaskFailed:
+		return taskFailClr
+	default:
+		return taskPendingClr
+	}
+}
+
+func (m watchModel) renderTasks(totalW, totalH int) string {
+	innerW := totalW - 2
+	innerH := totalH - 2
+	if innerH < 1 {
+		innerH = 1
+	}
+
+	title := taskTitleStyle.Render(" tasks ")
+	titleW := lipgloss.Width(title)
+	pad := innerW - titleW - 1
+	if pad < 0 {
+		pad = 0
+	}
+	topLine := taskBorderClr.Render("╭─") + title + taskBorderClr.Render(strings.Repeat("─", pad)+"╮")
+
+	var taskLines []string
+	if len(m.tasks) == 0 {
+		taskLines = append(taskLines, taskPendingClr.Render("  (no tasks)"))
+	} else {
+		for _, task := range m.tasks {
+			sty := taskStatusStyle(task.Status)
+			shortID := task.ID
+			if len(shortID) > 8 {
+				shortID = shortID[:8]
+			}
+			status := sty.Render(fmt.Sprintf("%-11s", task.Status))
+			titleStr := truncateStr(task.Title, 30)
+			assignee := msgToStyle.Render(task.Assignee)
+
+			line := fmt.Sprintf(" %s %s %-30s → %s",
+				msgTimeStyle.Render(shortID), status, titleStr, assignee)
+
+			// Append last log message if available
+			if len(task.Logs) > 0 {
+				lastLog := truncateStr(task.Logs[len(task.Logs)-1].Message, innerW-70)
+				if lastLog != "" {
+					line += "  " + msgTimeStyle.Render(lastLog)
+				}
+			}
+
+			taskLines = append(taskLines, line)
+		}
+	}
+
+	var bodyLines []string
+	for i := 0; i < innerH; i++ {
+		line := ""
+		if i < len(taskLines) {
+			line = taskLines[i]
+		}
+		visW := lipgloss.Width(line)
+		if visW > innerW {
+			line = truncateStr(line, innerW)
+			visW = lipgloss.Width(line)
+		}
+		padding := innerW - visW
+		if padding < 0 {
+			padding = 0
+		}
+		bodyLines = append(bodyLines, taskBorderClr.Render("│")+line+strings.Repeat(" ", padding)+taskBorderClr.Render("│"))
+	}
+
+	botLine := taskBorderClr.Render("╰" + strings.Repeat("─", innerW) + "╯")
+
+	all := []string{topLine}
+	all = append(all, bodyLines...)
+	all = append(all, botLine)
+	return strings.Join(all, "\n")
 }
 
 func truncateStr(s string, n int) string {

@@ -43,7 +43,7 @@ func New(socketPath string) *Daemon {
 		queue:        NewMessageQueue(),
 		history:      NewHistory(stateDir, 500),
 		sharedValues: make(map[string]string),
-		taskStore:    NewTaskStore(),
+		taskStore:    NewTaskStore(stateDir),
 		logger:       log.New(os.Stderr, "[ax-daemon] ", log.LstdFlags),
 	}
 }

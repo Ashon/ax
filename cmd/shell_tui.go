@@ -7,6 +7,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/ashon/ax/internal/daemon"
 	"github.com/ashon/ax/internal/tmux"
+	"github.com/ashon/ax/internal/types"
 )
 
 type inputMode int
@@ -30,7 +31,9 @@ type shellModel struct {
 	runtimes   map[string]string
 	msgHistory []daemon.HistoryEntry
 	histPath   string
-	showStream bool
+	tasks      []types.Task
+	tasksPath  string
+	stream     streamView
 
 	mode        inputMode
 	viewTarget  string // workspace shown in main pane
@@ -44,7 +47,8 @@ func newShellModel(orchSession, socketPath string) shellModel {
 		activity:    make(map[string]time.Time),
 		runtimes:    loadWatchRuntimes(),
 		histPath:    daemon.HistoryFilePath(socketPath),
-		showStream:  true,
+		tasksPath:   daemon.TasksFilePath(socketPath),
+		stream:      streamMessages,
 		mode:        modeInput,
 		viewTarget:  "orchestrator",
 		orchSession: orchSession,
@@ -95,6 +99,7 @@ func (m shellModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.captures[s.Workspace] = content
 		}
 		m.msgHistory = readHistoryFile(m.histPath, 50)
+		m.tasks = readTasksFile(m.tasksPath)
 		return m, tickCmd()
 	}
 	return m, nil
@@ -120,7 +125,7 @@ func (m shellModel) handleControlMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "q":
 		return m, tea.Quit
 	case "t":
-		m.showStream = !m.showStream
+		m.stream = (m.stream + 1) % 3
 		m.mode = modeInput
 	case "x":
 		if m.selected < len(m.sessions) {
@@ -265,7 +270,7 @@ func (m shellModel) previewSession() string {
 func (m shellModel) layoutHeights() (int, int, int) {
 	sideW := watchSidebarWidth
 	mainW := m.width - sideW - 2 // inner content width
-	streamH := messagePaneHeight(m.height, m.showStream)
+	streamH := streamPaneHeight(m.height, m.stream)
 	totalInner := m.height - streamH - 3
 
 	if m.previewWorkspace() == "" {
@@ -307,7 +312,7 @@ func (m shellModel) View() string {
 		mainW = 20
 	}
 
-	streamH := messagePaneHeight(m.height, m.showStream)
+	streamH := streamPaneHeight(m.height, m.stream)
 	contentH := m.height - streamH - 1
 
 	sidebar := m.renderSidebar(sideW, contentH)
@@ -331,8 +336,11 @@ func (m shellModel) View() string {
 	top := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, rightCol)
 
 	var stream string
-	if m.showStream {
+	switch m.stream {
+	case streamMessages:
 		stream = m.renderStream(m.width, streamH)
+	case streamTasks:
+		stream = m.renderTasks(m.width, streamH)
 	}
 
 	help := m.renderHelp()
@@ -350,7 +358,7 @@ func (m shellModel) renderHelp() string {
 	if m.mode == modeControl {
 		return modeControlStyle.Render(" [CTRL] ") +
 			lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(
-				"j/k select · v view · o orch · t stream · x interrupt · q quit · esc back")
+				"j/k select · v view · o orch · t messages/tasks/off · x interrupt · q quit · esc back")
 	}
 	return modeInputStyle.Render(" [INPUT] ") +
 		lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(
@@ -383,5 +391,12 @@ func (m shellModel) renderStream(totalW, totalH int) string {
 		msgHistory: m.msgHistory,
 	}
 	return wm.renderStream(totalW, totalH)
+}
+
+func (m shellModel) renderTasks(totalW, totalH int) string {
+	wm := watchModel{
+		tasks: m.tasks,
+	}
+	return wm.renderTasks(totalW, totalH)
 }
 

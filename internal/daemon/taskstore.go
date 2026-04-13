@@ -1,7 +1,10 @@
 package daemon
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -10,14 +13,21 @@ import (
 )
 
 type TaskStore struct {
-	mu    sync.RWMutex
-	tasks map[string]*types.Task
+	mu       sync.RWMutex
+	tasks    map[string]*types.Task
+	filePath string
 }
 
-func NewTaskStore() *TaskStore {
+func NewTaskStore(stateDir string) *TaskStore {
 	return &TaskStore{
-		tasks: make(map[string]*types.Task),
+		tasks:    make(map[string]*types.Task),
+		filePath: filepath.Join(stateDir, "tasks.json"),
 	}
+}
+
+// TasksFilePath returns the path to the tasks file for external readers (watch).
+func TasksFilePath(socketPath string) string {
+	return filepath.Join(filepath.Dir(ExpandSocketPath(socketPath)), "tasks.json")
 }
 
 func (s *TaskStore) Create(title, description, assignee, createdBy string) *types.Task {
@@ -36,6 +46,7 @@ func (s *TaskStore) Create(title, description, assignee, createdBy string) *type
 		UpdatedAt:   now,
 	}
 	s.tasks[task.ID] = task
+	s.persist()
 	return task
 }
 
@@ -76,6 +87,7 @@ func (s *TaskStore) Update(id string, status *types.TaskStatus, result *string, 
 		})
 	}
 	task.UpdatedAt = now
+	s.persist()
 
 	cp := *task
 	cp.Logs = make([]types.TaskLog, len(task.Logs))
@@ -104,4 +116,19 @@ func (s *TaskStore) List(assignee, createdBy string, status *types.TaskStatus) [
 		result = append(result, cp)
 	}
 	return result
+}
+
+func (s *TaskStore) persist() {
+	if s.filePath == "" {
+		return
+	}
+	tasks := make([]types.Task, 0, len(s.tasks))
+	for _, t := range s.tasks {
+		tasks = append(tasks, *t)
+	}
+	data, err := json.Marshal(tasks)
+	if err != nil {
+		return
+	}
+	os.WriteFile(s.filePath, data, 0o644)
 }
