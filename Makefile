@@ -1,9 +1,13 @@
 VERSION ?= dev
 
-.PHONY: build clean test snapshot release
+.PHONY: build install clean test snapshot release
 
 build:
 	go build -ldflags "-s -w -X github.com/ashon/ax/cmd.version=$(VERSION)" -o ax .
+
+install: build
+	cp ax $(shell go env GOPATH)/bin/ax
+	codesign -s - $(shell go env GOPATH)/bin/ax
 
 clean:
 	rm -f ax
