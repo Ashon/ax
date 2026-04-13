@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/ashon/ax/internal/daemon"
 	"github.com/ashon/ax/internal/mcpserver"
 	"github.com/ashon/ax/internal/tmux"
 	"github.com/spf13/cobra"
@@ -24,17 +25,21 @@ var sendCmd = &cobra.Command{
 		}
 		defer client.Close()
 
-		msgID, err := client.SendMessage(to, message)
+		sendResult, err := client.SendMessage(to, message)
 		if err != nil {
 			return fmt.Errorf("send: %w", err)
 		}
 
-		fmt.Printf("Message sent to %q (id: %s)\n", to, msgID)
+		if sendResult.Suppressed {
+			fmt.Printf("Message to %q suppressed as a duplicate no-op/status update.\n", to)
+			return nil
+		}
+
+		fmt.Printf("Message sent to %q (id: %s)\n", to, sendResult.MessageID)
 
 		// Wake the agent after clearing any draft/multiline composer state.
 		if tmux.SessionExists(to) {
-			prompt := "read_messages MCP 도구로 수신 메시지를 확인하고 요청된 작업을 수행해 줘. 결과는 send_message(to=\"orchestrator\")로 보내줘."
-			if err := tmux.WakeWorkspace(to, prompt); err != nil {
+			if err := tmux.WakeWorkspace(to, daemon.WakePrompt("orchestrator", false)); err != nil {
 				return err
 			}
 			fmt.Printf("Agent %q woken up.\n", to)

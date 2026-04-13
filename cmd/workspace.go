@@ -5,7 +5,9 @@ import (
 	"os"
 
 	"github.com/ashon/ax/internal/config"
+	"github.com/ashon/ax/internal/daemon"
 	"github.com/ashon/ax/internal/tmux"
+	"github.com/ashon/ax/internal/types"
 	"github.com/ashon/ax/internal/workspace"
 	"github.com/spf13/cobra"
 )
@@ -17,6 +19,7 @@ var workspaceCmd = &cobra.Command{
 }
 
 var wsCreateDir string
+var wsListInternal bool
 
 var wsCreateCmd = &cobra.Command{
 	Use:   "create <name>",
@@ -62,15 +65,11 @@ var wsDestroyCmd = &cobra.Command{
 var wsListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List active workspaces",
+	Long:  "List the union of tmux sessions and daemon-registered workspaces. Internal daemon-only identities such as `_cli` are hidden by default; use `--internal` to show them.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		sessions, err := tmux.ListSessions()
 		if err != nil {
 			return err
-		}
-
-		if len(sessions) == 0 {
-			fmt.Println("No active workspaces.")
-			return nil
 		}
 
 		// Try to load config for descriptions
@@ -83,15 +82,38 @@ var wsListCmd = &cobra.Command{
 			}
 		}
 
-		fmt.Printf("%-15s %-10s %s\n", "WORKSPACE", "STATUS", "DESCRIPTION")
-		fmt.Printf("%-15s %-10s %s\n", "---------", "------", "-----------")
-		for _, s := range sessions {
-			status := "detached"
-			if s.Attached {
-				status = "attached"
+		workspaceInfos := map[string]types.WorkspaceInfo{}
+		if sp := daemon.ExpandSocketPath(socketPath); isDaemonRunning(sp) {
+			if client, err := newCLIClient(); err == nil {
+				if workspaces, err := client.ListWorkspaces(); err == nil {
+					workspaceInfos = workspaceInfoMap(workspaces)
+				}
+				client.Close()
 			}
-			desc := descriptions[s.Workspace]
-			fmt.Printf("%-15s %-10s %s\n", s.Workspace, status, desc)
+		}
+
+		view := buildWorkspaceListRows(sessions, workspaceInfos, descriptions, wsListInternal)
+		if len(view.Rows) == 0 {
+			fmt.Println("No workspaces found.")
+			if note := formatHiddenInternalWorkspaceNote(view.HiddenInternal); note != "" {
+				fmt.Println(note)
+			}
+			return nil
+		}
+
+		fmt.Printf("%-22s %-10s %-8s %-40s %s\n", "WORKSPACE", "TMUX", "AGENT", "STATUS TEXT", "DESCRIPTION")
+		fmt.Printf("%-22s %-10s %-8s %-40s %s\n", "---------", "----", "-----", "-----------", "-----------")
+		for _, row := range view.Rows {
+			fmt.Printf("%-22s %-10s %-8s %-40s %s\n",
+				row.Name,
+				row.Tmux,
+				row.Agent,
+				row.StatusText,
+				row.Description,
+			)
+		}
+		if note := formatHiddenInternalWorkspaceNote(view.HiddenInternal); note != "" {
+			fmt.Printf("\n%s\n", note)
 		}
 		return nil
 	},
@@ -130,6 +152,7 @@ var wsInterruptCmd = &cobra.Command{
 
 func init() {
 	wsCreateCmd.Flags().StringVar(&wsCreateDir, "dir", "", "workspace directory (default: current dir)")
+	wsListCmd.Flags().BoolVar(&wsListInternal, "internal", false, "include internal daemon-only identities such as _cli")
 	workspaceCmd.AddCommand(wsCreateCmd, wsDestroyCmd, wsListCmd, wsAttachCmd, wsInterruptCmd)
 	rootCmd.AddCommand(workspaceCmd)
 }

@@ -4,14 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/ashon/ax/internal/agent"
 	"github.com/ashon/ax/internal/config"
+	"github.com/ashon/ax/internal/daemon"
 	"github.com/ashon/ax/internal/tmux"
 	"github.com/ashon/ax/internal/types"
+	"github.com/ashon/ax/internal/workspace"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -45,7 +48,7 @@ func registerTools(srv *server.MCPServer, client *DaemonClient, configPath strin
 			mcp.WithString("to", mcp.Required(), mcp.Description("Target workspace name")),
 			mcp.WithString("message", mcp.Required(), mcp.Description("Message content to send")),
 		),
-		sendMessageHandler(client),
+		sendMessageHandler(client, configPath),
 	)
 
 	// read_messages
@@ -135,6 +138,27 @@ func registerTools(srv *server.MCPServer, client *DaemonClient, configPath strin
 		interruptAgentHandler(client),
 	)
 
+	// send_keys — dispatch raw key sequences to a workspace tmux session
+	srv.AddTool(
+		mcp.NewTool("send_keys",
+			mcp.WithDescription(
+				"Send a sequence of keystrokes to a workspace's tmux session. "+
+					"Use this to resolve blocking interactive dialogs in an agent CLI "+
+					"(e.g. Claude Code's \"Resuming from summary\" 1/2/3 prompt). "+
+					"Each element is either a named special key (Enter, Escape, Tab, Space, "+
+					"BSpace, Up/Down/Left/Right, Home/End, PageUp/PageDown, Ctrl-C/Ctrl-D/Ctrl-U/...) "+
+					"or literal text that will be typed verbatim. "+
+					"Example: keys=[\"2\",\"Enter\"] selects the second option and submits it.",
+			),
+			mcp.WithString("workspace", mcp.Required(), mcp.Description("Target workspace name")),
+			mcp.WithArray("keys", mcp.Required(),
+				mcp.Description("Ordered key sequence. Named keys (Enter, Escape, C-c, ...) are resolved as tmux key names; anything else is typed literally."),
+				mcp.WithStringItems(),
+			),
+		),
+		sendKeysHandler(client),
+	)
+
 	// create_task
 	srv.AddTool(
 		mcp.NewTool("create_task",
@@ -142,6 +166,9 @@ func registerTools(srv *server.MCPServer, client *DaemonClient, configPath strin
 			mcp.WithString("title", mcp.Required(), mcp.Description("Short task title")),
 			mcp.WithString("description", mcp.Description("Detailed task description")),
 			mcp.WithString("assignee", mcp.Required(), mcp.Description("Workspace name to assign the task to")),
+			mcp.WithString("start_mode", mcp.Description("Task start mode: `default` for normal session reuse, or `fresh` to recreate the worker session before first processing when this task ID is referenced in the dispatch message.")),
+			mcp.WithString("priority", mcp.Description("Optional task priority: `low`, `normal`, `high`, or `urgent`. Defaults to `normal`.")),
+			mcp.WithNumber("stale_after_seconds", mcp.Description("Optional staleness threshold. When >0, daemon task snapshots will mark the task stale if no progress update arrives within this many seconds while the task is still pending or in_progress.")),
 		),
 		createTaskHandler(client),
 	)
@@ -300,12 +327,15 @@ func inspectAgentHandler(client *DaemonClient, configPath string) server.ToolHan
 
 		fullMessage := question + "\n\n[ax] 작업 완료 후 반드시 send_message(to=\"" + client.workspace + "\") 로 결과를 보내주세요."
 
-		_, err = client.SendMessage(name, fullMessage)
+		sendResult, err := client.SendMessage(name, fullMessage)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Failed to send inspection request: %v", err)), nil
 		}
+		if sendResult.Suppressed {
+			return mcp.NewToolResultText(fmt.Sprintf("Inspection request to %q was suppressed as a duplicate no-op/status update.", name)), nil
+		}
 
-		wakeAgent(name, client.workspace)
+		wakeAgent(name, client.workspace, false)
 
 		reply, err := waitForWorkspaceReply(ctx, client, name, timeout)
 		if err != nil {
@@ -393,29 +423,79 @@ func waitForWorkspaceReply(ctx context.Context, client *DaemonClient, from strin
 	return "", fmt.Errorf("Timeout: no reply from %q within %ds", from, timeout)
 }
 
-func sendMessageHandler(client *DaemonClient) server.ToolHandlerFunc {
+var taskIDPattern = regexp.MustCompile(`(?i)task id:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`)
+
+func sendMessageHandler(client *DaemonClient, configPath string) server.ToolHandlerFunc {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		to, _ := request.RequireString("to")
 		message, _ := request.RequireString("message")
 
-		msgID, err := client.SendMessage(to, message)
+		sendResult, err := client.SendMessage(to, message)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Failed to send message: %v", err)), nil
 		}
+		if sendResult.Suppressed {
+			return mcp.NewToolResultText(fmt.Sprintf("Message to %q suppressed as a duplicate no-op/status update.", to)), nil
+		}
+
+		freshStart, err := prepareFreshTaskStart(client, configPath, to, message)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to prepare fresh-context start: %v", err)), nil
+		}
 
 		// Wake the target agent via tmux
-		wakeAgent(to, client.workspace)
+		wakeAgent(to, client.workspace, freshStart)
 
-		return mcp.NewToolResultText(fmt.Sprintf("Message sent to %q (id: %s)", to, msgID)), nil
+		return mcp.NewToolResultText(fmt.Sprintf("Message sent to %q (id: %s)", to, sendResult.MessageID)), nil
 	}
 }
 
-func wakeAgent(target, sender string) {
-	prompt := fmt.Sprintf(
-		"read_messages MCP 도구로 수신 메시지를 확인하고 요청된 작업을 수행해 줘. 결과는 send_message(to=\"%s\")로 보내줘.",
-		sender,
-	)
-	_ = tmux.WakeWorkspace(target, prompt)
+func wakeAgent(target, sender string, fresh bool) {
+	_ = tmux.WakeWorkspace(target, daemon.WakePrompt(sender, fresh))
+}
+
+func prepareFreshTaskStart(client *DaemonClient, configPath, target, message string) (bool, error) {
+	taskID, ok := extractTaskID(message)
+	if !ok {
+		return false, nil
+	}
+
+	task, err := client.GetTask(taskID)
+	if err != nil {
+		return false, nil
+	}
+	if task.Assignee != target || task.CreatedBy != client.workspace || task.StartMode != types.TaskStartFresh {
+		return false, nil
+	}
+
+	cfgPath, cfg, err := loadToolConfig(configPath)
+	if err != nil {
+		return false, err
+	}
+	ws, ok := cfg.Workspaces[target]
+	if !ok {
+		return false, fmt.Errorf("workspace %q not found in %s", target, cfgPath)
+	}
+
+	if tmux.SessionExists(target) {
+		if err := tmux.DestroySession(target); err != nil {
+			return false, err
+		}
+	}
+
+	manager := workspace.NewManager(daemon.ExpandSocketPath(client.socketPath), cfgPath)
+	if err := manager.Create(target, ws); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func extractTaskID(message string) (string, bool) {
+	matches := taskIDPattern.FindStringSubmatch(message)
+	if len(matches) < 2 {
+		return "", false
+	}
+	return matches[1], true
 }
 
 func readMessagesHandler(client *DaemonClient) server.ToolHandlerFunc {
@@ -458,7 +538,7 @@ func broadcastMessageHandler(client *DaemonClient) server.ToolHandlerFunc {
 
 		// Wake all recipients
 		for _, r := range recipients {
-			wakeAgent(r, client.workspace)
+			wakeAgent(r, client.workspace, false)
 		}
 
 		return mcp.NewToolResultText(fmt.Sprintf("Broadcast sent to %d workspace(s): %s",
@@ -563,13 +643,16 @@ func requestHandler(client *DaemonClient) server.ToolHandlerFunc {
 		fullMessage := message + "\n\n[ax/request] 이 메시지는 동기 요청입니다. `" + client.workspace + "`가 당신의 응답을 기다리고 있습니다. 작업이 끝나면 즉시 `send_message(to=\"" + client.workspace + "\")`로 결과를 회신하세요. 하위 워크스페이스에 위임할 때는 `request`가 아닌 `send_message`를 병렬로 사용한 뒤 `read_messages`로 수집하세요."
 
 		// Send message via daemon
-		_, err := client.SendMessage(to, fullMessage)
+		sendResult, err := client.SendMessage(to, fullMessage)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Failed to send: %v", err)), nil
 		}
+		if sendResult.Suppressed {
+			return mcp.NewToolResultError(fmt.Sprintf("Request to %q was suppressed as a duplicate no-op/status update", to)), nil
+		}
 
 		// Wake the target agent via tmux
-		wakeAgent(to, client.workspace)
+		wakeAgent(to, client.workspace, false)
 
 		// Poll for reply
 		deadline := time.Now().Add(time.Duration(timeout) * time.Second)
@@ -597,6 +680,29 @@ func requestHandler(client *DaemonClient) server.ToolHandlerFunc {
 	}
 }
 
+func sendKeysHandler(client *DaemonClient) server.ToolHandlerFunc {
+	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		workspace, err := request.RequireString("workspace")
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+		keys, err := request.RequireStringSlice("keys")
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Invalid keys argument: %v", err)), nil
+		}
+		if len(keys) == 0 {
+			return mcp.NewToolResultError("keys must contain at least one entry"), nil
+		}
+		if !tmux.SessionExists(workspace) {
+			return mcp.NewToolResultError(fmt.Sprintf("Workspace %q is not running", workspace)), nil
+		}
+		if err := tmux.SendKeys(workspace, keys); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to send keys to %q: %v", workspace, err)), nil
+		}
+		return mcp.NewToolResultText(fmt.Sprintf("Sent %d key(s) to %q: %s", len(keys), workspace, strings.Join(keys, " "))), nil
+	}
+}
+
 func interruptAgentHandler(client *DaemonClient) server.ToolHandlerFunc {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		name, _ := request.RequireString("name")
@@ -617,8 +723,28 @@ func createTaskHandler(client *DaemonClient) server.ToolHandlerFunc {
 		title, _ := request.RequireString("title")
 		description := request.GetString("description", "")
 		assignee, _ := request.RequireString("assignee")
+		staleAfterSeconds := int(request.GetFloat("stale_after_seconds", 0))
+		if staleAfterSeconds < 0 {
+			return mcp.NewToolResultError("Invalid stale_after_seconds: must be >= 0"), nil
+		}
+		startMode := types.TaskStartMode(request.GetString("start_mode", string(types.TaskStartDefault)))
+		switch startMode {
+		case "", types.TaskStartDefault:
+			startMode = types.TaskStartDefault
+		case types.TaskStartFresh:
+		default:
+			return mcp.NewToolResultError(fmt.Sprintf("Invalid start_mode: %q (must be default or fresh)", startMode)), nil
+		}
+		priority := types.TaskPriority(request.GetString("priority", string(types.TaskPriorityNormal)))
+		switch priority {
+		case "", types.TaskPriorityNormal:
+			priority = types.TaskPriorityNormal
+		case types.TaskPriorityLow, types.TaskPriorityHigh, types.TaskPriorityUrgent:
+		default:
+			return mcp.NewToolResultError(fmt.Sprintf("Invalid priority: %q (must be low, normal, high, or urgent)", priority)), nil
+		}
 
-		task, err := client.CreateTask(title, description, assignee)
+		task, err := client.CreateTask(title, description, assignee, startMode, priority, staleAfterSeconds)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Failed to create task: %v", err)), nil
 		}

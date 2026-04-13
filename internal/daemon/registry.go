@@ -25,26 +25,48 @@ func NewRegistry() *Registry {
 	}
 }
 
-func (r *Registry) Register(name, dir, description string, conn net.Conn) {
+func (r *Registry) Register(name, dir, description string, conn net.Conn) net.Conn {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := time.Now()
+	var previous net.Conn
+	statusText := ""
+	if existing, ok := r.entries[name]; ok {
+		if existing.conn != conn {
+			previous = existing.conn
+		}
+		statusText = existing.info.StatusText
+	}
 	r.entries[name] = &connEntry{
 		info: types.WorkspaceInfo{
 			Name:        name,
 			Dir:         dir,
 			Description: description,
 			Status:      types.StatusOnline,
+			StatusText:  statusText,
 			ConnectedAt: &now,
 		},
 		conn: conn,
 	}
+	return previous
 }
 
 func (r *Registry) Unregister(name string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.entries, name)
+}
+
+func (r *Registry) UnregisterIfConn(name string, conn net.Conn) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	entry, ok := r.entries[name]
+	if !ok || entry.conn != conn {
+		return false
+	}
+	delete(r.entries, name)
+	return true
 }
 
 func (r *Registry) Get(name string) (*connEntry, bool) {

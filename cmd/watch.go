@@ -10,14 +10,16 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/ashon/ax/internal/agent"
 	"github.com/ashon/ax/internal/config"
 	"github.com/ashon/ax/internal/daemon"
 	"github.com/ashon/ax/internal/tmux"
 	"github.com/ashon/ax/internal/types"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/spf13/cobra"
 )
 
@@ -63,9 +65,9 @@ const (
 
 // Regex for parsing agent status
 var (
-	tokenUpRe   = regexp.MustCompile(`↑\s*([\d.]+[kKmM]?)\s*tokens`)
-	tokenDownRe = regexp.MustCompile(`↓\s*([\d.]+[kKmM]?)\s*tokens`)
-	costRe      = regexp.MustCompile(`\$[\d.]+`)
+	tokenUpRe    = regexp.MustCompile(`↑\s*([\d.]+[kKmM]?)\s*tokens`)
+	tokenDownRe  = regexp.MustCompile(`↓\s*([\d.]+[kKmM]?)\s*tokens`)
+	costRe       = regexp.MustCompile(`\$[\d.]+`)
 	agentStateRe = regexp.MustCompile(`(thinking|Harmonizing|Crystallizing|Nesting)`)
 )
 
@@ -74,25 +76,31 @@ type tickMsg time.Time
 const watchFPS = 60
 const watchMessagePaneMinHeight = 6
 const watchSidebarWidth = 34
+const watchWorkspaceRefreshInterval = time.Second
 
 type watchModel struct {
-	width      int
-	height     int
-	selected   int
-	captures   map[string]string
-	prevCaps   map[string]string // previous tick captures for activity detection
-	activity   map[string]time.Time // last activity time per workspace
-	sessions   []tmux.SessionInfo
-	runtimes   map[string]string
-	msgHistory []daemon.HistoryEntry
-	histPath   string
-	tasks      []types.Task
-	tasksPath  string
-	stream     streamView
+	width                  int
+	height                 int
+	selected               int
+	taskSelected           int
+	taskFilter             taskFilterMode
+	captures               map[string]string
+	prevCaps               map[string]string    // previous tick captures for activity detection
+	activity               map[string]time.Time // last activity time per workspace
+	sessions               []tmux.SessionInfo
+	runtimes               map[string]string
+	msgHistory             []daemon.HistoryEntry
+	histPath               string
+	tasks                  []types.Task
+	tasksPath              string
+	workspaceInfos         map[string]types.WorkspaceInfo
+	workspaceInfoUpdatedAt time.Time
+	stream                 streamView
 }
 
 type sidebarEntry struct {
 	label        string
+	workspace    string
 	sessionIndex int
 	group        bool
 	level        int
@@ -100,13 +108,16 @@ type sidebarEntry struct {
 
 func newWatchModel() watchModel {
 	return watchModel{
-		captures:  make(map[string]string),
-		prevCaps:  make(map[string]string),
-		activity:  make(map[string]time.Time),
-		runtimes:  loadWatchRuntimes(),
-		histPath:  daemon.HistoryFilePath(socketPath),
-		tasksPath: daemon.TasksFilePath(socketPath),
-		stream:   streamMessages,
+		captures:       make(map[string]string),
+		prevCaps:       make(map[string]string),
+		activity:       make(map[string]time.Time),
+		runtimes:       loadWatchRuntimes(),
+		histPath:       daemon.HistoryFilePath(socketPath),
+		tasksPath:      daemon.TasksFilePath(socketPath),
+		workspaceInfos: make(map[string]types.WorkspaceInfo),
+		stream:         streamMessages,
+		taskFilter:     taskFilterActive,
+		taskSelected:   0,
 	}
 }
 
@@ -126,6 +137,13 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.selected = moveSelection(m.selected, m.sessions, 1)
 		case "tab":
 			m.stream = (m.stream + 1) % 3
+		case "[", "H":
+			m.taskSelected = moveTaskSelection(m.taskSelected, m.tasks, m.taskFilter, -1)
+		case "]", "L":
+			m.taskSelected = moveTaskSelection(m.taskSelected, m.tasks, m.taskFilter, 1)
+		case "f":
+			m.taskFilter = nextTaskFilterMode(m.taskFilter)
+			m.taskSelected = clampTaskSelection(m.taskSelected, m.tasks, m.taskFilter)
 		case "x":
 			if m.selected < len(m.sessions) {
 				_ = tmux.InterruptWorkspace(m.sessions[m.selected].Workspace)
@@ -160,6 +178,8 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.msgHistory = readHistoryFile(m.histPath, 50)
 		m.tasks = readTasksFile(m.tasksPath)
+		m.workspaceInfos, m.workspaceInfoUpdatedAt = refreshWatchWorkspaceInfos(m.workspaceInfos, m.workspaceInfoUpdatedAt)
+		m.taskSelected = clampTaskSelection(m.taskSelected, m.tasks, m.taskFilter)
 		return m, tickCmd()
 	}
 	return m, nil
@@ -205,7 +225,7 @@ func (m watchModel) View() string {
 
 	// === Help line ===
 	help := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(
-		" ↑↓ select · x interrupt · tab messages/tasks/off · q quit")
+		" ↑↓ agent · [/ ] task · f filter · x interrupt · tab messages/tasks/off · q quit")
 
 	parts := []string{top}
 	if stream != "" {
@@ -219,6 +239,7 @@ func (m watchModel) View() string {
 func (m watchModel) renderSidebar(w, h int) string {
 	innerW := w - 2
 	innerH := h - 2
+	attentionByWorkspace := summarizeWorkspaceAttention(m.tasks)
 
 	// Title
 	title := headerStyle.Render(" agents ")
@@ -235,20 +256,42 @@ func (m watchModel) renderSidebar(w, h int) string {
 
 	var lines []string
 	for _, entry := range buildSidebarEntries(m.sessions) {
+		if entry.group {
+			left := sidebarStyle.Render(strings.Repeat("  ", entry.level) + entry.label)
+			lines = append(lines, renderWatchSidebarLine(left, "", innerW))
+			continue
+		}
+
+		workspaceName := entry.workspace
+		if workspaceName == "" && entry.sessionIndex >= 0 && entry.sessionIndex < len(m.sessions) {
+			workspaceName = m.sessions[entry.sessionIndex].Workspace
+		}
+		attention := workspaceAttentionBadge(attentionByWorkspace[workspaceName])
+		statusText := workspaceStatusPreview(m.workspaceInfos, workspaceName, max(0, innerW-6))
 		cursor := "  "
 		left := ""
 		right := ""
+		secondary := ""
 
-		if entry.group {
-			left = sidebarStyle.Render(strings.Repeat("  ", entry.level) + entry.label)
-		} else if entry.sessionIndex < 0 || entry.sessionIndex >= len(m.sessions) {
+		if entry.sessionIndex < 0 || entry.sessionIndex >= len(m.sessions) {
 			// Workspace defined but not running
 			dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 			left = "  " + strings.Repeat("  ", entry.level) + "○ " + dimStyle.Render(entry.label)
-			right = dimStyle.Render("offline")
+			rightParts := []string{dimStyle.Render("offline")}
+			if attention != "" {
+				rightParts = append(rightParts, taskFailClr.Render(attention))
+			}
+			right = strings.Join(rightParts, " ")
+			secondary = statusText
+			if secondary == "" {
+				secondary = workspaceAgentStatus(m.workspaceInfos, workspaceName)
+				if secondary == "offline" {
+					secondary = ""
+				}
+			}
 		} else {
 			s := m.sessions[entry.sessionIndex]
-			status := parseAgentStatus(m.captures[s.Workspace])
+			agentStatus := parseAgentStatus(m.captures[s.Workspace])
 			runtime := m.runtimes[s.Workspace]
 
 			dot := idleDot
@@ -264,32 +307,30 @@ func (m watchModel) renderSidebar(w, h int) string {
 			}
 
 			left = cursor + strings.Repeat("  ", entry.level) + dot + " " + nameStyle.Render(entry.label)
+			var rightParts []string
 			if runtime != "" {
-				right = runtimeStyle.Render(runtime)
+				rightParts = append(rightParts, runtimeStyle.Render(runtime))
 			}
-			if status != "" {
-				if right != "" {
-					right += " "
-				}
-				right += statStyle.Render(status)
+			if attention != "" {
+				rightParts = append(rightParts, taskFailClr.Render(attention))
 			}
-		}
-
-		leftW := lipgloss.Width(left)
-		rightW := lipgloss.Width(right)
-		gap := innerW - leftW - rightW
-		if gap < 1 {
-			gap = 1
-			if leftW+1+rightW > innerW {
-				right = ""
-				gap = innerW - leftW
-				if gap < 0 {
-					gap = 0
-				}
+			right = strings.Join(rightParts, " ")
+			secondary = statusText
+			if secondary == "" {
+				secondary = agentStatus
 			}
 		}
 
-		lines = append(lines, borderClr.Render("│")+left+strings.Repeat(" ", gap)+right+borderClr.Render("│"))
+		lines = append(lines, renderWatchSidebarLine(left, right, innerW))
+		if secondary != "" {
+			secondaryStyle := sidebarStyle
+			if entry.sessionIndex == m.selected {
+				secondaryStyle = selectedStyle
+			}
+			prefix := "    " + strings.Repeat("  ", entry.level)
+			secondaryLine := prefix + fitDisplayText(secondary, max(0, innerW-lipgloss.Width(prefix)))
+			lines = append(lines, renderWatchSidebarLine(secondaryStyle.Render(secondaryLine), "", innerW))
+		}
 	}
 
 	// Fill remaining height
@@ -327,6 +368,9 @@ func (m watchModel) renderMain(ws, content string, w, h int) string {
 	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
 		lines = lines[:len(lines)-1]
 	}
+	for i := range lines {
+		lines[i] = sanitizeDisplayLine(lines[i])
+	}
 	if len(lines) > innerH {
 		lines = lines[len(lines)-innerH:]
 	}
@@ -339,7 +383,7 @@ func (m watchModel) renderMain(ws, content string, w, h int) string {
 		}
 		visW := lipgloss.Width(line)
 		if visW > innerW {
-			line = ansiTruncate(line, innerW)
+			line = xansi.Truncate(line, innerW, "")
 			visW = lipgloss.Width(line)
 		}
 		padding := innerW - visW
@@ -551,7 +595,7 @@ func appendProjectEntries(node *config.ProjectNode, level int, sessionByWorkspac
 	}
 
 	*entries = append(*entries, sidebarEntry{
-		label: "▾ " + node.Name,
+		label: "▾ " + node.DisplayName(),
 		group: true,
 		level: level,
 	})
@@ -662,6 +706,158 @@ func loadWatchRuntimes() map[string]string {
 	return runtimes
 }
 
+func loadWatchWorkspaceInfos() (map[string]types.WorkspaceInfo, bool) {
+	sp := daemon.ExpandSocketPath(socketPath)
+	if !isDaemonRunning(sp) {
+		return map[string]types.WorkspaceInfo{}, true
+	}
+	client, err := newCLIClient()
+	if err != nil {
+		return nil, false
+	}
+	defer client.Close()
+
+	workspaces, err := client.ListWorkspaces()
+	if err != nil {
+		return nil, false
+	}
+	return workspaceInfoMap(workspaces), true
+}
+
+func refreshWatchWorkspaceInfos(current map[string]types.WorkspaceInfo, last time.Time) (map[string]types.WorkspaceInfo, time.Time) {
+	if !last.IsZero() && time.Since(last) < watchWorkspaceRefreshInterval {
+		return current, last
+	}
+	next, ok := loadWatchWorkspaceInfos()
+	now := time.Now()
+	if !ok {
+		return current, now
+	}
+	return next, now
+}
+
+type workspaceAttention struct {
+	Stale    int
+	Diverged int
+	Queued   int
+}
+
+func summarizeWorkspaceAttention(tasks []types.Task) map[string]workspaceAttention {
+	attentionByWorkspace := make(map[string]workspaceAttention)
+	for _, task := range tasks {
+		if task.Assignee == "" {
+			continue
+		}
+		attention := attentionByWorkspace[task.Assignee]
+		if taskIsStale(task) {
+			attention.Stale++
+		}
+		if task.StaleInfo != nil {
+			if task.StaleInfo.StateDivergence {
+				attention.Diverged++
+			}
+			attention.Queued += task.StaleInfo.PendingMessages
+		}
+		attentionByWorkspace[task.Assignee] = attention
+	}
+	return attentionByWorkspace
+}
+
+func workspaceAttentionBadge(attention workspaceAttention) string {
+	var parts []string
+	if attention.Diverged > 0 {
+		parts = append(parts, fmt.Sprintf("D%d", attention.Diverged))
+	}
+	if attention.Stale > 0 {
+		parts = append(parts, fmt.Sprintf("S%d", attention.Stale))
+	}
+	if len(parts) == 0 && attention.Queued > 0 {
+		parts = append(parts, fmt.Sprintf("Q%d", attention.Queued))
+	}
+	return strings.Join(parts, " ")
+}
+
+func taskAttentionSummary(task types.Task) string {
+	var parts []string
+	if task.StaleInfo != nil && task.StaleInfo.StateDivergence {
+		parts = append(parts, "DIVERGED")
+	}
+	if taskIsStale(task) {
+		parts = append(parts, "STALE")
+	}
+	if task.StaleInfo != nil && task.StaleInfo.PendingMessages > 0 {
+		parts = append(parts, fmt.Sprintf("Q%d", task.StaleInfo.PendingMessages))
+	}
+	return strings.Join(parts, " ")
+}
+
+func renderWatchSidebarLine(left, right string, innerW int) string {
+	leftW := lipgloss.Width(left)
+	rightW := lipgloss.Width(right)
+	gap := innerW - leftW - rightW
+	if gap < 1 {
+		gap = 1
+		if leftW+1+rightW > innerW {
+			right = ""
+			gap = innerW - leftW
+			if gap < 0 {
+				gap = 0
+			}
+		}
+	}
+	return borderClr.Render("│") + left + strings.Repeat(" ", gap) + right + borderClr.Render("│")
+}
+
+func renderTaskListLines(task types.Task, selected bool, width int) []string {
+	cursor := "  "
+	nameStyle := lipgloss.NewStyle()
+	if selected {
+		cursor = selectedStyle.Render("▸ ")
+		nameStyle = selectedStyle
+	}
+
+	status := taskStatusStyle(task.Status).Render(truncateStr(taskStatusLabel(task), 16))
+	shortID := task.ID
+	if len(shortID) > 8 {
+		shortID = shortID[:8]
+	}
+
+	line1 := fmt.Sprintf("%s%s %s %s", cursor, msgTimeStyle.Render(shortID), status, nameStyle.Render(truncateStr(task.Title, max(8, width-32))))
+	line1 = fitDisplayText(line1, width)
+	meta := []string{taskPriorityLabel(task.Priority)}
+	if attention := taskAttentionSummary(task); attention != "" {
+		meta = append(meta, attention)
+	}
+	meta = append(meta,
+		fmt.Sprintf("%s → %s", truncateStr(task.CreatedBy, 10), truncateStr(task.Assignee, 10)),
+		formatTaskAge(task),
+	)
+	if last := taskLastUpdatePreview(task); last != "" {
+		meta = append(meta, truncateStr(last, max(8, width-4)))
+	}
+	line2 := "   " + strings.Join(meta, " · ")
+	return []string{line1, fitDisplayText(line2, width)}
+}
+
+func renderTaskSplitTopBorder(title string, listW, detailW int) string {
+	leftSegmentW := listW + 1
+	rightSegmentW := detailW + 1
+	titleSegment := fitDisplayText(title, max(0, leftSegmentW-1))
+	leftFill := leftSegmentW - 1 - lipgloss.Width(titleSegment)
+	if leftFill < 0 {
+		leftFill = 0
+	}
+	return taskBorderClr.Render("╭─") +
+		titleSegment +
+		taskBorderClr.Render(strings.Repeat("─", leftFill)+"┬"+strings.Repeat("─", rightSegmentW)+"╮")
+}
+
+func renderTaskSplitBottomBorder(listW, detailW int) string {
+	leftSegmentW := listW + 1
+	rightSegmentW := detailW + 1
+	return taskBorderClr.Render("╰" + strings.Repeat("─", leftSegmentW) + "┴" + strings.Repeat("─", rightSegmentW) + "╯")
+}
+
 func orderedLeafSessionIndices(sessions []tmux.SessionInfo) []int {
 	entries := buildSidebarEntries(sessions)
 	indices := make([]int, 0, len(sessions))
@@ -764,32 +960,19 @@ func parseAgentStatus(content string) string {
 	return strings.Join(parts, " ")
 }
 
-func ansiTruncate(s string, maxW int) string {
-	visW := 0
-	i := 0
-	runes := []rune(s)
-	for i < len(runes) {
-		if runes[i] == '\x1b' {
-			j := i + 1
-			if j < len(runes) && runes[j] == '[' {
-				j++
-				for j < len(runes) && !((runes[j] >= 'A' && runes[j] <= 'Z') || (runes[j] >= 'a' && runes[j] <= 'z')) {
-					j++
-				}
-				if j < len(runes) {
-					j++
-				}
-			}
-			i = j
-			continue
+func sanitizeDisplayLine(s string) string {
+	s = xansi.Strip(s)
+	s = strings.ReplaceAll(s, "\t", "    ")
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r == '\n':
+			return r
+		case unicode.IsControl(r):
+			return -1
+		default:
+			return r
 		}
-		visW++
-		if visW > maxW {
-			return string(runes[:i])
-		}
-		i++
-	}
-	return s
+	}, s)
 }
 
 func readHistoryFile(path string, maxEntries int) []daemon.HistoryEntry {
@@ -825,7 +1008,17 @@ func readTasksFile(path string) []types.Task {
 	}
 	// Sort: in_progress first, then pending, then completed/failed
 	sort.Slice(tasks, func(i, j int) bool {
-		return taskSortOrder(tasks[i].Status) < taskSortOrder(tasks[j].Status)
+		oi := taskSortOrder(tasks[i].Status)
+		oj := taskSortOrder(tasks[j].Status)
+		if oi != oj {
+			return oi < oj
+		}
+		pi := taskPriorityOrder(tasks[i].Priority)
+		pj := taskPriorityOrder(tasks[j].Priority)
+		if pi != pj {
+			return pi < pj
+		}
+		return tasks[i].UpdatedAt.After(tasks[j].UpdatedAt)
 	})
 	return tasks
 }
@@ -867,67 +1060,153 @@ func (m watchModel) renderTasks(totalW, totalH int) string {
 		innerH = 1
 	}
 
-	title := taskTitleStyle.Render(" tasks ")
+	filtered := filterTasks(m.tasks, m.taskFilter)
+	title := taskTitleStyle.Render(fmt.Sprintf(" tasks %s %d/%d ", m.taskFilter.label(), len(filtered), len(m.tasks)))
 	titleW := lipgloss.Width(title)
-	pad := innerW - titleW - 1
-	if pad < 0 {
-		pad = 0
-	}
-	topLine := taskBorderClr.Render("╭─") + title + taskBorderClr.Render(strings.Repeat("─", pad)+"╮")
-
-	var taskLines []string
-	if len(m.tasks) == 0 {
-		taskLines = append(taskLines, taskPendingClr.Render("  (no tasks)"))
-	} else {
-		for _, task := range m.tasks {
-			sty := taskStatusStyle(task.Status)
-			shortID := task.ID
-			if len(shortID) > 8 {
-				shortID = shortID[:8]
-			}
-			status := sty.Render(fmt.Sprintf("%-11s", task.Status))
-			titleStr := truncateStr(task.Title, 30)
-			assignee := msgToStyle.Render(task.Assignee)
-
-			line := fmt.Sprintf(" %s %s %-30s → %s",
-				msgTimeStyle.Render(shortID), status, titleStr, assignee)
-
-			// Append last log message if available
-			if len(task.Logs) > 0 {
-				lastLog := truncateStr(task.Logs[len(task.Logs)-1].Message, innerW-70)
-				if lastLog != "" {
-					line += "  " + msgTimeStyle.Render(lastLog)
-				}
-			}
-
-			taskLines = append(taskLines, line)
-		}
-	}
 
 	var bodyLines []string
-	for i := 0; i < innerH; i++ {
-		line := ""
-		if i < len(taskLines) {
-			line = taskLines[i]
+	var topLine string
+	var botLine string
+	if len(filtered) == 0 {
+		pad := innerW - titleW - 1
+		if pad < 0 {
+			pad = 0
 		}
-		visW := lipgloss.Width(line)
-		if visW > innerW {
-			line = truncateStr(line, innerW)
-			visW = lipgloss.Width(line)
+		topLine = taskBorderClr.Render("╭─") + title + taskBorderClr.Render(strings.Repeat("─", pad)+"╮")
+		for i := 0; i < innerH; i++ {
+			line := ""
+			if i == 0 {
+				line = taskPendingClr.Render(" no tasks for current filter ")
+			}
+			padding := innerW - lipgloss.Width(line)
+			if padding < 0 {
+				padding = 0
+			}
+			bodyLines = append(bodyLines, taskBorderClr.Render("│")+line+strings.Repeat(" ", padding)+taskBorderClr.Render("│"))
 		}
-		padding := innerW - visW
-		if padding < 0 {
-			padding = 0
+		botLine = taskBorderClr.Render("╰" + strings.Repeat("─", innerW) + "╯")
+	} else {
+		listW := innerW * 42 / 100
+		if listW < 44 {
+			listW = 44
 		}
-		bodyLines = append(bodyLines, taskBorderClr.Render("│")+line+strings.Repeat(" ", padding)+taskBorderClr.Render("│"))
-	}
+		if listW > innerW-28 {
+			listW = innerW - 28
+		}
+		detailW := innerW - listW - 3
+		if detailW < 24 {
+			detailW = 24
+			listW = innerW - detailW - 3
+		}
+		topLine = renderTaskSplitTopBorder(title, listW, detailW)
+		botLine = renderTaskSplitBottomBorder(listW, detailW)
 
-	botLine := taskBorderClr.Render("╰" + strings.Repeat("─", innerW) + "╯")
+		selectedIdx := clampTaskSelection(m.taskSelected, m.tasks, m.taskFilter)
+		viewport := computeTaskListViewport(len(filtered), selectedIdx, innerH)
+		var listLines []string
+		for i := viewport.Start; i < viewport.End; i++ {
+			listLines = append(listLines, renderTaskListLines(filtered[i], i == selectedIdx, listW)...)
+		}
+
+		task := filtered[selectedIdx]
+		detailLines := renderTaskDetailLines(task, m.msgHistory, detailW, innerH)
+
+		for i := 0; i < innerH; i++ {
+			left := ""
+			if i < len(listLines) {
+				left = fitDisplayText(listLines[i], listW)
+			}
+			leftPad := listW - lipgloss.Width(left)
+			if leftPad < 0 {
+				leftPad = 0
+			}
+
+			right := ""
+			if i < len(detailLines) {
+				right = fitDisplayText(detailLines[i], detailW)
+			}
+			rightPad := detailW - lipgloss.Width(right)
+			if rightPad < 0 {
+				rightPad = 0
+			}
+
+			line := left + strings.Repeat(" ", leftPad) + taskBorderClr.Render(" │ ") + right + strings.Repeat(" ", rightPad)
+			bodyLines = append(bodyLines, taskBorderClr.Render("│")+line+taskBorderClr.Render("│"))
+		}
+	}
 
 	all := []string{topLine}
 	all = append(all, bodyLines...)
 	all = append(all, botLine)
 	return strings.Join(all, "\n")
+}
+
+func renderTaskDetailLines(task types.Task, history []daemon.HistoryEntry, width, height int) []string {
+	var lines []string
+	stale := "no"
+	if taskIsStale(task) {
+		stale = "yes"
+	}
+	lines = append(lines,
+		headerStyle.Render(truncateStr(task.Title, width)),
+		fmt.Sprintf("status: %s", taskStatusLabel(task)),
+		fmt.Sprintf("assignee: %s", task.Assignee),
+		fmt.Sprintf("created_by: %s", task.CreatedBy),
+		fmt.Sprintf("priority: %s", taskPriorityLabel(task.Priority)),
+		fmt.Sprintf("updated: %s ago", formatTaskAge(task)),
+		fmt.Sprintf("start_mode: %s", task.StartMode),
+		fmt.Sprintf("stale: %s", stale),
+	)
+	if task.StaleAfterSeconds > 0 {
+		lines = append(lines, fmt.Sprintf("stale_after: %ds", task.StaleAfterSeconds))
+	}
+	if task.Description != "" {
+		lines = append(lines, "", "desc: "+truncateStr(task.Description, width))
+	}
+	if task.Result != "" {
+		lines = append(lines, "", "result: "+truncateStr(task.Result, width))
+	}
+	if task.StaleInfo != nil {
+		lines = append(lines, "", "stale_info:")
+		lines = append(lines, "  reason: "+truncateStr(task.StaleInfo.Reason, max(0, width-10)))
+		if task.StaleInfo.RecommendedAction != "" {
+			lines = append(lines, "  action: "+truncateStr(task.StaleInfo.RecommendedAction, max(0, width-10)))
+		}
+		if task.StaleInfo.PendingMessages > 0 {
+			lines = append(lines, fmt.Sprintf("  pending_messages: %d", task.StaleInfo.PendingMessages))
+		}
+		if task.StaleInfo.StateDivergence {
+			lines = append(lines, "  divergence: "+truncateStr(task.StaleInfo.StateDivergenceNote, max(0, width-14)))
+		}
+	}
+
+	logs := recentTaskLogs(task, 3)
+	if len(logs) > 0 {
+		lines = append(lines, "", "recent logs:")
+		for _, log := range logs {
+			lines = append(lines, truncateStr(fmt.Sprintf("  %s %s: %s", log.Timestamp.Format("15:04:05"), log.Workspace, log.Message), width))
+		}
+	}
+
+	activity := buildTaskActivity(task, history, 4)
+	if len(activity) > 0 {
+		lines = append(lines, "", "activity:")
+		for _, entry := range activity {
+			lines = append(lines, truncateStr(fmt.Sprintf("  %s %-9s %s", entry.Timestamp.Format("15:04:05"), activityKindLabel(entry.Kind), entry.Summary), width))
+		}
+	}
+
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	return lines
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func truncateStr(s string, n int) string {
@@ -939,6 +1218,13 @@ func truncateStr(s string, n int) string {
 		return s
 	}
 	return string(r[:n]) + "…"
+}
+
+func fitDisplayText(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	return xansi.Truncate(s, width, "…")
 }
 
 func init() {

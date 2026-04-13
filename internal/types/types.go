@@ -38,21 +38,56 @@ const (
 	TaskFailed     TaskStatus = "failed"
 )
 
+type TaskStartMode string
+
+const (
+	TaskStartDefault TaskStartMode = "default"
+	TaskStartFresh   TaskStartMode = "fresh"
+)
+
+type TaskPriority string
+
+const (
+	TaskPriorityLow    TaskPriority = "low"
+	TaskPriorityNormal TaskPriority = "normal"
+	TaskPriorityHigh   TaskPriority = "high"
+	TaskPriorityUrgent TaskPriority = "urgent"
+)
+
 type Task struct {
-	ID          string     `json:"id"`
-	Title       string     `json:"title"`
-	Description string     `json:"description,omitempty"`
-	Assignee    string     `json:"assignee"`
-	CreatedBy   string     `json:"created_by"`
-	Status      TaskStatus `json:"status"`
-	Result      string     `json:"result,omitempty"`
-	Logs        []TaskLog  `json:"logs,omitempty"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
+	ID                string         `json:"id"`
+	Title             string         `json:"title"`
+	Description       string         `json:"description,omitempty"`
+	Assignee          string         `json:"assignee"`
+	CreatedBy         string         `json:"created_by"`
+	Status            TaskStatus     `json:"status"`
+	StartMode         TaskStartMode  `json:"start_mode"`
+	Priority          TaskPriority   `json:"priority,omitempty"`
+	StaleAfterSeconds int            `json:"stale_after_seconds,omitempty"`
+	Result            string         `json:"result,omitempty"`
+	Logs              []TaskLog      `json:"logs,omitempty"`
+	StaleInfo         *TaskStaleInfo `json:"stale_info,omitempty"`
+	CreatedAt         time.Time      `json:"created_at"`
+	UpdatedAt         time.Time      `json:"updated_at"`
 }
 
 type TaskLog struct {
 	Timestamp time.Time `json:"timestamp"`
 	Workspace string    `json:"workspace"`
 	Message   string    `json:"message"`
+}
+
+type TaskStaleInfo struct {
+	IsStale             bool       `json:"is_stale"`
+	Reason              string     `json:"reason,omitempty"`
+	RecommendedAction   string     `json:"recommended_action,omitempty"`
+	LastProgressAt      time.Time  `json:"last_progress_at"`
+	AgeSeconds          int64      `json:"age_seconds"`
+	PendingMessages     int        `json:"pending_messages"`
+	LastMessageAt       *time.Time `json:"last_message_at,omitempty"`
+	WakePending         bool       `json:"wake_pending,omitempty"`
+	WakeAttempts        int        `json:"wake_attempts,omitempty"`
+	NextWakeRetryAt     *time.Time `json:"next_wake_retry_at,omitempty"`
+	StateDivergence     bool       `json:"state_divergence,omitempty"`
+	StateDivergenceNote string     `json:"state_divergence_note,omitempty"`
 }

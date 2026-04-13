@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -22,6 +21,13 @@ type WakeScheduler struct {
 }
 
 type pendingWake struct {
+	Workspace string
+	Sender    string
+	Attempts  int
+	NextRetry time.Time
+}
+
+type WakeState struct {
 	Workspace string
 	Sender    string
 	Attempts  int
@@ -84,6 +90,22 @@ func (s *WakeScheduler) Cancel(workspace string) {
 	delete(s.pending, workspace)
 }
 
+func (s *WakeScheduler) State(workspace string) (WakeState, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entry, ok := s.pending[workspace]
+	if !ok {
+		return WakeState{}, false
+	}
+	return WakeState{
+		Workspace: entry.Workspace,
+		Sender:    entry.Sender,
+		Attempts:  entry.Attempts,
+		NextRetry: entry.NextRetry,
+	}, true
+}
+
 // Run starts the scheduler loop. It blocks until ctx is cancelled.
 func (s *WakeScheduler) Run(ctx context.Context) {
 	ticker := time.NewTicker(wakeCheckInterval)
@@ -140,11 +162,7 @@ func (s *WakeScheduler) process() {
 		}
 
 		// Agent is idle and has pending messages — attempt wake
-		prompt := fmt.Sprintf(
-			"read_messages MCP 도구로 수신 메시지를 확인하고 요청된 작업을 수행해 줘. 결과는 send_message(to=\"%s\")로 보내줘.",
-			pw.Sender,
-		)
-		err := tmux.WakeWorkspace(pw.Workspace, prompt)
+		err := tmux.WakeWorkspace(pw.Workspace, WakePrompt(pw.Sender, false))
 
 		s.mu.Lock()
 		if entry, ok := s.pending[pw.Workspace]; ok {
