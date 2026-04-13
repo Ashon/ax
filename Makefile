@@ -1,6 +1,6 @@
 VERSION ?= dev
 
-.PHONY: build install clean test snapshot release
+.PHONY: build install clean test release-check snapshot release
 
 build:
 	go build -ldflags "-s -w -X github.com/ashon/ax/cmd.version=$(VERSION)" -o ax .
@@ -15,6 +15,10 @@ clean:
 test:
 	go test ./...
 
+release-check:
+	@test -z "$$(git status --porcelain --untracked-files=all)" || (echo "Working tree is not clean. Commit, stash, or remove changes before releasing." >&2; git status --short >&2; exit 1)
+	@$(MAKE) test
+
 snapshot:
 	goreleaser release --snapshot --clean
 
@@ -26,7 +30,7 @@ MAJOR := $(word 1,$(subst ., ,$(CURRENT)))
 MINOR := $(word 2,$(subst ., ,$(CURRENT)))
 PATCH := $(word 3,$(subst ., ,$(CURRENT)))
 
-release:
+release: release-check
 ifeq ($(filter $(word 2,$(MAKECMDGOALS)),patch minor major dev),)
 	$(error Usage: make release {patch|minor|major|dev})
 endif
