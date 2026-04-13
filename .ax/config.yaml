@@ -1,9 +1,10 @@
 project: ax
+orchestrator_runtime: codex
 workspaces:
   runtime:
     dir: .
     description: 에이전트 런타임과 워크스페이스 라이프사이클을 담당합니다.
-    runtime: claude
+    runtime: codex
     instructions: |
       internal/agent/, internal/workspace/, internal/tmux/ 패키지를 담당합니다.
 
@@ -24,7 +25,7 @@ workspaces:
   daemon:
     dir: .
     description: 데몬과 MCP 서버 등 에이전트 간 통신 계층을 담당합니다.
-    runtime: claude
+    runtime: codex
     instructions: |
       internal/daemon/, internal/mcpserver/, internal/types/ 패키지를 담당합니다.
 
@@ -47,7 +48,7 @@ workspaces:
   config:
     dir: .
     description: YAML 설정 로딩, 병합, 프로젝트 트리 계층 관리를 담당합니다.
-    runtime: claude
+    runtime: codex
     instructions: |
       internal/config/ 패키지를 담당합니다.
 
@@ -65,7 +66,7 @@ workspaces:
   cli:
     dir: .
     description: Cobra 기반 CLI 커맨드와 사용자 인터페이스를 담당합니다.
-    runtime: claude
+    runtime: codex
     instructions: |
       cmd/ 패키지를 담당합니다.
 
@@ -92,7 +93,7 @@ workspaces:
   release:
     dir: .
     description: 빌드, 테스트, CI/CD, 릴리스 파이프라인을 담당합니다.
-    runtime: claude
+    runtime: codex
     instructions: |
       빌드/릴리스 관련 파일을 담당합니다.
 

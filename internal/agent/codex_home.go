@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/ashon/ax/internal/config"
 )
 
 func PrepareCodexHome(workspace, dir, socketPath, axBin, configPath string) (string, error) {
@@ -30,6 +32,7 @@ func PrepareCodexHome(workspace, dir, socketPath, axBin, configPath string) (str
 		return "", err
 	}
 
+	content = upsertTopLevelKey(content, "model_reasoning_effort", strconv.Quote(resolveCodexReasoningEffort(configPath, workspace)))
 	content = upsertKeyInSection(content, fmt.Sprintf("[projects.%s]", strconv.Quote(dir)), "trust_level", `"trusted"`)
 	content = upsertKeyInSection(content, "[mcp_servers.ax]", "command", strconv.Quote(axBin))
 	args := fmt.Sprintf(`["mcp-server","--workspace",%s,"--socket",%s`, strconv.Quote(workspace), strconv.Quote(socketPath))
@@ -93,6 +96,18 @@ func linkIfPresent(src, dst string) error {
 	return nil
 }
 
+func resolveCodexReasoningEffort(configPath, workspace string) string {
+	if strings.TrimSpace(configPath) == "" {
+		return config.DefaultCodexReasoningEffort
+	}
+
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return config.DefaultCodexReasoningEffort
+	}
+	return cfg.CodexReasoningEffortForWorkspace(workspace)
+}
+
 func upsertKeyInSection(content, header, key, value string) string {
 	lines := splitLines(content)
 	sectionStart := -1
@@ -133,6 +148,28 @@ func upsertKeyInSection(content, header, key, value string) string {
 	out = append(out, entry)
 	out = append(out, lines[sectionEnd:]...)
 	return strings.Join(out, "\n")
+}
+
+func upsertTopLevelKey(content, key, value string) string {
+	lines := splitLines(content)
+	entry := fmt.Sprintf("%s = %s", key, value)
+
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			out := make([]string, 0, len(lines)+1)
+			out = append(out, lines[:i]...)
+			out = append(out, entry)
+			out = append(out, lines[i:]...)
+			return strings.Join(out, "\n")
+		}
+		if strings.HasPrefix(trimmed, key+" ") || strings.HasPrefix(trimmed, key+"=") {
+			lines[i] = entry
+			return strings.Join(lines, "\n")
+		}
+	}
+
+	return strings.Join(append(lines, entry), "\n")
 }
 
 func splitLines(content string) []string {

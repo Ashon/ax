@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 )
@@ -22,9 +23,14 @@ type SessionInfo struct {
 }
 
 func CreateSession(workspace, dir, shell string) error {
+	return CreateSessionWithEnv(workspace, dir, shell, nil)
+}
+
+func CreateSessionWithEnv(workspace, dir, shell string, env map[string]string) error {
 	name := SessionName(workspace)
 
 	args := []string{"new-session", "-d", "-s", name, "-c", dir}
+	args = append(args, envArgs(env)...)
 	if shell != "" {
 		args = append(args, shell)
 	}
@@ -40,35 +46,40 @@ func CreateSession(workspace, dir, shell string) error {
 // instead of starting a shell. The command replaces the shell process so no
 // shell prompt is visible.
 func CreateSessionWithCommand(workspace, dir, command string) error {
+	return CreateSessionWithCommandEnv(workspace, dir, command, nil)
+}
+
+func CreateSessionWithCommandEnv(workspace, dir, command string, env map[string]string) error {
 	name := SessionName(workspace)
 
-	// Use "sh -c 'exec <command>'" so the command replaces the shell process.
-	// remain-on-exit keeps the pane open if the command exits, allowing restart.
-	cmd := exec.Command("tmux", "new-session", "-d", "-s", name, "-c", dir,
-		"sh", "-c", command)
+	// Run the configured command through the shell so existing agent command
+	// strings keep their current shell semantics.
+	args := []string{"new-session", "-d", "-s", name, "-c", dir}
+	args = append(args, commandWithEnv([]string{"sh", "-c", command}, env)...)
+	cmd := exec.Command("tmux", args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("tmux new-session: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 
-	// Set remain-on-exit so session doesn't vanish if claude exits
-	exec.Command("tmux", "set-option", "-t", name, "remain-on-exit", "on").Run()
-
-	return nil
+	return setRemainOnExit(name)
 }
 
 func CreateSessionWithArgs(workspace, dir string, argv []string) error {
+	return CreateSessionWithArgsEnv(workspace, dir, argv, nil)
+}
+
+func CreateSessionWithArgsEnv(workspace, dir string, argv []string, env map[string]string) error {
 	name := SessionName(workspace)
 
 	args := []string{"new-session", "-d", "-s", name, "-c", dir}
-	args = append(args, argv...)
+	args = append(args, commandWithEnv(argv, env)...)
 
 	cmd := exec.Command("tmux", args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("tmux new-session: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 
-	exec.Command("tmux", "set-option", "-t", name, "remain-on-exit", "on").Run()
-	return nil
+	return setRemainOnExit(name)
 }
 
 func DestroySession(workspace string) error {
@@ -106,17 +117,25 @@ func AttachSession(workspace string) error {
 
 func ListSessions() ([]SessionInfo, error) {
 	cmd := exec.Command("tmux", "list-sessions", "-F", "#{session_name} #{session_attached} #{session_windows}")
-	out, err := cmd.Output()
+	out, err := cmd.CombinedOutput()
+	return parseListSessionsResult(string(out), err)
+}
+
+func parseListSessionsResult(output string, err error) ([]SessionInfo, error) {
 	if err != nil {
-		// No server running = no sessions
-		if strings.Contains(string(out), "no server running") || strings.Contains(err.Error(), "exit status") {
+		// tmux reports this condition on stderr.
+		if strings.Contains(output, "no server running") {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("tmux list-sessions: %w", err)
+		msg := strings.TrimSpace(output)
+		if msg == "" {
+			return nil, fmt.Errorf("tmux list-sessions: %w", err)
+		}
+		return nil, fmt.Errorf("tmux list-sessions: %s: %w", msg, err)
 	}
 
 	var sessions []SessionInfo
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
 		if line == "" {
 			continue
 		}
@@ -149,15 +168,6 @@ func SessionExists(workspace string) bool {
 	return cmd.Run() == nil
 }
 
-func SendKeys(workspace, keys string) error {
-	name := SessionName(workspace)
-	cmd := exec.Command("tmux", "send-keys", "-t", name, keys, "Enter")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("tmux send-keys: %s: %w", strings.TrimSpace(string(out)), err)
-	}
-	return nil
-}
-
 func SendSpecialKeys(workspace string, keys ...string) error {
 	name := SessionName(workspace)
 	args := []string{"send-keys", "-t", name}
@@ -173,7 +183,76 @@ func SendSpecialKeys(workspace string, keys ...string) error {
 // InterruptWorkspace asks the agent CLI to cancel its current interactive action
 // without terminating the tmux session or shell process.
 func InterruptWorkspace(workspace string) error {
-	return SendSpecialKeys(workspace, "Escape")
+	return SendKeys(workspace, []string{"Escape"})
+}
+
+// specialKeyMap maps user-friendly key names to tmux send-keys tokens.
+// Anything not in this map is sent as literal text via the -l flag.
+var specialKeyMap = map[string]string{
+	"Enter": "Enter", "Return": "Enter",
+	"Escape": "Escape", "Esc": "Escape",
+	"Tab":       "Tab",
+	"Space":     "Space",
+	"BSpace":    "BSpace",
+	"Backspace": "BSpace",
+	"Delete":    "DC", "DC": "DC",
+	"Up": "Up", "Down": "Down", "Left": "Left", "Right": "Right",
+	"Home": "Home", "End": "End",
+	"PageUp": "PPage", "PPage": "PPage",
+	"PageDown": "NPage", "NPage": "NPage",
+	"Ctrl-C": "C-c", "C-c": "C-c",
+	"Ctrl-D": "C-d", "C-d": "C-d",
+	"Ctrl-U": "C-u", "C-u": "C-u",
+	"Ctrl-L": "C-l", "C-l": "C-l",
+	"Ctrl-A": "C-a", "C-a": "C-a",
+	"Ctrl-Z": "C-z", "C-z": "C-z",
+	"Ctrl-R": "C-r", "C-r": "C-r",
+	"Ctrl-W": "C-w", "C-w": "C-w",
+	"Ctrl-K": "C-k", "C-k": "C-k",
+	"Ctrl-E": "C-e", "C-e": "C-e",
+	"Ctrl-B": "C-b", "C-b": "C-b",
+	"Ctrl-F": "C-f", "C-f": "C-f",
+	"Ctrl-P": "C-p", "C-p": "C-p",
+	"Ctrl-N": "C-n", "C-n": "C-n",
+}
+
+// ResolveKeyToken returns the tmux send-keys token for a user-supplied key.
+// The second return value is true if the key was recognized as a special
+// (named) key; false means it should be treated as literal text.
+func ResolveKeyToken(key string) (string, bool) {
+	if mapped, ok := specialKeyMap[key]; ok {
+		return mapped, true
+	}
+	return key, false
+}
+
+// SendKeys sends a sequence of keys to a workspace's tmux session. Each key
+// is either a named special key (Enter, Escape, C-c, ...) or literal text.
+// Named keys are resolved via ResolveKeyToken; unknown tokens are sent
+// literally via tmux's -l flag so ordinary characters pass through unchanged.
+// Returns an error if the session does not exist or any send-keys call fails.
+func SendKeys(workspace string, keys []string) error {
+	if !SessionExists(workspace) {
+		return fmt.Errorf("tmux session for workspace %q not found", workspace)
+	}
+	name := SessionName(workspace)
+	for _, k := range keys {
+		if k == "" {
+			continue
+		}
+		if mapped, isSpecial := ResolveKeyToken(k); isSpecial {
+			cmd := exec.Command("tmux", "send-keys", "-t", name, mapped)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				return fmt.Errorf("tmux send-keys %q: %s: %w", k, strings.TrimSpace(string(out)), err)
+			}
+		} else {
+			cmd := exec.Command("tmux", "send-keys", "-t", name, "-l", k)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				return fmt.Errorf("tmux send-keys literal %q: %s: %w", k, strings.TrimSpace(string(out)), err)
+			}
+		}
+	}
+	return nil
 }
 
 // WakeWorkspace nudges a Codex TUI session to process queued ax messages.
@@ -197,6 +276,61 @@ func WakeWorkspace(workspace, prompt string) error {
 		return fmt.Errorf("tmux wake workspace: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	return nil
+}
+
+func setRemainOnExit(sessionName string) error {
+	cmd := exec.Command("tmux", "set-option", "-t", sessionName, "remain-on-exit", "on")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		_ = exec.Command("tmux", "kill-session", "-t", sessionName).Run()
+		return fmt.Errorf("tmux set-option remain-on-exit: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+func envArgs(env map[string]string) []string {
+	if len(env) == 0 {
+		return nil
+	}
+
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	args := make([]string, 0, len(keys)*2)
+	for _, key := range keys {
+		args = append(args, "-e", key+"="+env[key])
+	}
+	return args
+}
+
+func commandWithEnv(argv []string, env map[string]string) []string {
+	if len(env) == 0 {
+		return argv
+	}
+
+	args := append([]string{"env"}, envPairs(env)...)
+	args = append(args, argv...)
+	return args
+}
+
+func envPairs(env map[string]string) []string {
+	if len(env) == 0 {
+		return nil
+	}
+
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	pairs := make([]string, 0, len(keys))
+	for _, key := range keys {
+		pairs = append(pairs, key+"="+env[key])
+	}
+	return pairs
 }
 
 // IsIdle checks if a workspace's tmux session appears to be at an input prompt

@@ -1,8 +1,10 @@
 package config_test
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ashon/ax/internal/config"
@@ -101,6 +103,391 @@ children:
 	}
 }
 
+func TestLoadTreeIncludesSameChildUnderMultiplePrefixes(t *testing.T) {
+	rootDir := t.TempDir()
+	sharedDir := filepath.Join(rootDir, "shared")
+
+	if err := os.MkdirAll(sharedDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	writeConfig(t, filepath.Join(sharedDir, ".ax", "config.yaml"), `
+project: shared
+workspaces:
+  worker:
+    dir: .
+    description: shared worker
+`)
+
+	rootConfigPath := filepath.Join(rootDir, ".ax", "config.yaml")
+	writeConfig(t, rootConfigPath, `
+project: root
+children:
+  alpha:
+    dir: ./shared
+  beta:
+    dir: ./shared
+workspaces:
+  main:
+    dir: .
+`)
+
+	tree, err := config.LoadTree(rootConfigPath)
+	if err != nil {
+		t.Fatalf("load tree: %v", err)
+	}
+
+	if len(tree.Children) != 2 {
+		t.Fatalf("expected 2 child nodes, got %d", len(tree.Children))
+	}
+
+	if got := tree.Children[0].Alias; got != "alpha" {
+		t.Fatalf("expected first child alias alpha, got %q", got)
+	}
+	if got := tree.Children[1].Alias; got != "beta" {
+		t.Fatalf("expected second child alias beta, got %q", got)
+	}
+	if got := tree.Children[0].Name; got != "shared" {
+		t.Fatalf("expected first child project name shared, got %q", got)
+	}
+	if got := tree.Children[1].Name; got != "shared" {
+		t.Fatalf("expected second child project name shared, got %q", got)
+	}
+	if got := tree.Children[0].Prefix; got != "alpha" {
+		t.Fatalf("expected first child prefix alpha, got %q", got)
+	}
+	if got := tree.Children[1].Prefix; got != "beta" {
+		t.Fatalf("expected second child prefix beta, got %q", got)
+	}
+	if got := tree.Children[0].Workspaces[0].MergedName; got != "alpha.worker" {
+		t.Fatalf("expected alpha worker merged name, got %q", got)
+	}
+	if got := tree.Children[1].Workspaces[0].MergedName; got != "beta.worker" {
+		t.Fatalf("expected beta worker merged name, got %q", got)
+	}
+	if got := tree.Children[0].DisplayName(); got != "alpha (shared)" {
+		t.Fatalf("expected alpha display name, got %q", got)
+	}
+	if got := tree.Children[1].DisplayName(); got != "beta (shared)" {
+		t.Fatalf("expected beta display name, got %q", got)
+	}
+}
+
+func TestLoadTreeRejectsCyclicChildren(t *testing.T) {
+	rootDir := t.TempDir()
+	childDir := filepath.Join(rootDir, "child")
+
+	if err := os.MkdirAll(childDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	rootConfigPath := filepath.Join(rootDir, ".ax", "config.yaml")
+	writeConfig(t, rootConfigPath, `
+children:
+  child:
+    dir: ./child
+`)
+
+	writeConfig(t, filepath.Join(childDir, ".ax", "config.yaml"), `
+children:
+  root:
+    dir: ..
+`)
+
+	if _, err := config.LoadTree(rootConfigPath); !errors.Is(err, config.ErrCyclicChildren) {
+		t.Fatalf("expected cycle error %v, got %v", config.ErrCyclicChildren, err)
+	}
+}
+
+func TestLoadRejectsDuplicateSiblingChildPrefixes(t *testing.T) {
+	rootDir := t.TempDir()
+	firstDir := filepath.Join(rootDir, "first")
+	secondDir := filepath.Join(rootDir, "second")
+
+	writeConfig(t, filepath.Join(firstDir, ".ax", "config.yaml"), `
+workspaces:
+  main:
+    dir: .
+`)
+	writeConfig(t, filepath.Join(secondDir, ".ax", "config.yaml"), `
+workspaces:
+  main:
+    dir: .
+`)
+
+	rootConfigPath := filepath.Join(rootDir, ".ax", "config.yaml")
+	writeConfig(t, rootConfigPath, `
+children:
+  first:
+    dir: ./first
+    prefix: team
+  second:
+    dir: ./second
+    prefix: team
+`)
+
+	assertLoadersFailWithError(t, rootConfigPath, config.ErrDuplicateChildPrefix, "team", firstDir, secondDir)
+}
+
+func TestLoadRejectsDuplicateNestedChildPrefixes(t *testing.T) {
+	rootDir := t.TempDir()
+	firstDir := filepath.Join(rootDir, "first")
+	grandChildDir := filepath.Join(firstDir, "grandchild")
+	secondDir := filepath.Join(rootDir, "second")
+
+	writeConfig(t, filepath.Join(grandChildDir, ".ax", "config.yaml"), `
+workspaces:
+  main:
+    dir: .
+`)
+	writeConfig(t, filepath.Join(firstDir, ".ax", "config.yaml"), `
+children:
+  grandchild:
+    dir: ./grandchild
+`)
+	writeConfig(t, filepath.Join(secondDir, ".ax", "config.yaml"), `
+workspaces:
+  main:
+    dir: .
+`)
+
+	rootConfigPath := filepath.Join(rootDir, ".ax", "config.yaml")
+	writeConfig(t, rootConfigPath, `
+children:
+  first:
+    dir: ./first
+  second:
+    dir: ./second
+    prefix: first.grandchild
+`)
+
+	assertLoadersFailWithError(t, rootConfigPath, config.ErrDuplicateChildPrefix, "first.grandchild", grandChildDir, secondDir)
+}
+
+func TestLoadRejectsReservedOrchestratorNameCollisions(t *testing.T) {
+	t.Run("root workspace", func(t *testing.T) {
+		rootDir := t.TempDir()
+		rootConfigPath := filepath.Join(rootDir, ".ax", "config.yaml")
+		writeConfig(t, rootConfigPath, `
+workspaces:
+  orchestrator:
+    dir: .
+`)
+
+		assertLoadersFailWithError(t, rootConfigPath, config.ErrReservedNameCollision, "orchestrator", rootConfigPath)
+	})
+
+	t.Run("child workspace", func(t *testing.T) {
+		rootDir := t.TempDir()
+		childDir := filepath.Join(rootDir, "ops")
+
+		writeConfig(t, filepath.Join(childDir, ".ax", "config.yaml"), `
+workspaces:
+  orchestrator:
+    dir: .
+`)
+
+		rootConfigPath := filepath.Join(rootDir, ".ax", "config.yaml")
+		writeConfig(t, rootConfigPath, `
+children:
+  ops:
+    dir: ./ops
+`)
+
+		assertLoadersFailWithError(t, rootConfigPath, config.ErrReservedNameCollision, "ops.orchestrator", childDir)
+	})
+}
+
+func TestLoadRejectsMalformedChildConfig(t *testing.T) {
+	rootDir := t.TempDir()
+	childDir := filepath.Join(rootDir, "broken")
+
+	writeConfig(t, filepath.Join(childDir, ".ax", "config.yaml"), `
+workspaces:
+  main: [
+`)
+
+	rootConfigPath := filepath.Join(rootDir, ".ax", "config.yaml")
+	writeConfig(t, rootConfigPath, `
+children:
+  broken:
+    dir: ./broken
+`)
+
+	assertLoadersFailWithError(t, rootConfigPath, nil, `load child "broken"`, childDir, "parse config")
+}
+
+func TestLoadRejectsUnreadableChildConfig(t *testing.T) {
+	rootDir := t.TempDir()
+	childDir := filepath.Join(rootDir, "private")
+	childConfigPath := filepath.Join(childDir, ".ax", "config.yaml")
+
+	writeConfig(t, childConfigPath, `
+workspaces:
+  main:
+    dir: .
+`)
+
+	if err := os.Chmod(childConfigPath, 0); err != nil {
+		t.Fatalf("chmod %s: %v", childConfigPath, err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(childConfigPath, 0o644)
+	})
+
+	if _, err := os.ReadFile(childConfigPath); err == nil {
+		t.Skip("filesystem permissions do not block reads in this environment")
+	}
+
+	rootConfigPath := filepath.Join(rootDir, ".ax", "config.yaml")
+	writeConfig(t, rootConfigPath, `
+children:
+  private:
+    dir: ./private
+`)
+
+	assertLoadersFailWithError(t, rootConfigPath, os.ErrPermission, `load child "private"`, childDir, "read config")
+}
+
+func TestLoadPreservesStaleMissingChildConfigBehavior(t *testing.T) {
+	rootDir := t.TempDir()
+	childDir := filepath.Join(rootDir, "missing-child")
+	if err := os.MkdirAll(childDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	rootConfigPath := filepath.Join(rootDir, ".ax", "config.yaml")
+	writeConfig(t, rootConfigPath, `
+workspaces:
+  main:
+    dir: .
+children:
+  missing:
+    dir: ./missing-child
+`)
+
+	cfg, err := config.Load(rootConfigPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if len(cfg.Workspaces) != 1 {
+		t.Fatalf("expected only root workspace to remain, got %d workspaces", len(cfg.Workspaces))
+	}
+	if _, ok := cfg.Workspaces["main"]; !ok {
+		t.Fatalf("expected root workspace main to exist")
+	}
+
+	tree, err := config.LoadTree(rootConfigPath)
+	if err != nil {
+		t.Fatalf("load tree: %v", err)
+	}
+	if len(tree.Children) != 0 {
+		t.Fatalf("expected stale missing child to be skipped, got %d children", len(tree.Children))
+	}
+}
+
+func TestDefaultConfigUsesClaudeByDefault(t *testing.T) {
+	cfg := config.DefaultConfig("demo")
+
+	if cfg.OrchestratorRuntime != "claude" {
+		t.Fatalf("expected orchestrator runtime claude, got %q", cfg.OrchestratorRuntime)
+	}
+
+	ws, ok := cfg.Workspaces["main"]
+	if !ok {
+		t.Fatal("expected main workspace to exist")
+	}
+	if ws.Runtime != "claude" {
+		t.Fatalf("expected main workspace runtime claude, got %q", ws.Runtime)
+	}
+	if ws.CodexModelReasoningEffort != config.DefaultCodexReasoningEffort {
+		t.Fatalf("expected main workspace codex reasoning effort %q, got %q", config.DefaultCodexReasoningEffort, ws.CodexModelReasoningEffort)
+	}
+}
+
+func TestDefaultConfigForRuntimeUsesRequestedRuntime(t *testing.T) {
+	cfg := config.DefaultConfigForRuntime("demo", "codex")
+
+	if cfg.OrchestratorRuntime != "codex" {
+		t.Fatalf("expected orchestrator runtime codex, got %q", cfg.OrchestratorRuntime)
+	}
+
+	ws, ok := cfg.Workspaces["main"]
+	if !ok {
+		t.Fatal("expected main workspace to exist")
+	}
+	if ws.Runtime != "codex" {
+		t.Fatalf("expected main workspace runtime codex, got %q", ws.Runtime)
+	}
+	if ws.CodexModelReasoningEffort != config.DefaultCodexReasoningEffort {
+		t.Fatalf("expected main workspace codex reasoning effort %q, got %q", config.DefaultCodexReasoningEffort, ws.CodexModelReasoningEffort)
+	}
+}
+
+func TestLoadPropagatesProjectCodexReasoningEffortToWorkspaces(t *testing.T) {
+	rootDir := t.TempDir()
+	rootConfigPath := filepath.Join(rootDir, ".ax", "config.yaml")
+	writeConfig(t, rootConfigPath, `
+codex_model_reasoning_effort: high
+workspaces:
+  main:
+    dir: .
+`)
+
+	cfg, err := config.Load(rootConfigPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	if got := cfg.CodexReasoningEffortForWorkspace("main"); got != "high" {
+		t.Fatalf("expected propagated workspace reasoning effort high, got %q", got)
+	}
+}
+
+func TestLoadPreservesChildCodexReasoningEffortDefaults(t *testing.T) {
+	rootDir := t.TempDir()
+	childDir := filepath.Join(rootDir, "child")
+	if err := os.MkdirAll(childDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	writeConfig(t, filepath.Join(childDir, ".ax", "config.yaml"), `
+codex_model_reasoning_effort: low
+workspaces:
+  worker:
+    dir: .
+`)
+
+	rootConfigPath := filepath.Join(rootDir, ".ax", "config.yaml")
+	writeConfig(t, rootConfigPath, `
+codex_model_reasoning_effort: high
+children:
+  child:
+    dir: ./child
+workspaces:
+  main:
+    dir: .
+`)
+
+	cfg, err := config.Load(rootConfigPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	if got := cfg.CodexReasoningEffortForWorkspace("main"); got != "high" {
+		t.Fatalf("expected root workspace reasoning effort high, got %q", got)
+	}
+	if got := cfg.CodexReasoningEffortForWorkspace("child.worker"); got != "low" {
+		t.Fatalf("expected child workspace reasoning effort low, got %q", got)
+	}
+}
+
+func TestCodexReasoningEffortForWorkspaceFallsBackToDefault(t *testing.T) {
+	if got := (*config.Config)(nil).CodexReasoningEffortForWorkspace("missing"); got != config.DefaultCodexReasoningEffort {
+		t.Fatalf("expected default reasoning effort %q, got %q", config.DefaultCodexReasoningEffort, got)
+	}
+}
+
 func writeConfig(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -108,5 +495,44 @@ func writeConfig(t *testing.T, path, content string) {
 	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+func assertLoadersFailWithError(t *testing.T, path string, want error, contains ...string) {
+	t.Helper()
+
+	loaders := []struct {
+		name string
+		fn   func(string) error
+	}{
+		{
+			name: "Load",
+			fn: func(path string) error {
+				_, err := config.Load(path)
+				return err
+			},
+		},
+		{
+			name: "LoadTree",
+			fn: func(path string) error {
+				_, err := config.LoadTree(path)
+				return err
+			},
+		},
+	}
+
+	for _, loader := range loaders {
+		err := loader.fn(path)
+		if want != nil && !errors.Is(err, want) {
+			t.Fatalf("%s: expected error %v, got %v", loader.name, want, err)
+		}
+		if want == nil && err == nil {
+			t.Fatalf("%s: expected an error, got nil", loader.name)
+		}
+		for _, fragment := range contains {
+			if !strings.Contains(err.Error(), fragment) {
+				t.Fatalf("%s: expected error %q to contain %q", loader.name, err.Error(), fragment)
+			}
+		}
 	}
 }
