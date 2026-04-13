@@ -456,6 +456,11 @@ func broadcastMessageHandler(client *DaemonClient) server.ToolHandlerFunc {
 			return mcp.NewToolResultText("No other workspaces to broadcast to."), nil
 		}
 
+		// Wake all recipients
+		for _, r := range recipients {
+			wakeAgent(r, client.workspace)
+		}
+
 		return mcp.NewToolResultText(fmt.Sprintf("Broadcast sent to %d workspace(s): %s",
 			len(recipients), strings.Join(recipients, ", "))), nil
 	}

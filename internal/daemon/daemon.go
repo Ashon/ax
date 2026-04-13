@@ -23,28 +23,32 @@ func ExpandSocketPath(path string) string {
 }
 
 type Daemon struct {
-	socketPath   string
-	registry     *Registry
-	queue        *MessageQueue
-	history      *History
-	sharedValues map[string]string
-	sharedMu     sync.RWMutex
-	taskStore    *TaskStore
-	listener     net.Listener
-	logger       *log.Logger
+	socketPath    string
+	registry      *Registry
+	queue         *MessageQueue
+	history       *History
+	sharedValues  map[string]string
+	sharedMu      sync.RWMutex
+	taskStore     *TaskStore
+	wakeScheduler *WakeScheduler
+	listener      net.Listener
+	logger        *log.Logger
 }
 
 func New(socketPath string) *Daemon {
 	sp := ExpandSocketPath(socketPath)
 	stateDir := filepath.Dir(sp)
+	logger := log.New(os.Stderr, "[ax-daemon] ", log.LstdFlags)
+	queue := NewMessageQueue()
 	return &Daemon{
-		socketPath:   sp,
-		registry:     NewRegistry(),
-		queue:        NewMessageQueue(),
-		history:      NewHistory(stateDir, 500),
-		sharedValues: make(map[string]string),
-		taskStore:    NewTaskStore(stateDir),
-		logger:       log.New(os.Stderr, "[ax-daemon] ", log.LstdFlags),
+		socketPath:    sp,
+		registry:      NewRegistry(),
+		queue:         queue,
+		history:       NewHistory(stateDir, 500),
+		sharedValues:  make(map[string]string),
+		taskStore:     NewTaskStore(stateDir),
+		wakeScheduler: NewWakeScheduler(queue, logger),
+		logger:        logger,
 	}
 }
 
@@ -69,6 +73,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 	pidPath := filepath.Join(dir, "daemon.pid")
 	os.WriteFile(pidPath, []byte(fmt.Sprintf("%d", os.Getpid())), 0o644)
 	defer os.Remove(pidPath)
+
+	go d.wakeScheduler.Run(ctx)
 
 	go func() {
 		<-ctx.Done()
@@ -167,6 +173,9 @@ func (d *Daemon) handleEnvelope(conn net.Conn, env *Envelope, workspace *string)
 			entry.mu.Unlock()
 		}
 
+		// Schedule wake retry for the target workspace
+		d.wakeScheduler.Schedule(p.To, *workspace)
+
 		return NewResponseEnvelope(env.ID, map[string]string{
 			"message_id": msg.ID,
 			"status":     "sent",
@@ -216,6 +225,10 @@ func (d *Daemon) handleEnvelope(conn net.Conn, env *Envelope, workspace *string)
 			limit = 10
 		}
 		messages := d.queue.Dequeue(*workspace, limit, p.From)
+		// Cancel pending wake if no more messages remain
+		if d.queue.PendingCount(*workspace) == 0 {
+			d.wakeScheduler.Cancel(*workspace)
+		}
 		return NewResponseEnvelope(env.ID, &ReadMessagesResponse{Messages: messages})
 
 	case MsgListWorkspaces:

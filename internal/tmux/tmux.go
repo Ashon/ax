@@ -199,6 +199,45 @@ func WakeWorkspace(workspace, prompt string) error {
 	return nil
 }
 
+// IsIdle checks if a workspace's tmux session appears to be at an input prompt
+// (i.e., the agent is waiting for user input, not executing tools or generating).
+func IsIdle(workspace string) bool {
+	name := SessionName(workspace)
+	out, err := exec.Command("tmux", "capture-pane", "-t", name, "-p").Output()
+	if err != nil {
+		return false
+	}
+
+	lines := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+
+	// Find last non-empty line
+	lastLine := ""
+	for i := len(lines) - 1; i >= 0; i-- {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed != "" {
+			lastLine = trimmed
+			break
+		}
+	}
+	if lastLine == "" {
+		return false
+	}
+
+	// Prompt patterns indicating the agent is waiting for input
+	idlePatterns := []string{"❯", "> ", "$ ", "# ", "claude>"}
+	for _, p := range idlePatterns {
+		if strings.HasSuffix(lastLine, p) || lastLine == strings.TrimSpace(p) {
+			return true
+		}
+	}
+	// Claude Code shows just ">" or "❯" on the prompt line
+	if lastLine == ">" || lastLine == "❯" {
+		return true
+	}
+
+	return false
+}
+
 // SendRawKey sends literal text to a tmux session without appending Enter.
 // The -l flag prevents tmux from interpreting key names.
 func SendRawKey(sessionName, key string) error {
