@@ -88,6 +88,19 @@ func WriteOrchestratorPrompt(orchDir string, node *config.ProjectNode, prefix, p
 	sb.WriteString("- 작업 완료 보고를 보낸 후에는 상대의 확인/감사 메시지가 오더라도 다시 회신하지 마세요.\n")
 	sb.WriteString("- 상태 알림은 `set_status`를 사용하고, `send_message`로 상태 핑을 보내지 마세요.\n\n")
 
+	sb.WriteString("## 작업 관리 (Task Management)\n")
+	sb.WriteString("워크스페이스에 작업을 위임할 때 task를 활용하여 진행 상황을 추적하세요.\n\n")
+	sb.WriteString("### 오케스트레이터 워크플로우\n")
+	sb.WriteString("1. 작업 위임 시 `create_task`로 task를 생성하고, `send_message`에 task ID를 포함하여 전달\n")
+	sb.WriteString("2. `list_tasks`로 전체 진행 상황을 모니터링 (필터: `--assignee`, `--status`, `--created_by`)\n")
+	sb.WriteString("3. `get_task`로 특정 작업의 상세 로그 확인\n\n")
+	sb.WriteString("### 워크스페이스 에이전트에게 전달할 규칙\n")
+	sb.WriteString("작업 위임 시 다음 안내를 메시지에 포함하세요:\n")
+	sb.WriteString("- 작업 시작 시 `update_task(id=..., status=\"in_progress\")`로 상태 변경\n")
+	sb.WriteString("- 주요 단계 완료 시 `update_task(id=..., log=\"진행 내용\")`으로 진행 로그 기록\n")
+	sb.WriteString("- 작업 완료 시 `update_task(id=..., status=\"completed\", result=\"결과 요약\")`\n")
+	sb.WriteString("- 작업 실패 시 `update_task(id=..., status=\"failed\", result=\"실패 원인\")`\n\n")
+
 	// Direct workspaces (at this project level)
 	if len(node.Workspaces) > 0 {
 		sb.WriteString("## 직접 관리하는 워크스페이스\n\n")
