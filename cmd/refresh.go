@@ -111,34 +111,51 @@ var refreshCmd = &cobra.Command{
 }
 
 func refreshOrchestratorArtifacts(node *config.ProjectNode, parentName, socketPath, cfgPath string) error {
-	if node == nil {
-		return nil
-	}
-	orchDir, err := orchestratorDir(node)
+	skipRoot, err := reconcileRootOrchestratorState(cfgPath)
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(orchDir, 0o755); err != nil {
-		return err
+	return refreshOrchestratorArtifactsNode(node, parentName, socketPath, cfgPath, skipRoot)
+}
+
+func refreshOrchestratorArtifactsNode(node *config.ProjectNode, parentName, socketPath, cfgPath string, skipRoot bool) error {
+	if node == nil {
+		return nil
 	}
-	if err := workspace.WriteMCPConfig(orchDir, workspace.OrchestratorName(node.Prefix), socketPath, cfgPath); err != nil {
-		return err
-	}
-	runtime := node.OrchestratorRuntime
-	if runtime == "" {
-		runtime = "claude"
-	}
-	if runtime == "codex" {
-		if err := workspace.EnsureCodexConfig(orchDir, workspace.OrchestratorName(node.Prefix), socketPath, cfgPath); err != nil {
+	selfName := workspace.OrchestratorName(node.Prefix)
+	isRoot := node.Prefix == ""
+
+	if !(isRoot && skipRoot) {
+		orchDir, err := orchestratorDir(node)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(orchDir, 0o755); err != nil {
+			return err
+		}
+		if err := workspace.WriteMCPConfig(orchDir, selfName, socketPath, cfgPath); err != nil {
+			return err
+		}
+		runtime := node.OrchestratorRuntime
+		if runtime == "" {
+			runtime = "claude"
+		}
+		if runtime == "codex" {
+			if err := workspace.EnsureCodexConfig(orchDir, selfName, socketPath, cfgPath); err != nil {
+				return err
+			}
+		}
+		if err := workspace.WriteOrchestratorPrompt(orchDir, node, node.Prefix, parentName, runtime); err != nil {
 			return err
 		}
 	}
-	if err := workspace.WriteOrchestratorPrompt(orchDir, node, node.Prefix, parentName, runtime); err != nil {
-		return err
+
+	childParentName := selfName
+	if isRoot && skipRoot {
+		childParentName = ""
 	}
-	selfName := workspace.OrchestratorName(node.Prefix)
 	for _, child := range node.Children {
-		if err := refreshOrchestratorArtifacts(child, selfName, socketPath, cfgPath); err != nil {
+		if err := refreshOrchestratorArtifactsNode(child, childParentName, socketPath, cfgPath, skipRoot); err != nil {
 			return err
 		}
 	}

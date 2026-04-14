@@ -298,6 +298,91 @@ children:
 	})
 }
 
+func TestLoadAllowsRootWorkspaceNamedOrchestratorWhenRootDisabled(t *testing.T) {
+	rootDir := t.TempDir()
+	rootConfigPath := filepath.Join(rootDir, ".ax", "config.yaml")
+	writeConfig(t, rootConfigPath, `
+disable_root_orchestrator: true
+workspaces:
+  orchestrator:
+    dir: .
+`)
+
+	cfg, err := config.Load(rootConfigPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if !cfg.DisableRootOrchestrator {
+		t.Fatal("expected disable_root_orchestrator to be preserved on load")
+	}
+	if _, ok := cfg.Workspaces["orchestrator"]; !ok {
+		t.Fatal("expected root workspace named orchestrator to be allowed when root orchestrator is disabled")
+	}
+
+	tree, err := config.LoadTree(rootConfigPath)
+	if err != nil {
+		t.Fatalf("load tree: %v", err)
+	}
+	if !tree.DisableRootOrchestrator {
+		t.Fatal("expected top-level tree node to mark disable_root_orchestrator")
+	}
+}
+
+func TestLoadRejectsChildOrchestratorWorkspaceEvenWhenChildDisablesRoot(t *testing.T) {
+	rootDir := t.TempDir()
+	childDir := filepath.Join(rootDir, "ops")
+
+	writeConfig(t, filepath.Join(childDir, ".ax", "config.yaml"), `
+disable_root_orchestrator: true
+workspaces:
+  orchestrator:
+    dir: .
+`)
+
+	rootConfigPath := filepath.Join(rootDir, ".ax", "config.yaml")
+	writeConfig(t, rootConfigPath, `
+children:
+  ops:
+    dir: ./ops
+`)
+
+	assertLoadersFailWithError(t, rootConfigPath, config.ErrReservedNameCollision, "ops.orchestrator", childDir)
+}
+
+func TestLoadTreeIgnoresChildDisableRootOrchestratorFlag(t *testing.T) {
+	rootDir := t.TempDir()
+	childDir := filepath.Join(rootDir, "ops")
+
+	writeConfig(t, filepath.Join(childDir, ".ax", "config.yaml"), `
+disable_root_orchestrator: true
+workspaces:
+  main:
+    dir: .
+`)
+
+	rootConfigPath := filepath.Join(rootDir, ".ax", "config.yaml")
+	writeConfig(t, rootConfigPath, `
+disable_root_orchestrator: true
+children:
+  ops:
+    dir: ./ops
+`)
+
+	tree, err := config.LoadTree(rootConfigPath)
+	if err != nil {
+		t.Fatalf("load tree: %v", err)
+	}
+	if !tree.DisableRootOrchestrator {
+		t.Fatal("expected top-level disable_root_orchestrator to be set")
+	}
+	if len(tree.Children) != 1 {
+		t.Fatalf("expected one child, got %d", len(tree.Children))
+	}
+	if tree.Children[0].DisableRootOrchestrator {
+		t.Fatal("expected child disable_root_orchestrator to be ignored when loaded under a parent tree")
+	}
+}
+
 func TestLoadRejectsMalformedChildConfig(t *testing.T) {
 	rootDir := t.TempDir()
 	childDir := filepath.Join(rootDir, "broken")

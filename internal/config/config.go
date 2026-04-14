@@ -12,18 +12,19 @@ import (
 )
 
 const (
-	DefaultConfigDir                = ".ax"
-	DefaultConfigFile               = "config.yaml"
-	LegacyConfigFile                = "ax.yaml"
-	DefaultCodexReasoningEffort     = "xhigh"
+	DefaultConfigDir            = ".ax"
+	DefaultConfigFile           = "config.yaml"
+	LegacyConfigFile            = "ax.yaml"
+	DefaultCodexReasoningEffort = "xhigh"
 )
 
 type Config struct {
-	Project                    string               `yaml:"project"`
-	OrchestratorRuntime        string               `yaml:"orchestrator_runtime,omitempty"`
-	CodexModelReasoningEffort  string               `yaml:"codex_model_reasoning_effort,omitempty"`
-	Children                   map[string]Child     `yaml:"children,omitempty"`
-	Workspaces                 map[string]Workspace `yaml:"workspaces"`
+	Project                   string               `yaml:"project"`
+	OrchestratorRuntime       string               `yaml:"orchestrator_runtime,omitempty"`
+	DisableRootOrchestrator   bool                 `yaml:"disable_root_orchestrator,omitempty"`
+	CodexModelReasoningEffort string               `yaml:"codex_model_reasoning_effort,omitempty"`
+	Children                  map[string]Child     `yaml:"children,omitempty"`
+	Workspaces                map[string]Workspace `yaml:"workspaces"`
 }
 
 type Child struct {
@@ -32,14 +33,14 @@ type Child struct {
 }
 
 type Workspace struct {
-	Dir                         string            `yaml:"dir"`
-	Description                 string            `yaml:"description,omitempty"`
-	Shell                       string            `yaml:"shell,omitempty"`
-	Runtime                     string            `yaml:"runtime,omitempty"`                    // claude or codex (default: claude)
-	CodexModelReasoningEffort   string            `yaml:"codex_model_reasoning_effort,omitempty"`
-	Agent                       string            `yaml:"agent,omitempty"`                      // custom command to auto-start instead of runtime default
-	Instructions                string            `yaml:"instructions,omitempty"`               // agent instructions (written to the runtime's instruction file)
-	Env                         map[string]string `yaml:"env,omitempty"`
+	Dir                       string            `yaml:"dir"`
+	Description               string            `yaml:"description,omitempty"`
+	Shell                     string            `yaml:"shell,omitempty"`
+	Runtime                   string            `yaml:"runtime,omitempty"` // claude or codex (default: claude)
+	CodexModelReasoningEffort string            `yaml:"codex_model_reasoning_effort,omitempty"`
+	Agent                     string            `yaml:"agent,omitempty"`        // custom command to auto-start instead of runtime default
+	Instructions              string            `yaml:"instructions,omitempty"` // agent instructions (written to the runtime's instruction file)
+	Env                       map[string]string `yaml:"env,omitempty"`
 }
 
 func Load(path string) (*Config, error) {
@@ -101,6 +102,7 @@ func loadRecursive(path string, seen map[string]bool) (*Config, error) {
 	merged := &Config{
 		Project:                   cfg.Project,
 		OrchestratorRuntime:       cfg.OrchestratorRuntime,
+		DisableRootOrchestrator:   cfg.DisableRootOrchestrator,
 		CodexModelReasoningEffort: strings.TrimSpace(cfg.CodexModelReasoningEffort),
 		Children:                  cfg.Children,
 		Workspaces:                make(map[string]Workspace, len(cfg.Workspaces)),

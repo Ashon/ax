@@ -45,19 +45,41 @@ func validateConfigTree(path string) error {
 		return fmt.Errorf("resolve config path: %w", err)
 	}
 
+	rootCfg, err := readConfigForValidation(absPath)
+	if err != nil {
+		return err
+	}
+
+	orchestrators := make(map[string]orchestratorClaim)
+	if !rootCfg.DisableRootOrchestrator {
+		orchestrators[orchestratorSessionName("")] = orchestratorClaim{
+			ConfigPath:  absPath,
+			SessionName: orchestratorSessionName(""),
+		}
+	}
+
 	state := &validationState{
 		childPrefixes: make(map[string]childPrefixClaim),
 		workspaces:    make(map[string]workspaceClaim),
-		orchestrators: map[string]orchestratorClaim{
-			orchestratorSessionName(""): {
-				ConfigPath:  absPath,
-				SessionName: orchestratorSessionName(""),
-			},
-		},
+		orchestrators: orchestrators,
 	}
 
 	seen := make(map[string]bool)
 	return validateRecursive(absPath, "", seen, state)
+}
+
+func readConfigForValidation(path string) (Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Config{}, fmt.Errorf("read config %s: %w", path, err)
+	}
+
+	var cfg Config
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return Config{}, fmt.Errorf("parse config %s: %w", path, err)
+	}
+
+	return cfg, nil
 }
 
 func validateRecursive(path, prefix string, seen map[string]bool, state *validationState) error {
@@ -71,14 +93,9 @@ func validateRecursive(path, prefix string, seen map[string]bool, state *validat
 	seen[absPath] = true
 	defer delete(seen, absPath)
 
-	data, err := os.ReadFile(absPath)
+	cfg, err := readConfigForValidation(absPath)
 	if err != nil {
-		return fmt.Errorf("read config %s: %w", absPath, err)
-	}
-
-	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return fmt.Errorf("parse config %s: %w", absPath, err)
+		return err
 	}
 
 	configDir := filepath.Dir(absPath)

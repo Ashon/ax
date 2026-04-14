@@ -42,6 +42,9 @@ var downCmd = &cobra.Command{
 			fmt.Println("\nStopping orchestrators:")
 			destroyOrchestrators(tree)
 		}
+		if _, err := reconcileRootOrchestratorState(cfgPath); err != nil {
+			return err
+		}
 
 		// Remove orchestrator .mcp.json
 		configDir := filepath.Dir(cfgPath)

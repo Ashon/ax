@@ -24,6 +24,13 @@ func runRootOrchestrator(runtime string) error {
 	if err != nil {
 		return err
 	}
+	disabled, err := reconcileRootOrchestratorState(cfgPath)
+	if err != nil {
+		return err
+	}
+	if disabled {
+		return fmt.Errorf("root orchestrator disabled by %q in %s", "disable_root_orchestrator", cfgPath)
+	}
 	tree, err := config.LoadTree(cfgPath)
 	if err != nil {
 		return fmt.Errorf("load config tree: %w", err)

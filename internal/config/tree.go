@@ -13,13 +13,14 @@ import (
 // Each node knows its own workspaces and its child projects so callers
 // can render a tree without flattening workspace names.
 type ProjectNode struct {
-	Name                string // actual project name from the child config itself
-	Alias               string // mount alias used by the parent children mapping
-	Prefix              string // fully-qualified prefix used for merged names
-	Dir                 string
-	OrchestratorRuntime string
-	Workspaces          []WorkspaceRef
-	Children            []*ProjectNode
+	Name                    string // actual project name from the child config itself
+	Alias                   string // mount alias used by the parent children mapping
+	Prefix                  string // fully-qualified prefix used for merged names
+	Dir                     string
+	OrchestratorRuntime     string
+	DisableRootOrchestrator bool
+	Workspaces              []WorkspaceRef
+	Children                []*ProjectNode
 }
 
 // WorkspaceRef is a workspace belonging to a project, with the merged
@@ -81,10 +82,11 @@ func loadTreeRecursive(path, prefix string, seen map[string]bool) (*ProjectNode,
 	}
 
 	node := &ProjectNode{
-		Name:                projectName,
-		Prefix:              prefix,
-		Dir:                 projectDir,
-		OrchestratorRuntime: raw.OrchestratorRuntime,
+		Name:                    projectName,
+		Prefix:                  prefix,
+		Dir:                     projectDir,
+		OrchestratorRuntime:     raw.OrchestratorRuntime,
+		DisableRootOrchestrator: prefix == "" && raw.DisableRootOrchestrator,
 	}
 
 	// Workspaces defined directly in this project

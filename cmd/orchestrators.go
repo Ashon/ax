@@ -25,62 +25,72 @@ func ensureOrchestrators(tree *config.ProjectNode, socketPath, cfgPath string) e
 	if tree == nil {
 		return nil
 	}
-	return createOrchestratorForNode(tree, "", socketPath, cfgPath)
+	skipRoot, err := reconcileRootOrchestratorState(cfgPath)
+	if err != nil {
+		return err
+	}
+	return createOrchestratorForNode(tree, "", socketPath, cfgPath, skipRoot)
 }
 
-func createOrchestratorForNode(node *config.ProjectNode, parentName, socketPath, cfgPath string) error {
+func createOrchestratorForNode(node *config.ProjectNode, parentName, socketPath, cfgPath string, skipRoot bool) error {
 	selfName := workspace.OrchestratorName(node.Prefix)
 	isRoot := node.Prefix == ""
 
-	orchDir, err := orchestratorDir(node)
-	if err != nil {
-		return fmt.Errorf("resolve orchestrator dir for %s: %w", selfName, err)
-	}
-
-	runtime := agent.NormalizeRuntime(node.OrchestratorRuntime)
-	if _, err := agent.Get(runtime); err != nil {
-		return fmt.Errorf("invalid orchestrator runtime for %s: %w", selfName, err)
-	}
-
-	if err := os.MkdirAll(orchDir, 0o755); err != nil {
-		return fmt.Errorf("create orchestrator dir %s: %w", orchDir, err)
-	}
-	// Pre-create .claude to skip trust prompt for claude runtime
-	os.MkdirAll(filepath.Join(orchDir, ".claude"), 0o755)
-
-	if err := workspace.WriteMCPConfig(orchDir, selfName, socketPath, cfgPath); err != nil {
-		return fmt.Errorf("write %s mcp config: %w", selfName, err)
-	}
-	if runtime == agent.RuntimeCodex {
-		if err := workspace.EnsureCodexConfig(orchDir, selfName, socketPath, cfgPath); err != nil {
-			return fmt.Errorf("write %s codex config: %w", selfName, err)
-		}
-	}
-	if err := workspace.WriteOrchestratorPrompt(orchDir, node, node.Prefix, parentName, runtime); err != nil {
-		return fmt.Errorf("write %s prompt: %w", selfName, err)
-	}
-
-	// Only sub-orchestrators run as managed tmux sessions; the root
-	// orchestrator is launched interactively via `ax claude` / `ax codex`.
-	if !isRoot && !tmux.SessionExists(selfName) {
-		exe, err := os.Executable()
+	if !(isRoot && skipRoot) {
+		orchDir, err := orchestratorDir(node)
 		if err != nil {
-			return fmt.Errorf("resolve ax binary: %w", err)
+			return fmt.Errorf("resolve orchestrator dir for %s: %w", selfName, err)
 		}
-		if err := tmux.CreateSessionWithArgs(selfName, orchDir, []string{
-			exe,
-			"run-agent",
-			"--runtime", runtime,
-			"--workspace", selfName,
-			"--socket", socketPath,
-			"--config", cfgPath,
-		}); err != nil {
-			return fmt.Errorf("create %s session: %w", selfName, err)
+
+		runtime := agent.NormalizeRuntime(node.OrchestratorRuntime)
+		if _, err := agent.Get(runtime); err != nil {
+			return fmt.Errorf("invalid orchestrator runtime for %s: %w", selfName, err)
+		}
+
+		if err := os.MkdirAll(orchDir, 0o755); err != nil {
+			return fmt.Errorf("create orchestrator dir %s: %w", orchDir, err)
+		}
+		// Pre-create .claude to skip trust prompt for claude runtime
+		os.MkdirAll(filepath.Join(orchDir, ".claude"), 0o755)
+
+		if err := workspace.WriteMCPConfig(orchDir, selfName, socketPath, cfgPath); err != nil {
+			return fmt.Errorf("write %s mcp config: %w", selfName, err)
+		}
+		if runtime == agent.RuntimeCodex {
+			if err := workspace.EnsureCodexConfig(orchDir, selfName, socketPath, cfgPath); err != nil {
+				return fmt.Errorf("write %s codex config: %w", selfName, err)
+			}
+		}
+		if err := workspace.WriteOrchestratorPrompt(orchDir, node, node.Prefix, parentName, runtime); err != nil {
+			return fmt.Errorf("write %s prompt: %w", selfName, err)
+		}
+
+		// Only sub-orchestrators run as managed tmux sessions; the root
+		// orchestrator is launched interactively via `ax claude` / `ax codex`.
+		if !isRoot && !tmux.SessionExists(selfName) {
+			exe, err := os.Executable()
+			if err != nil {
+				return fmt.Errorf("resolve ax binary: %w", err)
+			}
+			if err := tmux.CreateSessionWithArgs(selfName, orchDir, []string{
+				exe,
+				"run-agent",
+				"--runtime", runtime,
+				"--workspace", selfName,
+				"--socket", socketPath,
+				"--config", cfgPath,
+			}); err != nil {
+				return fmt.Errorf("create %s session: %w", selfName, err)
+			}
 		}
 	}
 
+	childParentName := selfName
+	if isRoot && skipRoot {
+		childParentName = ""
+	}
 	for _, child := range node.Children {
-		if err := createOrchestratorForNode(child, selfName, socketPath, cfgPath); err != nil {
+		if err := createOrchestratorForNode(child, childParentName, socketPath, cfgPath, skipRoot); err != nil {
 			return err
 		}
 	}
@@ -137,11 +147,15 @@ func refreshOrchestratorTree(newChildName string) error {
 		return err
 	}
 	sp := daemon.ExpandSocketPath(socketPath)
+	skipRoot, err := reconcileRootOrchestratorState(cfgPath)
+	if err != nil {
+		return err
+	}
 
 	// Only create sessions / send messages if the daemon is running
 	if !isDaemonRunning(sp) {
 		// Still regenerate prompt files so next ax up picks them up
-		return writeOrchestratorPromptsOnly(tree, "")
+		return writeOrchestratorPromptsOnly(tree, "", skipRoot)
 	}
 
 	if err := ensureOrchestrators(tree, sp, cfgPath); err != nil {
@@ -166,24 +180,31 @@ func refreshOrchestratorTree(newChildName string) error {
 
 // writeOrchestratorPromptsOnly walks the tree and regenerates prompt files
 // without touching tmux sessions. Used when the daemon isn't running.
-func writeOrchestratorPromptsOnly(node *config.ProjectNode, parentName string) error {
+func writeOrchestratorPromptsOnly(node *config.ProjectNode, parentName string, skipRoot bool) error {
 	if node == nil {
 		return nil
 	}
 	selfName := workspace.OrchestratorName(node.Prefix)
-	orchDir, err := orchestratorDir(node)
-	if err != nil {
-		return err
+	isRoot := node.Prefix == ""
+	if !(isRoot && skipRoot) {
+		orchDir, err := orchestratorDir(node)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(orchDir, 0o755); err != nil {
+			return err
+		}
+		runtime := agent.NormalizeRuntime(node.OrchestratorRuntime)
+		if err := workspace.WriteOrchestratorPrompt(orchDir, node, node.Prefix, parentName, runtime); err != nil {
+			return err
+		}
 	}
-	if err := os.MkdirAll(orchDir, 0o755); err != nil {
-		return err
-	}
-	runtime := agent.NormalizeRuntime(node.OrchestratorRuntime)
-	if err := workspace.WriteOrchestratorPrompt(orchDir, node, node.Prefix, parentName, runtime); err != nil {
-		return err
+	childParentName := selfName
+	if isRoot && skipRoot {
+		childParentName = ""
 	}
 	for _, child := range node.Children {
-		if err := writeOrchestratorPromptsOnly(child, selfName); err != nil {
+		if err := writeOrchestratorPromptsOnly(child, childParentName, skipRoot); err != nil {
 			return err
 		}
 	}

@@ -18,7 +18,10 @@ func PrepareCodexHome(workspace, dir, socketPath, axBin, configPath string) (str
 		return "", fmt.Errorf("resolve home dir: %w", err)
 	}
 
-	codexHome := filepath.Join(home, ".ax", "codex", codexHomeKey(workspace, dir))
+	codexHome, err := CodexHomePath(workspace, dir)
+	if err != nil {
+		return "", err
+	}
 	if err := os.MkdirAll(codexHome, 0o755); err != nil {
 		return "", fmt.Errorf("create codex home: %w", err)
 	}
@@ -47,6 +50,14 @@ func PrepareCodexHome(workspace, dir, socketPath, axBin, configPath string) (str
 	}
 
 	return codexHome, nil
+}
+
+func CodexHomePath(workspace, dir string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home dir: %w", err)
+	}
+	return filepath.Join(home, ".ax", "codex", codexHomeKey(workspace, dir)), nil
 }
 
 func codexHomeKey(workspace, dir string) string {
