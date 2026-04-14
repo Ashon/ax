@@ -405,6 +405,7 @@ func (m shellModel) renderSidebar(w, h int) string {
 		sessions:       m.sessions,
 		runtimes:       m.runtimes,
 		tasks:          m.tasks,
+		tokenData:      m.tokenData,
 		workspaceInfos: m.workspaceInfos,
 	}
 	return wm.renderSidebar(w, h)

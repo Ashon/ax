@@ -83,6 +83,14 @@ func TestRenderSidebarShowsStatusTextAndAttention(t *testing.T) {
 		runtimes: map[string]string{
 			"ax.cli": "codex",
 		},
+		tokenData: map[string]agentTokens{
+			"ax.cli": {
+				Workspace: "ax.cli",
+				Up:        "1.2k",
+				Down:      "345",
+				Cost:      "$0.67",
+			},
+		},
 		tasks: []types.Task{
 			{
 				ID:        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
@@ -114,10 +122,120 @@ func TestRenderSidebarShowsStatusTextAndAttention(t *testing.T) {
 	for _, want := range []string{
 		"D1 S1",
 		"Inspecting divergence",
+		"↑1.2k ↓345",
+		"$0.67",
 	} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected %q in sidebar view %q", want, view)
 		}
+	}
+}
+
+func TestFormatSidebarTokenSummaryFallsBackToCostOnly(t *testing.T) {
+	got := formatSidebarTokenSummary(agentTokens{
+		Workspace: "ax.cli",
+		Up:        "123.4k",
+		Down:      "45.6k",
+		Cost:      "$12.34",
+	}, 8)
+	if got != "$12.34" {
+		t.Fatalf("expected cost-only fallback, got %q", got)
+	}
+}
+
+func TestFooterTokenSummaryShowsTotalsIndependentOfTab(t *testing.T) {
+	m := watchModel{
+		sessions: []tmux.SessionInfo{
+			{Name: "ax-ax_cli", Workspace: "ax.cli"},
+			{Name: "ax-ax_runtime", Workspace: "ax.runtime"},
+			{Name: "ax-ax_docs", Workspace: "ax.docs"},
+		},
+		tokenData: map[string]agentTokens{
+			"ax.cli": {
+				Workspace: "ax.cli",
+				Up:        "1.2k",
+				Down:      "345",
+				Cost:      "$0.67",
+			},
+			"ax.runtime": {
+				Workspace: "ax.runtime",
+				Up:        "800",
+				Down:      "120",
+				Cost:      "$1.13",
+			},
+		},
+	}
+
+	view := xansi.Strip(m.renderFooter(100))
+	for _, line := range strings.Split(view, "\n") {
+		if w := lipgloss.Width(line); w > 100 {
+			t.Fatalf("rendered footer line width %d exceeds width: %q", w, line)
+		}
+	}
+	for _, want := range []string{
+		"2/3 agents",
+		"↑2.0k",
+		"↓465",
+		"$1.80",
+		"tab msgs/tasks/tokens/off",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected %q in footer view %q", want, view)
+		}
+	}
+}
+
+func TestParseAgentTokensStripsANSIFromClaudeUsageLine(t *testing.T) {
+	content := "\x1b[38;5;174m✻\x1b[39m \x1b[38;5;174mWhisking… \x1b[38;5;246m(1m\x1b[39m \x1b[38;5;246m50s\x1b[39m \x1b[38;5;246m·\x1b[39m \x1b[38;5;246m↓\x1b[39m \x1b[38;5;246m4.5k\x1b[39m \x1b[38;5;246mtokens\x1b[39m \x1b[38;5;246m·\x1b[39m \x1b[38;5;249mthinking\x1b[39m)\n"
+
+	got := parseAgentTokens("ax.backend", content)
+	if got.Down != "4.5k" {
+		t.Fatalf("expected ANSI-stripped down tokens, got %+v", got)
+	}
+
+	status := parseAgentStatus(content)
+	for _, want := range []string{"↓4.5k", "thinking"} {
+		if !strings.Contains(status, want) {
+			t.Fatalf("expected %q in parsed status %q", want, status)
+		}
+	}
+}
+
+func TestParseAgentTokensParsesDoneLineStandaloneTotal(t *testing.T) {
+	content := "\x1b[38;5;246m  ⎿ \x1b[39m\x1b[38;5;246mDone (16 tool uses · 93.9k tokens · 59s)\x1b[39m\n"
+
+	got := parseAgentTokens("ax.backend", content)
+	if got.Total != "93.9k" {
+		t.Fatalf("expected done-line total tokens, got %+v", got)
+	}
+
+	status := parseAgentStatus(content)
+	if !strings.Contains(status, "Σ93.9k") {
+		t.Fatalf("expected standalone total in parsed status, got %q", status)
+	}
+}
+
+func TestFooterTokenSummaryShowsStandaloneTotalsWithoutFakeCost(t *testing.T) {
+	m := watchModel{
+		sessions: []tmux.SessionInfo{
+			{Name: "ax-backend", Workspace: "ax.backend"},
+		},
+		tokenData: map[string]agentTokens{
+			"ax.backend": {
+				Workspace: "ax.backend",
+				Total:     "93.9k",
+			},
+		},
+	}
+
+	summary := m.footerTokenSummary(80)
+	for _, want := range []string{"1/1 agents", "Σ93.9k"} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("expected %q in summary %q", want, summary)
+		}
+	}
+	if strings.Contains(summary, "$0.00") {
+		t.Fatalf("did not expect fake zero cost in summary %q", summary)
 	}
 }
 

@@ -47,6 +47,8 @@ var (
 	msgToStyle      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("2"))
 	msgTimeStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	runtimeStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
+	tokenSidebarSty = lipgloss.NewStyle().Foreground(lipgloss.Color("13"))
+	footerSummarySt = lipgloss.NewStyle().Foreground(lipgloss.Color("13"))
 	taskBorderClr   = lipgloss.NewStyle().Foreground(lipgloss.Color("4"))
 	taskTitleStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("4"))
 	taskPendingClr  = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
@@ -70,15 +72,18 @@ type agentTokens struct {
 	Workspace string
 	Up        string // raw string like "123.4k"
 	Down      string // raw string like "45.6k"
+	Total     string // raw string like "93.9k" from total-only done lines
 	Cost      string // raw string like "$1.23"
 }
 
 // Regex for parsing agent status
 var (
-	tokenUpRe    = regexp.MustCompile(`↑\s*([\d.]+[kKmM]?)\s*tokens`)
-	tokenDownRe  = regexp.MustCompile(`↓\s*([\d.]+[kKmM]?)\s*tokens`)
-	costRe       = regexp.MustCompile(`\$[\d.]+`)
-	agentStateRe = regexp.MustCompile(`(thinking|Harmonizing|Crystallizing|Nesting)`)
+	tokenUpRe        = regexp.MustCompile(`↑\s*([\d.]+[kKmM]?)\s*tokens`)
+	tokenDownRe      = regexp.MustCompile(`↓\s*([\d.]+[kKmM]?)\s*tokens`)
+	tokenAnyRe       = regexp.MustCompile(`([\d.]+[kKmM]?)\s*tokens`)
+	costRe           = regexp.MustCompile(`\$[\d.]+`)
+	agentStateRe     = regexp.MustCompile(`(thinking|Harmonizing|Crystallizing|Nesting)`)
+	claudeDoneLineRe = regexp.MustCompile(`\bDone \(`)
 )
 
 type tickMsg time.Time
@@ -215,7 +220,8 @@ func (m watchModel) View() string {
 	}
 
 	streamH := streamPaneHeight(m.height, m.stream)
-	contentH := m.height - streamH - 1 // -1 for help line
+	footer := m.renderFooter(m.width)
+	contentH := m.height - streamH - lipgloss.Height(footer)
 
 	// === Sidebar ===
 	sidebar := m.renderSidebar(sideW, contentH)
@@ -242,17 +248,20 @@ func (m watchModel) View() string {
 		stream = m.renderTokens(m.width, streamH)
 	}
 
-	// === Help line ===
-	help := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(
-		" ↑↓ agent · [/ ] task · f filter · x interrupt · tab msgs/tasks/tokens/off · q quit")
-
 	parts := []string{top}
 	if stream != "" {
 		parts = append(parts, stream)
 	}
-	parts = append(parts, help)
+	parts = append(parts, footer)
 
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+}
+
+func (m watchModel) renderFooter(totalW int) string {
+	summary := footerSummarySt.Render(fitDisplayText(m.footerTokenSummary(totalW), totalW))
+	help := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(
+		fitDisplayText(" ↑↓ agent · [/ ] task · f filter · x interrupt · tab msgs/tasks/tokens/off · q quit", totalW))
+	return lipgloss.JoinVertical(lipgloss.Left, summary, help)
 }
 
 func (m watchModel) renderSidebar(w, h int) string {
@@ -291,6 +300,7 @@ func (m watchModel) renderSidebar(w, h int) string {
 		left := ""
 		right := ""
 		secondary := ""
+		tokenSummary := ""
 
 		if entry.sessionIndex < 0 || entry.sessionIndex >= len(m.sessions) {
 			// Workspace defined but not running
@@ -338,6 +348,7 @@ func (m watchModel) renderSidebar(w, h int) string {
 			if secondary == "" {
 				secondary = agentStatus
 			}
+			tokenSummary = formatSidebarTokenSummary(m.tokenData[s.Workspace], max(0, innerW-(4+2*entry.level)))
 		}
 
 		lines = append(lines, renderWatchSidebarLine(left, right, innerW))
@@ -349,6 +360,11 @@ func (m watchModel) renderSidebar(w, h int) string {
 			prefix := "    " + strings.Repeat("  ", entry.level)
 			secondaryLine := prefix + fitDisplayText(secondary, max(0, innerW-lipgloss.Width(prefix)))
 			lines = append(lines, renderWatchSidebarLine(secondaryStyle.Render(secondaryLine), "", innerW))
+		}
+		if tokenSummary != "" {
+			prefix := "    " + strings.Repeat("  ", entry.level)
+			tokenLine := prefix + fitDisplayText(tokenSummary, max(0, innerW-lipgloss.Width(prefix)))
+			lines = append(lines, renderWatchSidebarLine(tokenSidebarSty.Render(tokenLine), "", innerW))
 		}
 	}
 
@@ -761,6 +777,16 @@ type workspaceAttention struct {
 	Queued   int
 }
 
+type tokenTotals struct {
+	ReportingAgents int
+	SessionCount    int
+	TotalUp         float64
+	TotalDown       float64
+	StandaloneTotal float64
+	TotalCost       float64
+	CostAgents      int
+}
+
 func summarizeWorkspaceAttention(tasks []types.Task) map[string]workspaceAttention {
 	attentionByWorkspace := make(map[string]workspaceAttention)
 	for _, task := range tasks {
@@ -825,6 +851,128 @@ func renderWatchSidebarLine(left, right string, innerW int) string {
 		}
 	}
 	return borderClr.Render("│") + left + strings.Repeat(" ", gap) + right + borderClr.Render("│")
+}
+
+func tokenEntriesFromMap(tokenData map[string]agentTokens) []agentTokens {
+	entries := make([]agentTokens, 0, len(tokenData))
+	for _, t := range tokenData {
+		if t.Up != "" || t.Down != "" || t.Total != "" || t.Cost != "" {
+			entries = append(entries, t)
+		}
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return parseCostValue(entries[i].Cost) > parseCostValue(entries[j].Cost)
+	})
+	return entries
+}
+
+func summarizeTokenEntries(entries []agentTokens, sessionCount int) tokenTotals {
+	summary := tokenTotals{
+		ReportingAgents: len(entries),
+		SessionCount:    sessionCount,
+	}
+	for _, entry := range entries {
+		summary.TotalUp += parseTokenValue(entry.Up)
+		summary.TotalDown += parseTokenValue(entry.Down)
+		summary.StandaloneTotal += parseTokenValue(entry.Total)
+		summary.TotalCost += parseCostValue(entry.Cost)
+		if entry.Cost != "" {
+			summary.CostAgents++
+		}
+	}
+	return summary
+}
+
+func formatTokenMetric(prefix string, raw string) string {
+	if raw == "" {
+		return ""
+	}
+	return prefix + formatTokenCount(parseTokenValue(raw))
+}
+
+func firstFittingDisplay(width int, candidates ...string) string {
+	if width <= 0 {
+		return ""
+	}
+
+	seen := make(map[string]struct{}, len(candidates))
+	last := ""
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		if lipgloss.Width(candidate) <= width {
+			return candidate
+		}
+		last = candidate
+	}
+	if last == "" {
+		return ""
+	}
+	return fitDisplayText(last, width)
+}
+
+func formatSidebarTokenSummary(tokens agentTokens, width int) string {
+	if width <= 0 {
+		return ""
+	}
+
+	up := formatTokenMetric("↑", tokens.Up)
+	down := formatTokenMetric("↓", tokens.Down)
+	total := formatTokenMetric("Σ", tokens.Total)
+	io := strings.TrimSpace(strings.Join([]string{up, down}, " "))
+	full := strings.TrimSpace(strings.Join([]string{up, down, total, tokens.Cost}, " "))
+
+	return firstFittingDisplay(width, full, total, tokens.Cost, io)
+}
+
+func (m watchModel) footerTokenSummary(totalW int) string {
+	summary := summarizeTokenEntries(tokenEntriesFromMap(m.tokenData), len(m.sessions))
+	counts := fmt.Sprintf("%d/%d agents", summary.ReportingAgents, summary.SessionCount)
+	if summary.ReportingAgents == 0 {
+		return firstFittingDisplay(totalW,
+			"usage "+counts+" · no token data",
+			counts+" · no token data",
+			fmt.Sprintf("%d agents · no token data", summary.SessionCount),
+		)
+	}
+
+	io := strings.TrimSpace(strings.Join([]string{
+		"↑" + formatTokenCount(summary.TotalUp),
+		"↓" + formatTokenCount(summary.TotalDown),
+	}, " "))
+	total := ""
+	if summary.StandaloneTotal > 0 {
+		total = "Σ" + formatTokenCount(summary.StandaloneTotal)
+	}
+	cost := ""
+	if summary.CostAgents > 0 {
+		cost = fmt.Sprintf("$%.2f", summary.TotalCost)
+	}
+	return firstFittingDisplay(totalW,
+		"usage "+counts+" · "+strings.TrimSpace(strings.Join([]string{io, total, cost}, " ")),
+		counts+" · "+strings.TrimSpace(strings.Join([]string{io, total, cost}, " ")),
+		counts+" · "+strings.TrimSpace(strings.Join([]string{total, cost}, " ")),
+		counts+" · "+cost,
+		counts+" · "+total,
+		cost+" · "+counts,
+	)
+}
+
+func extractDoneLineTotal(line string) string {
+	if !claudeDoneLineRe.MatchString(line) {
+		return ""
+	}
+	matches := tokenAnyRe.FindAllStringSubmatch(line, -1)
+	if len(matches) == 0 {
+		return ""
+	}
+	return matches[len(matches)-1][1]
 }
 
 func renderTaskListLines(task types.Task, selected bool, width int) []string {
@@ -947,8 +1095,9 @@ func parseAgentStatus(content string) string {
 		start = 0
 	}
 
-	var up, down, cost, status string
-	for _, line := range lines[start:] {
+	var up, down, total, cost, status string
+	for _, rawLine := range lines[start:] {
+		line := sanitizeDisplayLine(rawLine)
 		if m := tokenUpRe.FindStringSubmatch(line); m != nil {
 			up = "↑" + m[1]
 		}
@@ -962,10 +1111,20 @@ func parseAgentStatus(content string) string {
 			status = m
 		}
 	}
+	if up == "" && down == "" {
+		for i := len(lines) - 1; i >= start; i-- {
+			if parsed := extractDoneLineTotal(sanitizeDisplayLine(lines[i])); parsed != "" {
+				total = "Σ" + parsed
+				break
+			}
+		}
+	}
 
 	var parts []string
 	if up != "" || down != "" {
 		parts = append(parts, strings.TrimSpace(up+" "+down))
+	} else if total != "" {
+		parts = append(parts, total)
 	}
 	if cost != "" {
 		parts = append(parts, cost)
@@ -988,7 +1147,8 @@ func parseAgentTokens(workspace, content string) agentTokens {
 
 	var t agentTokens
 	t.Workspace = workspace
-	for _, line := range lines[start:] {
+	for _, rawLine := range lines[start:] {
+		line := sanitizeDisplayLine(rawLine)
 		if m := tokenUpRe.FindStringSubmatch(line); m != nil {
 			t.Up = m[1]
 		}
@@ -997,6 +1157,14 @@ func parseAgentTokens(workspace, content string) agentTokens {
 		}
 		if m := costRe.FindString(line); m != "" {
 			t.Cost = m
+		}
+	}
+	if t.Up == "" && t.Down == "" {
+		for i := len(lines) - 1; i >= start; i-- {
+			if parsed := extractDoneLineTotal(sanitizeDisplayLine(lines[i])); parsed != "" {
+				t.Total = parsed
+				break
+			}
 		}
 	}
 	return t
@@ -1065,15 +1233,8 @@ func (m watchModel) renderTokens(totalW, totalH int) string {
 	topLine := tokenBorderClr.Render("╭─") + title + tokenBorderClr.Render(strings.Repeat("─", pad)+"╮")
 
 	// Collect and sort token data
-	entries := make([]agentTokens, 0, len(m.tokenData))
-	for _, t := range m.tokenData {
-		if t.Up != "" || t.Down != "" || t.Cost != "" {
-			entries = append(entries, t)
-		}
-	}
-	sort.Slice(entries, func(i, j int) bool {
-		return parseCostValue(entries[i].Cost) > parseCostValue(entries[j].Cost)
-	})
+	entries := tokenEntriesFromMap(m.tokenData)
+	summary := summarizeTokenEntries(entries, len(m.sessions))
 
 	// Find max cost for highlighting
 	maxCost := 0.0
@@ -1092,22 +1253,27 @@ func (m watchModel) renderTokens(totalW, totalH int) string {
 			"WORKSPACE", "INPUT", "OUTPUT", "COST")
 		tokenLines = append(tokenLines, tokenDimClr.Render(header))
 
-		var totalUp, totalDown, totalCost float64
 		for _, e := range entries {
 			up := parseTokenValue(e.Up)
 			down := parseTokenValue(e.Down)
+			total := parseTokenValue(e.Total)
 			cost := parseCostValue(e.Cost)
-			totalUp += up
-			totalDown += down
-			totalCost += cost
 
 			sty := tokenNormalClr
 			if maxCost > 0 && cost >= maxCost*0.8 {
 				sty = tokenHighClr
 			}
 
-			upStr := formatTokenCount(up)
-			downStr := formatTokenCount(down)
+			upStr := "-"
+			if e.Up != "" {
+				upStr = "↑" + formatTokenCount(up)
+			}
+			downStr := "-"
+			if e.Down != "" {
+				downStr = "↓" + formatTokenCount(down)
+			} else if e.Total != "" {
+				downStr = "Σ" + formatTokenCount(total)
+			}
 			costStr := e.Cost
 			if costStr == "" {
 				costStr = "-"
@@ -1117,17 +1283,32 @@ func (m watchModel) renderTokens(totalW, totalH int) string {
 			if len(ws) > 24 {
 				ws = ws[:23] + "…"
 			}
-			line := fmt.Sprintf(" %-24s %10s %10s %10s", ws, "↑"+upStr, "↓"+downStr, costStr)
+			line := fmt.Sprintf(" %-24s %10s %10s %10s", ws, upStr, downStr, costStr)
 			tokenLines = append(tokenLines, sty.Render(line))
 		}
 
 		// Separator + total
 		tokenLines = append(tokenLines, tokenDimClr.Render(" "+strings.Repeat("─", innerW-2)))
+		totalOut := "-"
+		if summary.TotalDown > 0 {
+			totalOut = "↓" + formatTokenCount(summary.TotalDown)
+		} else if summary.StandaloneTotal > 0 {
+			totalOut = "Σ" + formatTokenCount(summary.StandaloneTotal)
+		}
+		totalIn := "-"
+		if summary.TotalUp > 0 {
+			totalIn = "↑" + formatTokenCount(summary.TotalUp)
+		}
 		totalLine := fmt.Sprintf(" %-24s %10s %10s %10s",
-			fmt.Sprintf("TOTAL (%d agents)", len(entries)),
-			"↑"+formatTokenCount(totalUp),
-			"↓"+formatTokenCount(totalDown),
-			fmt.Sprintf("$%.2f", totalCost))
+			fmt.Sprintf("TOTAL (%d agents)", summary.ReportingAgents),
+			totalIn,
+			totalOut,
+			func() string {
+				if summary.CostAgents == 0 {
+					return "-"
+				}
+				return fmt.Sprintf("$%.2f", summary.TotalCost)
+			}())
 		tokenLines = append(tokenLines, tokenSumClr.Render(totalLine))
 	}
 
