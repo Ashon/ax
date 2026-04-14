@@ -188,7 +188,7 @@ ACK 루프를 방지하기 위해 다음을 반드시 지키세요:
   - cmd/init_cmd.go — ax init (설정 초기화)
   - cmd/status.go — ax status (상태 조회)
   - cmd/watch.go — ax watch (실시간 모니터링)
-  - cmd/shell.go, shell_tui.go — ax shell (인터랙티브 셸/TUI)
+  - cmd/claude.go, codex.go, orchestrator_cli.go — ax claude / ax codex (루트 오케스트레이터 CLI 포그라운드 실행)
   - cmd/messages.go — ax messages (메시지 조회)
   - cmd/send.go — ax send (메시지 전송)
   - cmd/workspace.go — ax workspace (워크스페이스 관리)

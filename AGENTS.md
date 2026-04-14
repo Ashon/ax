@@ -1,19 +1,16 @@
 <!-- ax:instructions:start -->
-## ax workspace: ax.runtime
+## ax workspace: ax.config
 
-internal/agent/, internal/workspace/, internal/tmux/ 패키지를 담당합니다.
+internal/config/ 패키지를 담당합니다.
 
 주요 파일:
-- internal/agent/runtime.go — Runtime 인터페이스 정의 및 Get() 팩토리
-- internal/agent/claude.go, codex.go, shell.go — 런타임 구현체
-- internal/workspace/workspace.go — Manager: Create/Destroy/CreateAll/DestroyAll
-- internal/workspace/orchestrator.go — 오케스트레이터 프롬프트 생성
-- internal/workspace/instructions.go — 에이전트 지시 파일(CLAUDE.md 등) 생성
-- internal/workspace/mcpconfig.go — .mcp.json 생성
-- internal/tmux/tmux.go — tmux 세션 생성/파괴/어태치/키전송
+- internal/config/config.go — Config/Workspace/Child 구조체, Load(), FindConfigFile(), Save()
+- internal/config/config_test.go — 설정 로딩 테스트
+- internal/config/tree.go — ProjectNode 계층 트리 구성
 
 원칙:
-- 새 런타임 추가 시 Runtime 인터페이스를 구현하고 runtime.go의 Get()에 등록
-- tmux 세션 이름은 SessionPrefix("ax-") + 워크스페이스 이름 규칙을 따름
-- 테스트: go test ./internal/agent/... ./internal/workspace/...
+- 설정 파일 경로: .ax/config.yaml (기본) 또는 ax.yaml (레거시)
+- children을 통한 재귀적 설정 병합 시 순환 참조 감지 필수
+- Workspace 구조체 필드 추가 시 YAML 태그와 함께 config.go에 정의
+- 테스트: go test ./internal/config/...
 <!-- ax:instructions:end -->
