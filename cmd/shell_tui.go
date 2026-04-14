@@ -33,6 +33,7 @@ type shellModel struct {
 	histPath               string
 	tasks                  []types.Task
 	tasksPath              string
+	tokenData              map[string]agentTokens
 	workspaceInfos         map[string]types.WorkspaceInfo
 	workspaceInfoUpdatedAt time.Time
 	stream                 streamView
@@ -52,6 +53,7 @@ func newShellModel(orchSession, socketPath string) shellModel {
 		runtimes:       loadWatchRuntimes(),
 		histPath:       daemon.HistoryFilePath(socketPath),
 		tasksPath:      daemon.TasksFilePath(socketPath),
+		tokenData:      make(map[string]agentTokens),
 		workspaceInfos: make(map[string]types.WorkspaceInfo),
 		stream:         streamMessages,
 		taskFilter:     taskFilterActive,
@@ -104,6 +106,11 @@ func (m shellModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.prevCaps[s.Workspace] = m.captures[s.Workspace]
 			m.captures[s.Workspace] = content
 		}
+		for _, s := range m.sessions {
+			if t := parseAgentTokens(s.Workspace, m.captures[s.Workspace]); t.Up != "" || t.Down != "" || t.Cost != "" {
+				m.tokenData[s.Workspace] = t
+			}
+		}
 		m.msgHistory = readHistoryFile(m.histPath, 50)
 		m.tasks = readTasksFile(m.tasksPath)
 		m.workspaceInfos, m.workspaceInfoUpdatedAt = refreshWatchWorkspaceInfos(m.workspaceInfos, m.workspaceInfoUpdatedAt)
@@ -133,7 +140,7 @@ func (m shellModel) handleControlMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "q":
 		return m, tea.Quit
 	case "t":
-		m.stream = (m.stream + 1) % 3
+		m.stream = (m.stream + 1) % streamViewCount
 		m.mode = modeInput
 	case "[":
 		m.taskSelected = moveTaskSelection(m.taskSelected, m.tasks, m.taskFilter, -1)
@@ -359,6 +366,8 @@ func (m shellModel) View() string {
 		stream = m.renderStream(m.width, streamH)
 	case streamTasks:
 		stream = m.renderTasks(m.width, streamH)
+	case streamTokens:
+		stream = m.renderTokens(m.width, streamH)
 	}
 
 	help := m.renderHelp()
@@ -376,7 +385,7 @@ func (m shellModel) renderHelp() string {
 	if m.mode == modeControl {
 		return modeControlStyle.Render(" [CTRL] ") +
 			lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(
-				"j/k select · v view · o orch · t messages/tasks/off · [/ ] task · f filter · x interrupt · q quit · esc back")
+				"j/k select · v view · o orch · t msgs/tasks/tokens/off · [/ ] task · f filter · x interrupt · q quit · esc back")
 	}
 	return modeInputStyle.Render(" [INPUT] ") +
 		lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(
@@ -421,4 +430,11 @@ func (m shellModel) renderTasks(totalW, totalH int) string {
 		taskFilter:   m.taskFilter,
 	}
 	return wm.renderTasks(totalW, totalH)
+}
+
+func (m shellModel) renderTokens(totalW, totalH int) string {
+	wm := watchModel{
+		tokenData: m.tokenData,
+	}
+	return wm.renderTokens(totalW, totalH)
 }
