@@ -2,7 +2,9 @@ package mcpserver
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"strings"
 	"sync"
@@ -98,6 +100,120 @@ func TestSendRequestReturnsResponse(t *testing.T) {
 
 	if err := <-serverErr; err != nil {
 		t.Fatalf("server goroutine failed: %v", err)
+	}
+}
+
+func TestDecodeResponseDataPropagatesUnmarshalError(t *testing.T) {
+	resp := &daemon.Envelope{
+		ID:      "abc",
+		Type:    daemon.MsgResponse,
+		Payload: json.RawMessage(`{"success":true,"data":"not-json"}`),
+	}
+	var dst daemon.ListWorkspacesResponse
+	err := decodeResponseData(resp, &dst)
+	if err == nil {
+		t.Fatal("expected decode error for malformed payload, got nil")
+	}
+	if !strings.Contains(err.Error(), "unmarshal response data") {
+		t.Fatalf("expected unmarshal error to be wrapped, got %v", err)
+	}
+}
+
+func TestDecodeResponseDataAcceptsEmptyData(t *testing.T) {
+	resp := &daemon.Envelope{
+		ID:      "abc",
+		Type:    daemon.MsgResponse,
+		Payload: json.RawMessage(`{"success":true}`),
+	}
+	var dst daemon.ListWorkspacesResponse
+	if err := decodeResponseData(resp, &dst); err != nil {
+		t.Fatalf("expected nil error for empty data, got %v", err)
+	}
+}
+
+func TestDecodeResponseDataRejectsNilEnvelope(t *testing.T) {
+	var dst daemon.ListWorkspacesResponse
+	if err := decodeResponseData(nil, &dst); err == nil {
+		t.Fatal("expected error for nil envelope")
+	}
+}
+
+func TestSendRequestRespectsContextDeadline(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+
+	client := NewDaemonClient("", "worker")
+	client.conn = clientConn
+	client.connected.Store(true)
+	client.setDisconnectErr(nil)
+	client.SetRequestTimeout(0) // rely solely on the supplied context
+
+	go client.readLoop()
+
+	// Drain whatever the client writes so it doesn't block on the pipe.
+	go func() {
+		scanner := bufio.NewScanner(serverConn)
+		scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+		for scanner.Scan() {
+			// never reply
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := client.sendRequestCtx(ctx, daemon.MsgListWorkspaces, struct{}{})
+	if err == nil {
+		t.Fatal("expected sendRequestCtx to fail when the context expires")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected DeadlineExceeded, got %v", err)
+	}
+	elapsed := time.Since(start)
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("sendRequestCtx took %s, expected ~100ms", elapsed)
+	}
+
+	// The pending entry must be cleaned up so it cannot leak.
+	client.pendingMu.Lock()
+	pendingCount := len(client.pending)
+	client.pendingMu.Unlock()
+	if pendingCount != 0 {
+		t.Fatalf("expected pending map to be empty after timeout, got %d entries", pendingCount)
+	}
+}
+
+func TestSendRequestAppliesDefaultTimeout(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+
+	client := NewDaemonClient("", "worker")
+	client.conn = clientConn
+	client.connected.Store(true)
+	client.setDisconnectErr(nil)
+	client.SetRequestTimeout(150 * time.Millisecond)
+
+	go client.readLoop()
+	go func() {
+		scanner := bufio.NewScanner(serverConn)
+		scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+		for scanner.Scan() {
+		}
+	}()
+
+	start := time.Now()
+	_, err := client.sendRequest(daemon.MsgListWorkspaces, struct{}{})
+	if err == nil {
+		t.Fatal("expected sendRequest to fail when default timeout elapses")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected DeadlineExceeded from default timeout, got %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 600*time.Millisecond {
+		t.Fatalf("default timeout did not fire promptly, elapsed %s", elapsed)
 	}
 }
 

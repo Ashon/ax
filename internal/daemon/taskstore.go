@@ -189,7 +189,7 @@ func (s *TaskStore) persist() {
 	if err != nil {
 		return
 	}
-	os.WriteFile(s.filePath, data, 0o644)
+	_ = writeFileAtomic(s.filePath, data, 0o600)
 }
 
 func (s *TaskStore) Snapshot() []types.Task {

@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,11 +10,18 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/ashon/ax/internal/daemon"
 	"github.com/ashon/ax/internal/types"
 	"github.com/google/uuid"
 )
+
+// DefaultRequestTimeout bounds how long a single daemon request may wait
+// for a response before being abandoned. Without this, a daemon that
+// stays connected but stops answering a particular request type would
+// hang the calling MCP tool forever.
+const DefaultRequestTimeout = 60 * time.Second
 
 // DaemonClient connects to the ax daemon via Unix socket.
 type DaemonClient struct {
@@ -34,6 +42,10 @@ type DaemonClient struct {
 
 	disconnectMu  sync.RWMutex
 	disconnectErr error
+
+	// Default per-request timeout when callers do not supply their own
+	// deadline. Overridable in tests.
+	requestTimeout time.Duration
 }
 
 type requestResult struct {
@@ -43,10 +55,17 @@ type requestResult struct {
 
 func NewDaemonClient(socketPath, workspace string) *DaemonClient {
 	return &DaemonClient{
-		socketPath: daemon.ExpandSocketPath(socketPath),
-		workspace:  workspace,
-		pending:    make(map[string]chan requestResult),
+		socketPath:     daemon.ExpandSocketPath(socketPath),
+		workspace:      workspace,
+		pending:        make(map[string]chan requestResult),
+		requestTimeout: DefaultRequestTimeout,
 	}
+}
+
+// SetRequestTimeout overrides the default per-request timeout. A
+// non-positive value disables the bound. Intended for tests.
+func (c *DaemonClient) SetRequestTimeout(d time.Duration) {
+	c.requestTimeout = d
 }
 
 func (c *DaemonClient) Connect() error {
@@ -116,8 +135,27 @@ func (c *DaemonClient) readLoop() {
 }
 
 func (c *DaemonClient) sendRequest(msgType daemon.MessageType, payload any) (*daemon.Envelope, error) {
+	return c.sendRequestCtx(context.Background(), msgType, payload)
+}
+
+// sendRequestCtx is the context-aware variant of sendRequest. It applies
+// the client's default timeout when the supplied context has no deadline
+// and unblocks the caller as soon as the context is cancelled, even if
+// the daemon has not yet returned a response. Pending entries are always
+// cleaned up so a cancelled or timed-out request never leaks the
+// response channel.
+func (c *DaemonClient) sendRequestCtx(ctx context.Context, msgType daemon.MessageType, payload any) (*daemon.Envelope, error) {
 	if !c.connected.Load() {
 		return nil, c.disconnectError()
+	}
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline && c.requestTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.requestTimeout)
+		defer cancel()
 	}
 
 	id := uuid.New().String()
@@ -131,10 +169,16 @@ func (c *DaemonClient) sendRequest(msgType daemon.MessageType, payload any) (*da
 	c.pendingMu.Lock()
 	c.pending[id] = ch
 	c.pendingMu.Unlock()
+	cleanupPending := func() {
+		c.pendingMu.Lock()
+		delete(c.pending, id)
+		c.pendingMu.Unlock()
+	}
 
 	// Send
 	data, err := json.Marshal(env)
 	if err != nil {
+		cleanupPending()
 		return nil, err
 	}
 	data = append(data, '\n')
@@ -144,21 +188,26 @@ func (c *DaemonClient) sendRequest(msgType daemon.MessageType, payload any) (*da
 	c.writeMu.Unlock()
 
 	if err != nil {
-		c.pendingMu.Lock()
-		delete(c.pending, id)
-		c.pendingMu.Unlock()
+		cleanupPending()
 		return nil, fmt.Errorf("write: %w", err)
 	}
 
-	// Wait for response
-	result := <-ch
+	// Wait for response, the connection going away, or the context
+	// deadline elapsing.
+	var result requestResult
+	select {
+	case result = <-ch:
+	case <-ctx.Done():
+		cleanupPending()
+		return nil, fmt.Errorf("daemon request %s: %w", msgType, ctx.Err())
+	}
 	if result.err != nil {
 		return nil, result.err
 	}
 	resp := result.env
 	if resp.Type == daemon.MsgError {
 		var errPayload daemon.ErrorPayload
-		resp.DecodePayload(&errPayload)
+		_ = resp.DecodePayload(&errPayload)
 		return nil, fmt.Errorf("daemon error: %s", errPayload.Message)
 	}
 
@@ -219,9 +268,9 @@ func (c *DaemonClient) SendMessage(to, message string) (*SendMessageResult, erro
 		return nil, err
 	}
 	var result map[string]string
-	var respPayload daemon.ResponsePayload
-	resp.DecodePayload(&respPayload)
-	json.Unmarshal(respPayload.Data, &result)
+	if err := decodeResponseData(resp, &result); err != nil {
+		return nil, fmt.Errorf("decode send_message response: %w", err)
+	}
 	sendResult := &SendMessageResult{
 		MessageID: result["message_id"],
 		Status:    result["status"],
@@ -238,10 +287,10 @@ func (c *DaemonClient) ReadMessages(limit int, from string) ([]types.Message, er
 	if err != nil {
 		return nil, err
 	}
-	var respPayload daemon.ResponsePayload
-	resp.DecodePayload(&respPayload)
 	var result daemon.ReadMessagesResponse
-	json.Unmarshal(respPayload.Data, &result)
+	if err := decodeResponseData(resp, &result); err != nil {
+		return nil, fmt.Errorf("decode read_messages response: %w", err)
+	}
 
 	// Also include any pushed messages while preserving unmatched buffered pushes
 	// for later calls and avoiding duplicate delivery of the same message ID.
@@ -305,10 +354,10 @@ func (c *DaemonClient) BroadcastMessage(message string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	var respPayload daemon.ResponsePayload
-	resp.DecodePayload(&respPayload)
 	var result map[string]interface{}
-	json.Unmarshal(respPayload.Data, &result)
+	if err := decodeResponseData(resp, &result); err != nil {
+		return nil, fmt.Errorf("decode broadcast response: %w", err)
+	}
 	recipients, _ := result["recipients"].([]interface{})
 	var names []string
 	for _, r := range recipients {
@@ -324,10 +373,10 @@ func (c *DaemonClient) ListWorkspaces() ([]types.WorkspaceInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	var respPayload daemon.ResponsePayload
-	resp.DecodePayload(&respPayload)
 	var result daemon.ListWorkspacesResponse
-	json.Unmarshal(respPayload.Data, &result)
+	if err := decodeResponseData(resp, &result); err != nil {
+		return nil, fmt.Errorf("decode list_workspaces response: %w", err)
+	}
 	return result.Workspaces, nil
 }
 
@@ -353,10 +402,10 @@ func (c *DaemonClient) GetSharedValue(key string) (string, bool, error) {
 	if err != nil {
 		return "", false, err
 	}
-	var respPayload daemon.ResponsePayload
-	resp.DecodePayload(&respPayload)
 	var result daemon.GetSharedResponse
-	json.Unmarshal(respPayload.Data, &result)
+	if err := decodeResponseData(resp, &result); err != nil {
+		return "", false, fmt.Errorf("decode get_shared response: %w", err)
+	}
 	return result.Value, result.Found, nil
 }
 
@@ -365,10 +414,10 @@ func (c *DaemonClient) ListSharedValues() (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	var respPayload daemon.ResponsePayload
-	resp.DecodePayload(&respPayload)
 	var result daemon.ListSharedResponse
-	json.Unmarshal(respPayload.Data, &result)
+	if err := decodeResponseData(resp, &result); err != nil {
+		return nil, fmt.Errorf("decode list_shared response: %w", err)
+	}
 	return result.Values, nil
 }
 
@@ -386,10 +435,10 @@ func (c *DaemonClient) CreateTask(title, description, assignee string, startMode
 	if err != nil {
 		return nil, err
 	}
-	var respPayload daemon.ResponsePayload
-	resp.DecodePayload(&respPayload)
 	var result daemon.TaskResponse
-	json.Unmarshal(respPayload.Data, &result)
+	if err := decodeResponseData(resp, &result); err != nil {
+		return nil, fmt.Errorf("decode create_task response: %w", err)
+	}
 	return &result.Task, nil
 }
 
@@ -403,10 +452,10 @@ func (c *DaemonClient) UpdateTask(id string, status *types.TaskStatus, result *s
 	if err != nil {
 		return nil, err
 	}
-	var respPayload daemon.ResponsePayload
-	resp.DecodePayload(&respPayload)
 	var taskResp daemon.TaskResponse
-	json.Unmarshal(respPayload.Data, &taskResp)
+	if err := decodeResponseData(resp, &taskResp); err != nil {
+		return nil, fmt.Errorf("decode update_task response: %w", err)
+	}
 	return &taskResp.Task, nil
 }
 
@@ -417,10 +466,10 @@ func (c *DaemonClient) GetTask(id string) (*types.Task, error) {
 	if err != nil {
 		return nil, err
 	}
-	var respPayload daemon.ResponsePayload
-	resp.DecodePayload(&respPayload)
 	var result daemon.TaskResponse
-	json.Unmarshal(respPayload.Data, &result)
+	if err := decodeResponseData(resp, &result); err != nil {
+		return nil, fmt.Errorf("decode get_task response: %w", err)
+	}
 	return &result.Task, nil
 }
 
@@ -433,9 +482,30 @@ func (c *DaemonClient) ListTasks(assignee, createdBy string, status *types.TaskS
 	if err != nil {
 		return nil, err
 	}
-	var respPayload daemon.ResponsePayload
-	resp.DecodePayload(&respPayload)
 	var result daemon.ListTasksResponse
-	json.Unmarshal(respPayload.Data, &result)
+	if err := decodeResponseData(resp, &result); err != nil {
+		return nil, fmt.Errorf("decode list_tasks response: %w", err)
+	}
 	return result.Tasks, nil
+}
+
+// decodeResponseData unwraps a daemon response envelope and decodes its
+// payload into the supplied destination. It surfaces decode errors that
+// were previously silently dropped, so MCP tools can fail loudly when the
+// daemon returns an unexpected payload shape.
+func decodeResponseData(env *daemon.Envelope, dst any) error {
+	if env == nil {
+		return fmt.Errorf("nil response envelope")
+	}
+	var respPayload daemon.ResponsePayload
+	if err := env.DecodePayload(&respPayload); err != nil {
+		return fmt.Errorf("decode response envelope: %w", err)
+	}
+	if len(respPayload.Data) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(respPayload.Data, dst); err != nil {
+		return fmt.Errorf("unmarshal response data: %w", err)
+	}
+	return nil
 }
