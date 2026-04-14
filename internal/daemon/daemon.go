@@ -32,17 +32,18 @@ func ExpandSocketPath(path string) string {
 }
 
 type Daemon struct {
-	socketPath    string
-	registry      *Registry
-	queue         *MessageQueue
-	history       *History
-	sharedValues  map[string]string
-	sharedPath    string
-	sharedMu      sync.RWMutex
-	taskStore     *TaskStore
-	wakeScheduler *WakeScheduler
-	listener      net.Listener
-	logger        *log.Logger
+	socketPath     string
+	registry       *Registry
+	queue          *MessageQueue
+	history        *History
+	sharedValues   map[string]string
+	sharedPath     string
+	sharedMu       sync.RWMutex
+	taskStore      *TaskStore
+	teamController *teamController
+	wakeScheduler  *WakeScheduler
+	listener       net.Listener
+	logger         *log.Logger
 }
 
 func New(socketPath string) *Daemon {
@@ -62,6 +63,10 @@ func New(socketPath string) *Daemon {
 	if err := taskStore.Load(); err != nil {
 		logger.Printf("load task state: %v", err)
 	}
+	teamStore := NewTeamStateStore(stateDir)
+	if err := teamStore.Load(); err != nil {
+		logger.Printf("load team state: %v", err)
+	}
 	sharedPath := filepath.Join(stateDir, "shared_values.json")
 	sharedValues, err := loadSharedValues(sharedPath)
 	if err != nil {
@@ -69,15 +74,16 @@ func New(socketPath string) *Daemon {
 		sharedValues = make(map[string]string)
 	}
 	return &Daemon{
-		socketPath:    sp,
-		registry:      NewRegistry(),
-		queue:         queue,
-		history:       history,
-		sharedValues:  sharedValues,
-		sharedPath:    sharedPath,
-		taskStore:     taskStore,
-		wakeScheduler: NewWakeScheduler(queue, logger),
-		logger:        logger,
+		socketPath:     sp,
+		registry:       NewRegistry(),
+		queue:          queue,
+		history:        history,
+		sharedValues:   sharedValues,
+		sharedPath:     sharedPath,
+		taskStore:      taskStore,
+		teamController: newTeamController(stateDir, teamStore),
+		wakeScheduler:  NewWakeScheduler(queue, logger),
+		logger:         logger,
 	}
 }
 
@@ -428,6 +434,50 @@ func (d *Daemon) handleEnvelope(conn net.Conn, env *Envelope, workspace *string)
 			tasks[i] = d.enrichTask(tasks[i])
 		}
 		return NewResponseEnvelope(env.ID, &ListTasksResponse{Tasks: tasks})
+
+	case MsgGetTeamState:
+		var p GetTeamStatePayload
+		if err := env.DecodePayload(&p); err != nil {
+			return nil, fmt.Errorf("decode get_team_state: %w", err)
+		}
+		state, err := d.getTeamState(p.ConfigPath)
+		if err != nil {
+			return nil, err
+		}
+		return NewResponseEnvelope(env.ID, &TeamStateResponse{State: state})
+
+	case MsgDryRunTeam:
+		var p TeamReconfigurePayload
+		if err := env.DecodePayload(&p); err != nil {
+			return nil, fmt.Errorf("decode dry_run_team_reconfigure: %w", err)
+		}
+		plan, err := d.dryRunTeamReconfigure(p.ConfigPath, p.ExpectedRevision, p.Changes)
+		if err != nil {
+			return nil, err
+		}
+		return NewResponseEnvelope(env.ID, &TeamPlanResponse{Plan: plan})
+
+	case MsgApplyTeam:
+		var p TeamReconfigurePayload
+		if err := env.DecodePayload(&p); err != nil {
+			return nil, fmt.Errorf("decode apply_team_reconfigure: %w", err)
+		}
+		ticket, err := d.beginTeamReconfigureApply(p.ConfigPath, p.ExpectedRevision, p.Changes, p.ReconcileMode)
+		if err != nil {
+			return nil, err
+		}
+		return NewResponseEnvelope(env.ID, &TeamApplyResponse{Ticket: ticket})
+
+	case MsgFinishTeam:
+		var p FinishTeamReconfigurePayload
+		if err := env.DecodePayload(&p); err != nil {
+			return nil, fmt.Errorf("decode finish_team_reconfigure: %w", err)
+		}
+		state, err := d.finishTeamReconfigureApply(p.Token, p.Success, p.Error, p.Actions)
+		if err != nil {
+			return nil, err
+		}
+		return NewResponseEnvelope(env.ID, &TeamStateResponse{State: state})
 
 	default:
 		return nil, fmt.Errorf("unknown message type: %s", env.Type)

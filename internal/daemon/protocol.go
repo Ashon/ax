@@ -24,6 +24,10 @@ const (
 	MsgUpdateTask     MessageType = "update_task"
 	MsgGetTask        MessageType = "get_task"
 	MsgListTasks      MessageType = "list_tasks"
+	MsgGetTeamState   MessageType = "get_team_state"
+	MsgDryRunTeam     MessageType = "dry_run_team_reconfigure"
+	MsgApplyTeam      MessageType = "apply_team_reconfigure"
+	MsgFinishTeam     MessageType = "finish_team_reconfigure"
 	MsgPushMessage    MessageType = "push_message"
 	MsgResponse       MessageType = "response"
 	MsgError          MessageType = "error"
@@ -100,6 +104,24 @@ type ListTasksPayload struct {
 	Status    *types.TaskStatus `json:"status,omitempty"`
 }
 
+type GetTeamStatePayload struct {
+	ConfigPath string `json:"config_path,omitempty"`
+}
+
+type TeamReconfigurePayload struct {
+	ConfigPath       string                        `json:"config_path,omitempty"`
+	ExpectedRevision *int                          `json:"expected_revision,omitempty"`
+	Changes          []types.TeamReconfigureChange `json:"changes,omitempty"`
+	ReconcileMode    types.TeamReconcileMode       `json:"reconcile_mode,omitempty"`
+}
+
+type FinishTeamReconfigurePayload struct {
+	Token   string                        `json:"token"`
+	Success bool                          `json:"success"`
+	Error   string                        `json:"error,omitempty"`
+	Actions []types.TeamReconfigureAction `json:"actions,omitempty"`
+}
+
 // Response payloads
 
 type ResponsePayload struct {
@@ -137,6 +159,18 @@ type TaskResponse struct {
 
 type ListTasksResponse struct {
 	Tasks []types.Task `json:"tasks"`
+}
+
+type TeamStateResponse struct {
+	State types.TeamReconfigureState `json:"state"`
+}
+
+type TeamPlanResponse struct {
+	Plan types.TeamReconfigurePlan `json:"plan"`
+}
+
+type TeamApplyResponse struct {
+	Ticket types.TeamApplyTicket `json:"ticket"`
 }
 
 // Helper functions

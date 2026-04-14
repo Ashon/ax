@@ -19,12 +19,13 @@ const (
 )
 
 type Config struct {
-	Project                   string               `yaml:"project"`
-	OrchestratorRuntime       string               `yaml:"orchestrator_runtime,omitempty"`
-	DisableRootOrchestrator   bool                 `yaml:"disable_root_orchestrator,omitempty"`
-	CodexModelReasoningEffort string               `yaml:"codex_model_reasoning_effort,omitempty"`
-	Children                  map[string]Child     `yaml:"children,omitempty"`
-	Workspaces                map[string]Workspace `yaml:"workspaces"`
+	Project                        string               `yaml:"project"`
+	OrchestratorRuntime            string               `yaml:"orchestrator_runtime,omitempty"`
+	DisableRootOrchestrator        bool                 `yaml:"disable_root_orchestrator,omitempty"`
+	ExperimentalMCPTeamReconfigure bool                 `yaml:"experimental_mcp_team_reconfigure,omitempty"`
+	CodexModelReasoningEffort      string               `yaml:"codex_model_reasoning_effort,omitempty"`
+	Children                       map[string]Child     `yaml:"children,omitempty"`
+	Workspaces                     map[string]Workspace `yaml:"workspaces"`
 }
 
 type Child struct {
@@ -72,40 +73,19 @@ func loadRecursive(path string, seen map[string]bool) (*Config, error) {
 	seen[path] = true
 	defer delete(seen, path)
 
-	data, err := os.ReadFile(path)
+	cfg, err := loadLocalConfig(path)
 	if err != nil {
-		return nil, fmt.Errorf("read config %s: %w", path, err)
-	}
-
-	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("parse config %s: %w", path, err)
-	}
-
-	if cfg.Project == "" {
-		cfg.Project = filepath.Base(filepath.Dir(path))
-	}
-	if cfg.Workspaces == nil {
-		cfg.Workspaces = make(map[string]Workspace)
-	}
-
-	configDir := filepath.Dir(path)
-	projectDir := configBaseDir(configDir)
-	for name, ws := range cfg.Workspaces {
-		ws.Dir = resolveDir(projectDir, ws.Dir)
-		if strings.TrimSpace(ws.CodexModelReasoningEffort) == "" {
-			ws.CodexModelReasoningEffort = strings.TrimSpace(cfg.CodexModelReasoningEffort)
-		}
-		cfg.Workspaces[name] = ws
+		return nil, err
 	}
 
 	merged := &Config{
-		Project:                   cfg.Project,
-		OrchestratorRuntime:       cfg.OrchestratorRuntime,
-		DisableRootOrchestrator:   cfg.DisableRootOrchestrator,
-		CodexModelReasoningEffort: strings.TrimSpace(cfg.CodexModelReasoningEffort),
-		Children:                  cfg.Children,
-		Workspaces:                make(map[string]Workspace, len(cfg.Workspaces)),
+		Project:                        cfg.Project,
+		OrchestratorRuntime:            cfg.OrchestratorRuntime,
+		DisableRootOrchestrator:        cfg.DisableRootOrchestrator,
+		ExperimentalMCPTeamReconfigure: cfg.ExperimentalMCPTeamReconfigure,
+		CodexModelReasoningEffort:      strings.TrimSpace(cfg.CodexModelReasoningEffort),
+		Children:                       cfg.Children,
+		Workspaces:                     make(map[string]Workspace, len(cfg.Workspaces)),
 	}
 	for name, ws := range cfg.Workspaces {
 		merged.Workspaces[name] = ws
@@ -119,16 +99,6 @@ func loadRecursive(path string, seen map[string]bool) (*Config, error) {
 
 	for _, name := range childNames {
 		child := cfg.Children[name]
-		child.Dir = resolveDir(projectDir, child.Dir)
-		if child.Dir == "" {
-			fmt.Fprintf(os.Stderr, "warning: child %q is missing dir, skipping\n", name)
-			continue
-		}
-		if child.Prefix == "" {
-			child.Prefix = name
-		}
-		cfg.Children[name] = child
-
 		childCfgPath, err := ConfigPathInDir(child.Dir)
 		if err != nil {
 			// Stale entry — config file no longer exists at that path.
@@ -146,7 +116,7 @@ func loadRecursive(path string, seen map[string]bool) (*Config, error) {
 		}
 
 		for childName, ws := range childCfg.Workspaces {
-			mergedName := child.Prefix + "." + childName
+			mergedName := qualifyName(child.Prefix, childName)
 			if _, exists := merged.Workspaces[mergedName]; exists {
 				fmt.Fprintf(os.Stderr, "warning: duplicate workspace %q from child %q, skipping\n", mergedName, name)
 				continue

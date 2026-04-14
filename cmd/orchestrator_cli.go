@@ -24,12 +24,18 @@ func runRootOrchestrator(runtime string) error {
 	if err != nil {
 		return err
 	}
-	disabled, err := reconcileRootOrchestratorState(cfgPath)
+	disabled, err := rootOrchestratorDisabled(cfgPath)
 	if err != nil {
 		return err
 	}
 	if disabled {
-		return fmt.Errorf("root orchestrator disabled by %q in %s", "disable_root_orchestrator", cfgPath)
+		// `disable_root_orchestrator` only disables managed root session/state.
+		// A user-triggered foreground CLI launch should still be able to act as
+		// the root orchestrator, so we clear any stale managed state and then
+		// regenerate root artifacts below.
+		if err := cleanupRootOrchestratorState(); err != nil {
+			return err
+		}
 	}
 	tree, err := config.LoadTree(cfgPath)
 	if err != nil {
@@ -52,7 +58,9 @@ func runRootOrchestrator(runtime string) error {
 	// Write root artifacts + start any sub-orchestrator sessions that are
 	// missing. ensureOrchestrators is idempotent for already-running
 	// sub-sessions and does not create a tmux session for the root node.
-	if err := ensureOrchestrators(tree, sp, cfgPath); err != nil {
+	// Direct launches must always materialize the root orchestrator, even
+	// when managed root state is disabled in config.
+	if err := ensureOrchestratorsWithSkipRoot(tree, sp, cfgPath, false); err != nil {
 		return err
 	}
 

@@ -72,6 +72,8 @@ func TestBuildWorkspaceListRowsIncludesMatchedAndMismatchedStates(t *testing.T) 
 			"ax.daemon": "Daemon owner",
 			"main":      "Main workspace",
 		},
+		nil,
+		false,
 		true,
 	)
 
@@ -85,6 +87,7 @@ func TestBuildWorkspaceListRowsIncludesMatchedAndMismatchedStates(t *testing.T) 
 	expected := map[string]workspaceListRow{
 		"ax.cli": {
 			Name:        "ax.cli",
+			Reconcile:   "",
 			Tmux:        "attached",
 			Agent:       "online",
 			StatusText:  "Investigating CLI drift",
@@ -92,6 +95,7 @@ func TestBuildWorkspaceListRowsIncludesMatchedAndMismatchedStates(t *testing.T) 
 		},
 		"ax.daemon": {
 			Name:        "ax.daemon",
+			Reconcile:   "",
 			Tmux:        "no-session",
 			Agent:       "online",
 			StatusText:  "Running without tmux session",
@@ -99,6 +103,7 @@ func TestBuildWorkspaceListRowsIncludesMatchedAndMismatchedStates(t *testing.T) 
 		},
 		"main": {
 			Name:        "main",
+			Reconcile:   "",
 			Tmux:        "detached",
 			Agent:       "no-agent",
 			StatusText:  "",
@@ -125,6 +130,8 @@ func TestBuildWorkspaceListRowsHidesInternalDaemonOnlyByDefault(t *testing.T) {
 			{Name: "ax.cli", Status: types.StatusOnline},
 		}),
 		nil,
+		nil,
+		false,
 		false,
 	)
 
@@ -143,6 +150,8 @@ func TestBuildWorkspaceListRowsIncludesAndLabelsInternalWhenRequested(t *testing
 			{Name: "_cli", Status: types.StatusOnline},
 		}),
 		nil,
+		nil,
+		false,
 		true,
 	)
 
@@ -155,6 +164,40 @@ func TestBuildWorkspaceListRowsIncludesAndLabelsInternalWhenRequested(t *testing
 	row := view.Rows[0]
 	if row.Name != "_cli" || row.Tmux != "no-session" || row.Agent != "online" || row.Description != "internal daemon identity" {
 		t.Fatalf("unexpected internal row %+v", row)
+	}
+}
+
+func TestBuildWorkspaceListRowsShowsReconfigureStateWhenEnabled(t *testing.T) {
+	view := buildWorkspaceListRows(
+		[]tmux.SessionInfo{
+			{Name: "ax-old", Workspace: "old", Attached: false},
+		},
+		nil,
+		map[string]string{
+			"main": "Main workspace",
+		},
+		map[string]bool{
+			"main": true,
+		},
+		true,
+		true,
+	)
+
+	if !view.ReconfigureEnabled {
+		t.Fatal("expected reconfigure view to be enabled")
+	}
+	if len(view.Rows) != 2 {
+		t.Fatalf("expected two rows, got %+v", view.Rows)
+	}
+
+	expected := map[string]string{
+		"main": "desired-only",
+		"old":  "runtime-only",
+	}
+	for _, row := range view.Rows {
+		if got, ok := expected[row.Name]; !ok || row.Reconcile != got {
+			t.Fatalf("unexpected row %+v", row)
+		}
 	}
 }
 

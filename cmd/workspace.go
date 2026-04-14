@@ -74,11 +74,17 @@ var wsListCmd = &cobra.Command{
 
 		// Try to load config for descriptions
 		descriptions := map[string]string{}
+		desired := map[string]bool{}
+		reconfigureEnabled := false
 		if cfgPath, err := resolveConfigPath(); err == nil {
 			if cfg, err := config.Load(cfgPath); err == nil {
 				for name, ws := range cfg.Workspaces {
 					descriptions[name] = ws.Description
+					desired[name] = true
 				}
+			}
+			if topology, err := loadTeamReconfigureTopology(cfgPath); err == nil {
+				reconfigureEnabled = topology.Enabled
 			}
 		}
 
@@ -92,7 +98,7 @@ var wsListCmd = &cobra.Command{
 			}
 		}
 
-		view := buildWorkspaceListRows(sessions, workspaceInfos, descriptions, wsListInternal)
+		view := buildWorkspaceListRows(sessions, workspaceInfos, descriptions, desired, reconfigureEnabled, wsListInternal)
 		if len(view.Rows) == 0 {
 			fmt.Println("No workspaces found.")
 			if note := formatHiddenInternalWorkspaceNote(view.HiddenInternal); note != "" {
@@ -101,16 +107,34 @@ var wsListCmd = &cobra.Command{
 			return nil
 		}
 
-		fmt.Printf("%-22s %-10s %-8s %-40s %s\n", "WORKSPACE", "TMUX", "AGENT", "STATUS TEXT", "DESCRIPTION")
-		fmt.Printf("%-22s %-10s %-8s %-40s %s\n", "---------", "----", "-----", "-----------", "-----------")
-		for _, row := range view.Rows {
-			fmt.Printf("%-22s %-10s %-8s %-40s %s\n",
-				row.Name,
-				row.Tmux,
-				row.Agent,
-				row.StatusText,
-				row.Description,
-			)
+		if view.ReconfigureEnabled {
+			fmt.Printf("%-22s %-14s %-10s %-8s %-40s %s\n", "WORKSPACE", "RECONCILE", "TMUX", "AGENT", "STATUS TEXT", "DESCRIPTION")
+			fmt.Printf("%-22s %-14s %-10s %-8s %-40s %s\n", "---------", "---------", "----", "-----", "-----------", "-----------")
+			for _, row := range view.Rows {
+				fmt.Printf("%-22s %-14s %-10s %-8s %-40s %s\n",
+					row.Name,
+					row.Reconcile,
+					row.Tmux,
+					row.Agent,
+					row.StatusText,
+					row.Description,
+				)
+			}
+		} else {
+			fmt.Printf("%-22s %-10s %-8s %-40s %s\n", "WORKSPACE", "TMUX", "AGENT", "STATUS TEXT", "DESCRIPTION")
+			fmt.Printf("%-22s %-10s %-8s %-40s %s\n", "---------", "----", "-----", "-----------", "-----------")
+			for _, row := range view.Rows {
+				fmt.Printf("%-22s %-10s %-8s %-40s %s\n",
+					row.Name,
+					row.Tmux,
+					row.Agent,
+					row.StatusText,
+					row.Description,
+				)
+			}
+		}
+		if view.ReconfigureEnabled {
+			fmt.Println("\nReconcile state is relative to the active config tree.")
 		}
 		if note := formatHiddenInternalWorkspaceNote(view.HiddenInternal); note != "" {
 			fmt.Printf("\n%s\n", note)

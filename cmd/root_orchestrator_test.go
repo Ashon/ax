@@ -3,6 +3,7 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -77,7 +78,7 @@ children:
 	}
 }
 
-func TestRunRootOrchestratorRejectsDisabledConfigAndCleansState(t *testing.T) {
+func TestRunRootOrchestratorAllowsDirectLaunchWhenDisabled(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -95,11 +96,17 @@ workspaces:
 	writeTestConfig(t, filepath.Join(rootOrchDir, "CLAUDE.md"), "stale root prompt\n")
 	writeTestConfig(t, filepath.Join(rootOrchDir, ".mcp.json"), "{}\n")
 
-	codexHome, err := agent.CodexHomePath("orchestrator", rootOrchDir)
-	if err != nil {
-		t.Fatalf("resolve codex home: %v", err)
+	binDir := filepath.Join(home, "bin")
+	claudePath := filepath.Join(binDir, "claude")
+	writeTestConfig(t, claudePath, "#!/bin/sh\nexit 0\n")
+	if err := os.Chmod(claudePath, 0o755); err != nil {
+		t.Fatalf("chmod fake claude: %v", err)
 	}
-	writeTestConfig(t, filepath.Join(codexHome, "config.toml"), "model = \"gpt-5\"\n")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	socket := filepath.Join(home, "daemon.sock")
+	writeTestConfig(t, socket, "")
+	writeTestConfig(t, filepath.Join(home, "daemon.pid"), strconv.Itoa(os.Getpid()))
 
 	oldConfigPath := configPath
 	oldSocketPath := socketPath
@@ -109,20 +116,24 @@ workspaces:
 	})
 
 	configPath = rootConfigPath
-	socketPath = filepath.Join(home, "daemon.sock")
+	socketPath = socket
 
-	err = runRootOrchestrator(agent.RuntimeClaude)
-	if err == nil {
-		t.Fatal("expected disabled root orchestrator error, got nil")
-	}
-	if !strings.Contains(err.Error(), "disable_root_orchestrator") {
-		t.Fatalf("expected disable_root_orchestrator error, got %v", err)
+	if err := runRootOrchestrator(agent.RuntimeClaude); err != nil {
+		t.Fatalf("run root orchestrator: %v", err)
 	}
 
-	if _, statErr := os.Stat(rootOrchDir); !os.IsNotExist(statErr) {
-		t.Fatalf("expected root orchestrator dir removed, got stat err=%v", statErr)
+	data, err := os.ReadFile(filepath.Join(rootOrchDir, "CLAUDE.md"))
+	if err != nil {
+		t.Fatalf("read root prompt: %v", err)
 	}
-	if _, statErr := os.Stat(codexHome); !os.IsNotExist(statErr) {
-		t.Fatalf("expected root codex home removed, got stat err=%v", statErr)
+	content := string(data)
+	if !strings.Contains(content, "# ax root orchestrator") {
+		t.Fatalf("expected direct launch to regenerate root prompt, got %q", content)
+	}
+	if strings.Contains(content, "stale root prompt") {
+		t.Fatalf("expected stale prompt to be replaced, got %q", content)
+	}
+	if _, statErr := os.Stat(filepath.Join(rootOrchDir, ".mcp.json")); statErr != nil {
+		t.Fatalf("expected root mcp config to exist, got stat err=%v", statErr)
 	}
 }

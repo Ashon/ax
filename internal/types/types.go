@@ -27,6 +27,115 @@ type Message struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+const ExperimentalMCPTeamReconfigureFlagKey = "experimental_mcp_team_reconfigure"
+
+type TeamEntryKind string
+
+const (
+	TeamEntryWorkspace        TeamEntryKind = "workspace"
+	TeamEntryChild            TeamEntryKind = "child"
+	TeamEntryRootOrchestrator TeamEntryKind = "root_orchestrator"
+)
+
+type TeamChangeOp string
+
+const (
+	TeamChangeAdd     TeamChangeOp = "add"
+	TeamChangeRemove  TeamChangeOp = "remove"
+	TeamChangeEnable  TeamChangeOp = "enable"
+	TeamChangeDisable TeamChangeOp = "disable"
+)
+
+type TeamReconcileMode string
+
+const (
+	TeamReconcileArtifactsOnly TeamReconcileMode = "artifacts_only"
+	TeamReconcileStartMissing  TeamReconcileMode = "start_missing"
+)
+
+type TeamWorkspaceSpec struct {
+	Dir                       string            `json:"dir"`
+	Description               string            `json:"description,omitempty"`
+	Shell                     string            `json:"shell,omitempty"`
+	Runtime                   string            `json:"runtime,omitempty"`
+	CodexModelReasoningEffort string            `json:"codex_model_reasoning_effort,omitempty"`
+	Agent                     string            `json:"agent,omitempty"`
+	Instructions              string            `json:"instructions,omitempty"`
+	Env                       map[string]string `json:"env,omitempty"`
+}
+
+type TeamChildSpec struct {
+	Dir    string `json:"dir"`
+	Prefix string `json:"prefix,omitempty"`
+}
+
+type TeamReconfigureChange struct {
+	Op        TeamChangeOp       `json:"op"`
+	Kind      TeamEntryKind      `json:"kind"`
+	Name      string             `json:"name,omitempty"`
+	Workspace *TeamWorkspaceSpec `json:"workspace,omitempty"`
+	Child     *TeamChildSpec     `json:"child,omitempty"`
+}
+
+type TeamOverlay struct {
+	DisableRootOrchestrator *bool                         `json:"disable_root_orchestrator,omitempty"`
+	AddedWorkspaces         map[string]TeamWorkspaceSpec  `json:"added_workspaces,omitempty"`
+	RemovedWorkspaces       map[string]bool               `json:"removed_workspaces,omitempty"`
+	DisabledWorkspaces      map[string]bool               `json:"disabled_workspaces,omitempty"`
+	AddedChildren           map[string]TeamChildSpec      `json:"added_children,omitempty"`
+	RemovedChildren         map[string]bool               `json:"removed_children,omitempty"`
+	DisabledChildren        map[string]bool               `json:"disabled_children,omitempty"`
+}
+
+type TeamConfiguredState struct {
+	RootOrchestratorEnabled bool     `json:"root_orchestrator_enabled"`
+	Workspaces              []string `json:"workspaces,omitempty"`
+	Children                []string `json:"children,omitempty"`
+	Orchestrators           []string `json:"orchestrators,omitempty"`
+}
+
+type TeamReconfigureAction struct {
+	Action string        `json:"action"`
+	Kind   TeamEntryKind `json:"kind"`
+	Name   string        `json:"name,omitempty"`
+	Dir    string        `json:"dir,omitempty"`
+	Detail string        `json:"detail,omitempty"`
+}
+
+type TeamApplyReport struct {
+	StartedAt     time.Time               `json:"started_at"`
+	FinishedAt    *time.Time              `json:"finished_at,omitempty"`
+	Success       bool                    `json:"success"`
+	Error         string                  `json:"error,omitempty"`
+	ReconcileMode TeamReconcileMode       `json:"reconcile_mode,omitempty"`
+	Actions       []TeamReconfigureAction `json:"actions,omitempty"`
+}
+
+type TeamReconfigureState struct {
+	TeamID              string               `json:"team_id"`
+	BaseConfigPath      string               `json:"base_config_path"`
+	EffectiveConfigPath string               `json:"effective_config_path"`
+	FeatureEnabled      bool                 `json:"feature_enabled"`
+	Revision            int                  `json:"revision"`
+	Overlay             TeamOverlay          `json:"overlay,omitempty"`
+	Desired             TeamConfiguredState  `json:"desired"`
+	LastApply           *TeamApplyReport     `json:"last_apply,omitempty"`
+}
+
+type TeamReconfigurePlan struct {
+	State            TeamReconfigureState    `json:"state"`
+	ExpectedRevision int                     `json:"expected_revision"`
+	Changes          []TeamReconfigureChange `json:"changes"`
+	Actions          []TeamReconfigureAction `json:"actions,omitempty"`
+	Warnings         []string                `json:"warnings,omitempty"`
+}
+
+type TeamApplyTicket struct {
+	Token         string               `json:"token"`
+	Plan          TeamReconfigurePlan  `json:"plan"`
+	ReconcileMode TeamReconcileMode    `json:"reconcile_mode"`
+}
+
 // Task management types
 
 type TaskStatus string

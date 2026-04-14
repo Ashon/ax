@@ -60,6 +60,17 @@ func CodexHomePath(workspace, dir string) (string, error) {
 	return filepath.Join(home, ".ax", "codex", codexHomeKey(workspace, dir)), nil
 }
 
+func RemoveCodexHome(workspace, dir string) error {
+	codexHome, err := CodexHomePath(workspace, dir)
+	if err != nil {
+		return err
+	}
+	if err := os.RemoveAll(codexHome); err != nil {
+		return fmt.Errorf("remove codex home %s: %w", codexHome, err)
+	}
+	return nil
+}
+
 func codexHomeKey(workspace, dir string) string {
 	sum := sha1.Sum([]byte(dir))
 	return workspace + "-" + hex.EncodeToString(sum[:6])

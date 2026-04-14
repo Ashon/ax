@@ -204,6 +204,10 @@ func registerTools(srv *server.MCPServer, client *DaemonClient, configPath strin
 		),
 		listTasksHandler(client),
 	)
+
+	srv.AddTool(teamStateToolDefinition(), getTeamStateHandler(client, configPath))
+	srv.AddTool(teamDryRunToolDefinition(), dryRunTeamReconfigureHandler(client, configPath))
+	srv.AddTool(teamApplyToolDefinition(), applyTeamReconfigureHandler(client, configPath))
 }
 
 type agentInfo struct {
@@ -229,7 +233,7 @@ type workspaceListResult struct {
 
 func listAgentsHandler(client *DaemonClient, configPath string) server.ToolHandlerFunc {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		cfgPath, cfg, err := loadToolConfig(configPath)
+		cfgPath, cfg, err := loadToolConfig(client, configPath)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Failed to load ax config: %v", err)), nil
 		}
@@ -311,7 +315,7 @@ func inspectAgentHandler(client *DaemonClient, configPath string) server.ToolHan
 		question := strings.TrimSpace(request.GetString("question", ""))
 		timeout := int(request.GetFloat("timeout", 120))
 
-		cfgPath, cfg, err := loadToolConfig(configPath)
+		cfgPath, cfg, err := loadToolConfig(client, configPath)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Failed to load ax config: %v", err)), nil
 		}
@@ -352,21 +356,40 @@ func inspectAgentHandler(client *DaemonClient, configPath string) server.ToolHan
 	}
 }
 
-func loadToolConfig(configPath string) (string, *config.Config, error) {
+func resolveBaseToolConfigPath(configPath string) (string, error) {
 	cfgPath := strings.TrimSpace(configPath)
-	if cfgPath == "" {
-		var err error
-		cfgPath, err = config.FindConfigFile()
-		if err != nil {
-			return "", nil, err
-		}
+	if cfgPath != "" {
+		return cfgPath, nil
 	}
 
-	cfg, err := config.Load(cfgPath)
+	var err error
+	cfgPath, err = config.FindConfigFile()
+	if err != nil {
+		return "", err
+	}
+	return cfgPath, nil
+}
+
+func loadToolConfig(client *DaemonClient, configPath string) (string, *config.Config, error) {
+	cfgPath, err := resolveBaseToolConfigPath(configPath)
 	if err != nil {
 		return "", nil, err
 	}
-	return cfgPath, cfg, nil
+
+	loadPath := cfgPath
+	if client != nil {
+		if state, err := client.GetTeamState(cfgPath); err == nil && state != nil {
+			if state.FeatureEnabled && strings.TrimSpace(state.EffectiveConfigPath) != "" {
+				loadPath = state.EffectiveConfigPath
+			}
+		}
+	}
+
+	cfg, err := config.Load(loadPath)
+	if err != nil {
+		return "", nil, err
+	}
+	return loadPath, cfg, nil
 }
 
 func instructionPreview(instructions string) string {
@@ -468,7 +491,7 @@ func prepareFreshTaskStart(client *DaemonClient, configPath, target, message str
 		return false, nil
 	}
 
-	cfgPath, cfg, err := loadToolConfig(configPath)
+	cfgPath, cfg, err := loadToolConfig(client, configPath)
 	if err != nil {
 		return false, err
 	}

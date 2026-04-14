@@ -24,6 +24,29 @@ func OrchestratorName(prefix string) string {
 // sub-orchestrators as delegation targets; sub-orchestrators learn about
 // their parent for escalation.
 func WriteOrchestratorPrompt(orchDir string, node *config.ProjectNode, prefix, parentName, runtime string) error {
+	content, err := buildOrchestratorPromptContent(node, prefix, parentName, runtime)
+	if err != nil {
+		return err
+	}
+	instructionFile, err := agent.InstructionFile(runtime)
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(orchDir, instructionFile)
+	for _, runtimeName := range agent.SupportedNames() {
+		otherFile, err := agent.InstructionFile(runtimeName)
+		if err != nil {
+			return err
+		}
+		other := filepath.Join(orchDir, otherFile)
+		if other != path {
+			os.Remove(other)
+		}
+	}
+	return os.WriteFile(path, []byte(content), 0o644)
+}
+
+func buildOrchestratorPromptContent(node *config.ProjectNode, prefix, parentName, runtime string) (string, error) {
 	var sb strings.Builder
 
 	selfName := OrchestratorName(prefix)
@@ -254,22 +277,10 @@ func WriteOrchestratorPrompt(orchDir string, node *config.ProjectNode, prefix, p
 		}
 	}
 
-	instructionFile, err := agent.InstructionFile(runtime)
-	if err != nil {
-		return err
+	if _, err := agent.InstructionFile(runtime); err != nil {
+		return "", err
 	}
-	path := filepath.Join(orchDir, instructionFile)
-	for _, runtimeName := range agent.SupportedNames() {
-		otherFile, err := agent.InstructionFile(runtimeName)
-		if err != nil {
-			return err
-		}
-		other := filepath.Join(orchDir, otherFile)
-		if other != path {
-			os.Remove(other)
-		}
-	}
-	return os.WriteFile(path, []byte(sb.String()), 0o644)
+	return sb.String(), nil
 }
 
 func summarizeWorkspaces(node *config.ProjectNode) string {
