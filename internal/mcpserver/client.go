@@ -489,6 +489,70 @@ func (c *DaemonClient) ListTasks(assignee, createdBy string, status *types.TaskS
 	return result.Tasks, nil
 }
 
+func (c *DaemonClient) GetTeamState(configPath string) (*types.TeamReconfigureState, error) {
+	resp, err := c.sendRequest(daemon.MsgGetTeamState, &daemon.GetTeamStatePayload{
+		ConfigPath: configPath,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var result daemon.TeamStateResponse
+	if err := decodeResponseData(resp, &result); err != nil {
+		return nil, fmt.Errorf("decode get_team_state response: %w", err)
+	}
+	return &result.State, nil
+}
+
+func (c *DaemonClient) DryRunTeamReconfigure(configPath string, expectedRevision *int, changes []types.TeamReconfigureChange) (*types.TeamReconfigurePlan, error) {
+	resp, err := c.sendRequest(daemon.MsgDryRunTeam, &daemon.TeamReconfigurePayload{
+		ConfigPath:       configPath,
+		ExpectedRevision: expectedRevision,
+		Changes:          changes,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var result daemon.TeamPlanResponse
+	if err := decodeResponseData(resp, &result); err != nil {
+		return nil, fmt.Errorf("decode dry_run_team_reconfigure response: %w", err)
+	}
+	return &result.Plan, nil
+}
+
+func (c *DaemonClient) ApplyTeamReconfigure(configPath string, expectedRevision *int, changes []types.TeamReconfigureChange, mode types.TeamReconcileMode) (*types.TeamApplyTicket, error) {
+	resp, err := c.sendRequest(daemon.MsgApplyTeam, &daemon.TeamReconfigurePayload{
+		ConfigPath:       configPath,
+		ExpectedRevision: expectedRevision,
+		Changes:          changes,
+		ReconcileMode:    mode,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var result daemon.TeamApplyResponse
+	if err := decodeResponseData(resp, &result); err != nil {
+		return nil, fmt.Errorf("decode apply_team_reconfigure response: %w", err)
+	}
+	return &result.Ticket, nil
+}
+
+func (c *DaemonClient) FinishTeamReconfigure(token string, success bool, errText string, actions []types.TeamReconfigureAction) (*types.TeamReconfigureState, error) {
+	resp, err := c.sendRequest(daemon.MsgFinishTeam, &daemon.FinishTeamReconfigurePayload{
+		Token:   token,
+		Success: success,
+		Error:   errText,
+		Actions: actions,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var result daemon.TeamStateResponse
+	if err := decodeResponseData(resp, &result); err != nil {
+		return nil, fmt.Errorf("decode finish_team_reconfigure response: %w", err)
+	}
+	return &result.State, nil
+}
+
 // decodeResponseData unwraps a daemon response envelope and decodes its
 // payload into the supplied destination. It surfaces decode errors that
 // were previously silently dropped, so MCP tools can fail loudly when the

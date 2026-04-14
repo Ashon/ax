@@ -2,11 +2,8 @@ package config
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
-
-	"gopkg.in/yaml.v3"
 )
 
 var ErrDuplicateChildPrefix = fmt.Errorf("duplicate ax child prefix")
@@ -45,7 +42,7 @@ func validateConfigTree(path string) error {
 		return fmt.Errorf("resolve config path: %w", err)
 	}
 
-	rootCfg, err := readConfigForValidation(absPath)
+	rootCfg, err := loadLocalConfig(absPath)
 	if err != nil {
 		return err
 	}
@@ -68,20 +65,6 @@ func validateConfigTree(path string) error {
 	return validateRecursive(absPath, "", seen, state)
 }
 
-func readConfigForValidation(path string) (Config, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return Config{}, fmt.Errorf("read config %s: %w", path, err)
-	}
-
-	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return Config{}, fmt.Errorf("parse config %s: %w", path, err)
-	}
-
-	return cfg, nil
-}
-
 func validateRecursive(path, prefix string, seen map[string]bool, state *validationState) error {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
@@ -93,14 +76,12 @@ func validateRecursive(path, prefix string, seen map[string]bool, state *validat
 	seen[absPath] = true
 	defer delete(seen, absPath)
 
-	cfg, err := readConfigForValidation(absPath)
+	cfg, err := loadLocalConfig(absPath)
 	if err != nil {
 		return err
 	}
-
 	configDir := filepath.Dir(absPath)
 	projectDir := configBaseDir(configDir)
-
 	workspaceNames := make([]string, 0, len(cfg.Workspaces))
 	for name := range cfg.Workspaces {
 		workspaceNames = append(workspaceNames, name)

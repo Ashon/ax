@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/ashon/ax/internal/config"
+	"github.com/ashon/ax/internal/tmux"
 )
 
 func TestCollectKnownWorkspacesSkipsDisabledRootOrchestrator(t *testing.T) {
@@ -58,7 +59,7 @@ func TestPrintProjectTreeSkipsDisabledRootOrchestratorButKeepsChildren(t *testin
 	}
 
 	output := captureStdout(t, func() {
-		printProjectTree(tree, 0, nil, nil)
+		printProjectTree(tree, 0, nil, nil, false)
 	})
 
 	if strings.Contains(output, "\n  ○ ◆ orchestrator") {
@@ -84,7 +85,7 @@ func TestBuildSidebarFromTreeSkipsDisabledRootOrchestrator(t *testing.T) {
 		},
 	}
 
-	entries := buildSidebarFromTree(tree, nil)
+	entries := buildSidebarFromTree(tree, nil, false, nil)
 	var orchestratorEntries []sidebarEntry
 	for _, entry := range entries {
 		if entry.label == "◆ orchestrator" {
@@ -97,6 +98,55 @@ func TestBuildSidebarFromTreeSkipsDisabledRootOrchestrator(t *testing.T) {
 	}
 	if orchestratorEntries[0].level != 2 {
 		t.Fatalf("expected child orchestrator entry at level 2, got %+v", orchestratorEntries[0])
+	}
+}
+
+func TestPrintProjectTreeShowsDesiredStateWhenReconfigureEnabled(t *testing.T) {
+	tree := &config.ProjectNode{
+		Name: "root",
+		Workspaces: []config.WorkspaceRef{
+			{Name: "main", MergedName: "main"},
+		},
+	}
+
+	output := captureStdout(t, func() {
+		printProjectTree(tree, 0, nil, nil, true)
+	})
+
+	if !strings.Contains(output, "desired") {
+		t.Fatalf("expected desired state in output %q", output)
+	}
+}
+
+func TestBuildSidebarFromTreeLabelsRuntimeOnlyGroupWhenReconfigureEnabled(t *testing.T) {
+	tree := &config.ProjectNode{
+		Name: "root",
+		Workspaces: []config.WorkspaceRef{
+			{Name: "main", MergedName: "main"},
+		},
+	}
+
+	entries := buildSidebarFromTree(tree, []tmux.SessionInfo{
+		{Name: "ax-old", Workspace: "old"},
+	}, true, map[string]bool{"main": true})
+
+	if len(entries) < 4 {
+		t.Fatalf("expected tree + workspace + runtime-only group, got %+v", entries)
+	}
+	var foundGroup, foundDesired, foundRuntimeOnly bool
+	for _, entry := range entries {
+		if entry.group && entry.label == "▾ runtime-only (not in config tree)" {
+			foundGroup = true
+		}
+		if entry.workspace == "main" && entry.reconcile == "desired" {
+			foundDesired = true
+		}
+		if entry.workspace == "old" && entry.reconcile == "runtime-only" {
+			foundRuntimeOnly = true
+		}
+	}
+	if !foundGroup || !foundDesired || !foundRuntimeOnly {
+		t.Fatalf("expected runtime-only labeling in entries %+v", entries)
 	}
 }
 

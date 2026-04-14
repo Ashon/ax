@@ -2,11 +2,8 @@ package config
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
-
-	"gopkg.in/yaml.v3"
 )
 
 // ProjectNode represents one project in a potentially-nested ax hierarchy.
@@ -65,42 +62,28 @@ func loadTreeRecursive(path, prefix string, seen map[string]bool) (*ProjectNode,
 	seen[absPath] = true
 	defer delete(seen, absPath)
 
-	data, err := os.ReadFile(absPath)
+	cfg, err := loadLocalConfig(absPath)
 	if err != nil {
-		return nil, fmt.Errorf("read config %s: %w", absPath, err)
-	}
-	var raw Config
-	if err := yaml.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("parse config %s: %w", absPath, err)
-	}
-
-	configDir := filepath.Dir(absPath)
-	projectDir := configBaseDir(configDir)
-	projectName := raw.Project
-	if projectName == "" {
-		projectName = filepath.Base(projectDir)
+		return nil, err
 	}
 
 	node := &ProjectNode{
-		Name:                    projectName,
+		Name:                    cfg.Project,
 		Prefix:                  prefix,
-		Dir:                     projectDir,
-		OrchestratorRuntime:     raw.OrchestratorRuntime,
-		DisableRootOrchestrator: prefix == "" && raw.DisableRootOrchestrator,
+		Dir:                     ConfigRootDir(absPath),
+		OrchestratorRuntime:     cfg.OrchestratorRuntime,
+		DisableRootOrchestrator: prefix == "" && cfg.DisableRootOrchestrator,
 	}
 
 	// Workspaces defined directly in this project
-	wsNames := make([]string, 0, len(raw.Workspaces))
-	for name := range raw.Workspaces {
+	wsNames := make([]string, 0, len(cfg.Workspaces))
+	for name := range cfg.Workspaces {
 		wsNames = append(wsNames, name)
 	}
 	sort.Strings(wsNames)
 	for _, name := range wsNames {
-		ws := raw.Workspaces[name]
-		merged := name
-		if prefix != "" {
-			merged = prefix + "." + name
-		}
+		ws := cfg.Workspaces[name]
+		merged := qualifyName(prefix, name)
 		node.Workspaces = append(node.Workspaces, WorkspaceRef{
 			Name:         name,
 			MergedName:   merged,
@@ -111,23 +94,16 @@ func loadTreeRecursive(path, prefix string, seen map[string]bool) (*ProjectNode,
 	}
 
 	// Child projects
-	childNames := make([]string, 0, len(raw.Children))
-	for name := range raw.Children {
+	childNames := make([]string, 0, len(cfg.Children))
+	for name := range cfg.Children {
 		childNames = append(childNames, name)
 	}
 	sort.Strings(childNames)
 	for _, name := range childNames {
-		child := raw.Children[name]
-		childDir := resolveDir(projectDir, child.Dir)
-		childPrefix := child.Prefix
-		if childPrefix == "" {
-			childPrefix = name
-		}
-		if prefix != "" {
-			childPrefix = prefix + "." + childPrefix
-		}
+		child := cfg.Children[name]
+		childPrefix := qualifyName(prefix, child.Prefix)
 
-		childPath, err := ConfigPathInDir(childDir)
+		childPath, err := ConfigPathInDir(child.Dir)
 		if err != nil {
 			continue
 		}
@@ -136,7 +112,7 @@ func loadTreeRecursive(path, prefix string, seen map[string]bool) (*ProjectNode,
 			if isStaleMissingChildError(err) {
 				continue
 			}
-			return nil, wrapChildLoadError(name, childDir, err)
+			return nil, wrapChildLoadError(name, child.Dir, err)
 		}
 		if childNode == nil {
 			continue

@@ -59,7 +59,8 @@ var upCmd = &cobra.Command{
 			return err
 		}
 		if disabledRoot {
-			fmt.Println("\nRoot orchestrator disabled by config; child/project orchestrators remain available.")
+			fmt.Println("\nManaged root orchestrator state is disabled by config; child/project orchestrators remain available.")
+			fmt.Println("Run 'ax claude' or 'ax codex' to launch a foreground root orchestrator manually.")
 			return nil
 		}
 

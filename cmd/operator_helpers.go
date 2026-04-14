@@ -59,6 +59,7 @@ func taskAttentionHint(summary taskSummary) string {
 
 type workspaceListRow struct {
 	Name        string
+	Reconcile   string
 	Tmux        string
 	Agent       string
 	StatusText  string
@@ -66,11 +67,12 @@ type workspaceListRow struct {
 }
 
 type workspaceListView struct {
-	Rows           []workspaceListRow
-	HiddenInternal []string
+	ReconfigureEnabled bool
+	Rows               []workspaceListRow
+	HiddenInternal     []string
 }
 
-func buildWorkspaceListRows(sessions []tmux.SessionInfo, workspaces map[string]types.WorkspaceInfo, descriptions map[string]string, includeInternal bool) workspaceListView {
+func buildWorkspaceListRows(sessions []tmux.SessionInfo, workspaces map[string]types.WorkspaceInfo, descriptions map[string]string, desired map[string]bool, reconfigureEnabled bool, includeInternal bool) workspaceListView {
 	sessionByWorkspace := make(map[string]tmux.SessionInfo, len(sessions))
 	names := make(map[string]struct{}, len(sessions)+len(workspaces))
 	for _, session := range sessions {
@@ -78,6 +80,9 @@ func buildWorkspaceListRows(sessions []tmux.SessionInfo, workspaces map[string]t
 		names[session.Workspace] = struct{}{}
 	}
 	for name := range workspaces {
+		names[name] = struct{}{}
+	}
+	for name := range desired {
 		names[name] = struct{}{}
 	}
 
@@ -88,11 +93,15 @@ func buildWorkspaceListRows(sessions []tmux.SessionInfo, workspaces map[string]t
 	sort.Strings(orderedNames)
 
 	view := workspaceListView{
-		Rows: make([]workspaceListRow, 0, len(orderedNames)),
+		ReconfigureEnabled: reconfigureEnabled,
+		Rows:               make([]workspaceListRow, 0, len(orderedNames)),
 	}
 	for _, name := range orderedNames {
+		_, hasAgent := workspaces[name]
+		_, hasSession := sessionByWorkspace[name]
 		row := workspaceListRow{
 			Name:        name,
+			Reconcile:   reconfigureRowState(name, desired, hasSession, hasAgent),
 			Agent:       workspaceAgentStatus(workspaces, name),
 			StatusText:  workspaceStatusPreview(workspaces, name, 40),
 			Description: descriptions[name],

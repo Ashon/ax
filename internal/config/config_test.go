@@ -383,6 +383,177 @@ children:
 	}
 }
 
+func TestLoadIgnoresManagedOverlayWhenFeatureFlagIsOff(t *testing.T) {
+	rootDir := t.TempDir()
+	rootConfigPath := filepath.Join(rootDir, ".ax", "config.yaml")
+	writeConfig(t, rootConfigPath, `
+workspaces:
+  main:
+    dir: .
+`)
+	writeManagedOverlay(t, rootConfigPath, `
+workspaces: [
+`)
+
+	cfg, err := config.Load(rootConfigPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if _, ok := cfg.Workspaces["main"]; !ok {
+		t.Fatal("expected base workspace to remain when feature flag is off")
+	}
+}
+
+func TestLoadAppliesManagedOverlayWorkspaceAndPolicyChanges(t *testing.T) {
+	rootDir := t.TempDir()
+	rootConfigPath := filepath.Join(rootDir, ".ax", "config.yaml")
+	writeConfig(t, rootConfigPath, `
+experimental_mcp_team_reconfigure: true
+workspaces:
+  main:
+    dir: .
+    description: base
+`)
+	writeManagedOverlay(t, rootConfigPath, `
+policies:
+  disable_root_orchestrator: true
+workspaces:
+  main:
+    enabled: false
+  helper:
+    dir: ./helper
+    description: managed helper
+    runtime: codex
+`)
+
+	cfg, err := config.Load(rootConfigPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if !cfg.DisableRootOrchestrator {
+		t.Fatal("expected managed policy overlay to disable root orchestrator")
+	}
+	if _, ok := cfg.Workspaces["main"]; ok {
+		t.Fatal("expected managed overlay to disable base workspace main")
+	}
+	helper, ok := cfg.Workspaces["helper"]
+	if !ok {
+		t.Fatal("expected managed overlay to add helper workspace")
+	}
+	if helper.Runtime != "codex" {
+		t.Fatalf("expected helper runtime codex, got %q", helper.Runtime)
+	}
+	if helper.Dir != filepath.Join(rootDir, "helper") {
+		t.Fatalf("expected helper dir %q, got %q", filepath.Join(rootDir, "helper"), helper.Dir)
+	}
+}
+
+func TestLoadRecursivelyAppliesManagedOverlayInChildConfig(t *testing.T) {
+	rootDir := t.TempDir()
+	childDir := filepath.Join(rootDir, "child")
+	rootConfigPath := filepath.Join(rootDir, ".ax", "config.yaml")
+
+	writeConfig(t, rootConfigPath, `
+children:
+  child:
+    dir: ./child
+workspaces:
+  main:
+    dir: .
+`)
+	writeConfig(t, filepath.Join(childDir, ".ax", "config.yaml"), `
+experimental_mcp_team_reconfigure: true
+workspaces:
+  worker:
+    dir: .
+`)
+	writeManagedOverlay(t, filepath.Join(childDir, ".ax", "config.yaml"), `
+workspaces:
+  worker:
+    delete: true
+  helper:
+    dir: .
+    description: managed helper
+`)
+
+	cfg, err := config.Load(rootConfigPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if _, ok := cfg.Workspaces["child.worker"]; ok {
+		t.Fatal("expected child worker workspace to be deleted by managed overlay")
+	}
+	if _, ok := cfg.Workspaces["child.helper"]; !ok {
+		t.Fatal("expected child helper workspace from managed overlay")
+	}
+}
+
+func TestLoadTreeAppliesManagedChildOverlay(t *testing.T) {
+	rootDir := t.TempDir()
+	oldChildDir := filepath.Join(rootDir, "old")
+	newChildDir := filepath.Join(rootDir, "new")
+	rootConfigPath := filepath.Join(rootDir, ".ax", "config.yaml")
+
+	writeConfig(t, rootConfigPath, `
+experimental_mcp_team_reconfigure: true
+children:
+  old:
+    dir: ./old
+`)
+	writeManagedOverlay(t, rootConfigPath, `
+children:
+  old:
+    enabled: false
+  new:
+    dir: ./new
+    prefix: nxt
+`)
+	writeConfig(t, filepath.Join(oldChildDir, ".ax", "config.yaml"), `
+project: old
+workspaces:
+  main:
+    dir: .
+`)
+	writeConfig(t, filepath.Join(newChildDir, ".ax", "config.yaml"), `
+project: new
+workspaces:
+  main:
+    dir: .
+`)
+
+	tree, err := config.LoadTree(rootConfigPath)
+	if err != nil {
+		t.Fatalf("load tree: %v", err)
+	}
+	if len(tree.Children) != 1 {
+		t.Fatalf("expected one managed child, got %d", len(tree.Children))
+	}
+	if tree.Children[0].Alias != "new" {
+		t.Fatalf("expected child alias new, got %q", tree.Children[0].Alias)
+	}
+	if tree.Children[0].Prefix != "nxt" {
+		t.Fatalf("expected managed child prefix nxt, got %q", tree.Children[0].Prefix)
+	}
+}
+
+func TestLoadRejectsManagedOverlayReservedNameCollisions(t *testing.T) {
+	rootDir := t.TempDir()
+	rootConfigPath := filepath.Join(rootDir, ".ax", "config.yaml")
+	writeConfig(t, rootConfigPath, `
+experimental_mcp_team_reconfigure: true
+workspaces:
+  main:
+    dir: .
+`)
+	writeManagedOverlay(t, rootConfigPath, `
+workspaces:
+  orchestrator:
+    dir: .
+`)
+
+	assertLoadersFailWithError(t, rootConfigPath, config.ErrReservedNameCollision, "orchestrator", rootConfigPath)
+}
+
 func TestLoadRejectsMalformedChildConfig(t *testing.T) {
 	rootDir := t.TempDir()
 	childDir := filepath.Join(rootDir, "broken")
@@ -581,6 +752,11 @@ func writeConfig(t *testing.T, path, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
 	}
+}
+
+func writeManagedOverlay(t *testing.T, configPath, content string) {
+	t.Helper()
+	writeConfig(t, config.ManagedOverlayPath(configPath), content)
 }
 
 func assertLoadersFailWithError(t *testing.T, path string, want error, contains ...string) {

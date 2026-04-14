@@ -117,6 +117,7 @@ type watchModel struct {
 type sidebarEntry struct {
 	label        string
 	workspace    string
+	reconcile    string
 	sessionIndex int
 	group        bool
 	level        int
@@ -317,7 +318,11 @@ func (m watchModel) renderSidebar(w, h int) string {
 			// Workspace defined but not running
 			dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 			left = "  " + strings.Repeat("  ", entry.level) + "○ " + dimStyle.Render(entry.label)
-			rightParts := []string{dimStyle.Render("offline")}
+			stateLabel := "offline"
+			if entry.reconcile != "" {
+				stateLabel = entry.reconcile
+			}
+			rightParts := []string{dimStyle.Render(stateLabel)}
 			if attention != "" {
 				rightParts = append(rightParts, taskFailClr.Render(attention))
 			}
@@ -348,6 +353,9 @@ func (m watchModel) renderSidebar(w, h int) string {
 
 			left = cursor + strings.Repeat("  ", entry.level) + dot + " " + nameStyle.Render(entry.label)
 			var rightParts []string
+			if entry.reconcile != "" {
+				rightParts = append(rightParts, statStyle.Render(entry.reconcile))
+			}
 			if runtime != "" {
 				rightParts = append(rightParts, runtimeStyle.Render(runtime))
 			}
@@ -545,7 +553,11 @@ func buildSidebarEntries(sessions []tmux.SessionInfo) []sidebarEntry {
 	// when no config is available.
 	if cfgPath, err := resolveConfigPath(); err == nil {
 		if tree, err := config.LoadTree(cfgPath); err == nil && tree != nil {
-			return buildSidebarFromTree(tree, sessions)
+			topology, topoErr := loadTeamReconfigureTopology(cfgPath)
+			if topoErr == nil {
+				return buildSidebarFromTree(tree, sessions, topology.Enabled, topology.Desired)
+			}
+			return buildSidebarFromTree(tree, sessions, false, nil)
 		}
 	}
 
@@ -579,9 +591,9 @@ func buildSidebarEntries(sessions []tmux.SessionInfo) []sidebarEntry {
 // buildSidebarFromTree renders a project tree into sidebar entries.
 // Each project becomes a group header. Its orchestrator is the first
 // leaf under it, followed by workspaces, then nested projects.
-// Running sessions not in the tree are appended under an "unregistered"
-// group so they stay visible.
-func buildSidebarFromTree(tree *config.ProjectNode, sessions []tmux.SessionInfo) []sidebarEntry {
+// Running sessions not in the tree are appended under a runtime-only /
+// unregistered group so they stay visible.
+func buildSidebarFromTree(tree *config.ProjectNode, sessions []tmux.SessionInfo, reconfigureEnabled bool, desired map[string]bool) []sidebarEntry {
 	sessionByWorkspace := make(map[string]int, len(sessions))
 	for i, s := range sessions {
 		sessionByWorkspace[s.Workspace] = i
@@ -591,7 +603,7 @@ func buildSidebarFromTree(tree *config.ProjectNode, sessions []tmux.SessionInfo)
 	collectKnownFromTree(tree, known)
 
 	var entries []sidebarEntry
-	appendProjectEntries(tree, 0, sessionByWorkspace, &entries)
+	appendProjectEntries(tree, 0, sessionByWorkspace, &entries, desired)
 
 	// Append any running session that wasn't part of the config tree
 	var unregistered []int
@@ -602,13 +614,16 @@ func buildSidebarFromTree(tree *config.ProjectNode, sessions []tmux.SessionInfo)
 	}
 	if len(unregistered) > 0 {
 		entries = append(entries, sidebarEntry{
-			label: "▾ unregistered",
+			label: runtimeOnlyGroupLabel(reconfigureEnabled),
 			group: true,
 			level: 0,
 		})
 		for _, idx := range unregistered {
+			name := sessions[idx].Workspace
 			entries = append(entries, sidebarEntry{
-				label:        sessions[idx].Workspace,
+				label:        name,
+				workspace:    name,
+				reconcile:    reconfigureSidebarState(name, desired, true, false),
 				sessionIndex: idx,
 				level:        1,
 			})
@@ -637,7 +652,7 @@ func collectKnownFromTree(node *config.ProjectNode, known map[string]bool) {
 	}
 }
 
-func appendProjectEntries(node *config.ProjectNode, level int, sessionByWorkspace map[string]int, entries *[]sidebarEntry) {
+func appendProjectEntries(node *config.ProjectNode, level int, sessionByWorkspace map[string]int, entries *[]sidebarEntry, desired map[string]bool) {
 	if node == nil {
 		return
 	}
@@ -655,15 +670,23 @@ func appendProjectEntries(node *config.ProjectNode, level int, sessionByWorkspac
 			orchName = node.Prefix + ".orchestrator"
 		}
 		orchLabel := "◆ orchestrator"
+		orchReconcile := reconfigureSidebarState(orchName, desired, false, false)
+		if node.Prefix == "" && orchName == "orchestrator" {
+			orchReconcile = ""
+		}
 		if idx, ok := sessionByWorkspace[orchName]; ok {
 			*entries = append(*entries, sidebarEntry{
 				label:        orchLabel,
+				workspace:    orchName,
+				reconcile:    reconfigureSidebarState(orchName, desired, true, false),
 				sessionIndex: idx,
 				level:        level + 1,
 			})
 		} else {
 			*entries = append(*entries, sidebarEntry{
 				label:        orchLabel,
+				workspace:    orchName,
+				reconcile:    orchReconcile,
 				sessionIndex: -1,
 				level:        level + 1,
 			})
@@ -675,6 +698,8 @@ func appendProjectEntries(node *config.ProjectNode, level int, sessionByWorkspac
 		if !ok {
 			*entries = append(*entries, sidebarEntry{
 				label:        ws.Name,
+				workspace:    ws.MergedName,
+				reconcile:    reconfigureSidebarState(ws.MergedName, desired, false, false),
 				sessionIndex: -1,
 				level:        level + 1,
 			})
@@ -682,13 +707,15 @@ func appendProjectEntries(node *config.ProjectNode, level int, sessionByWorkspac
 		}
 		*entries = append(*entries, sidebarEntry{
 			label:        ws.Name,
+			workspace:    ws.MergedName,
+			reconcile:    reconfigureSidebarState(ws.MergedName, desired, true, false),
 			sessionIndex: idx,
 			level:        level + 1,
 		})
 	}
 
 	for _, child := range node.Children {
-		appendProjectEntries(child, level+1, sessionByWorkspace, entries)
+		appendProjectEntries(child, level+1, sessionByWorkspace, entries, desired)
 	}
 }
 

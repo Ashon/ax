@@ -37,7 +37,6 @@ var refreshCmd = &cobra.Command{
 
 		sp := daemon.ExpandSocketPath(socketPath)
 		daemonRunning := isDaemonRunning(sp)
-		mgr := workspace.NewManager(socketPath, cfgPath)
 
 		fmt.Printf("Config: %s\n", cfgPath)
 		if daemonRunning {
@@ -46,6 +45,32 @@ var refreshCmd = &cobra.Command{
 			fmt.Println("Daemon: stopped")
 		}
 
+		experimentalReconcile, err := experimentalMCPTeamReconfigureEnabled(cfgPath)
+		if err != nil {
+			return err
+		}
+		if experimentalReconcile {
+			skipRoot, err := reconcileRootOrchestratorState(cfgPath)
+			if err != nil {
+				return err
+			}
+			desired, err := workspace.BuildDesiredState(cfg, tree, socketPath, cfgPath, !skipRoot)
+			if err != nil {
+				return err
+			}
+			reconciler := workspace.NewReconciler(socketPath, cfgPath)
+			report, err := reconciler.ReconcileDesiredState(desired, workspace.ReconcileOptions{
+				DaemonRunning:          daemonRunning,
+				AllowDisruptiveChanges: true,
+			})
+			if err != nil {
+				return err
+			}
+			printExperimentalReconcileReport(report)
+			return nil
+		}
+
+		mgr := workspace.NewManager(socketPath, cfgPath)
 		names := make([]string, 0, len(cfg.Workspaces))
 		for name := range cfg.Workspaces {
 			names = append(names, name)
@@ -108,6 +133,24 @@ var refreshCmd = &cobra.Command{
 		}
 		return nil
 	},
+}
+
+func printExperimentalReconcileReport(report workspace.ReconcileReport) {
+	fmt.Println("\nExperimental Runtime Reconcile:")
+	if len(report.Actions) == 0 {
+		fmt.Println("  no runtime/workspace/orchestrator changes")
+	} else {
+		for _, action := range report.Actions {
+			line := fmt.Sprintf("  %s %s: %s", action.Kind, action.Name, action.Operation)
+			if action.Details != "" {
+				line += " (" + action.Details + ")"
+			}
+			fmt.Println(line)
+		}
+	}
+	if report.RootManualRestartRequired {
+		fmt.Println("\nNote: root foreground orchestrator requires manual relaunch to pick up artifact changes.")
+	}
 }
 
 func refreshOrchestratorArtifacts(node *config.ProjectNode, parentName, socketPath, cfgPath string) error {

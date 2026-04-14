@@ -70,9 +70,16 @@ var statusCmd = &cobra.Command{
 		cfgPath, cfgErr := resolveConfigPath()
 		if cfgErr == nil {
 			if tree, err := config.LoadTree(cfgPath); err == nil && tree != nil {
+				reconfigureEnabled := false
+				if topology, err := loadTeamReconfigureTopology(cfgPath); err == nil {
+					reconfigureEnabled = topology.Enabled
+				}
 				known := make(map[string]bool)
 				collectKnownWorkspaces(tree, known)
-				printProjectTree(tree, 0, sessionByWorkspace, workspaceInfos)
+				if reconfigureEnabled {
+					fmt.Printf("Reconfigure: desired-only entries are configured but not running; runtime-only entries are outside %s\n\n", cfgPath)
+				}
+				printProjectTree(tree, 0, sessionByWorkspace, workspaceInfos, reconfigureEnabled)
 
 				// Any running sessions not in the tree
 				var unregistered []tmux.SessionInfo
@@ -82,7 +89,7 @@ var statusCmd = &cobra.Command{
 					}
 				}
 				if len(unregistered) > 0 {
-					fmt.Println("\n▾ unregistered (not in config tree)")
+					fmt.Printf("\n%s\n", runtimeOnlyGroupLabel(reconfigureEnabled))
 					for _, s := range unregistered {
 						status := "detached"
 						if s.Attached {
@@ -96,7 +103,11 @@ var statusCmd = &cobra.Command{
 						}
 						fmt.Println()
 					}
-					fmt.Println("\nRun 'ax init' in the project directory to register these.")
+					if reconfigureEnabled {
+						fmt.Println("\nReview runtime-only leftovers before treating the reconfiguration as reconciled.")
+					} else {
+						fmt.Println("\nRun 'ax init' in the project directory to register these.")
+					}
 				}
 				return nil
 			}
@@ -143,7 +154,7 @@ func collectKnownWorkspaces(node *config.ProjectNode, known map[string]bool) {
 	}
 }
 
-func printProjectTree(node *config.ProjectNode, level int, sessionByWorkspace map[string]tmux.SessionInfo, workspaceInfos map[string]types.WorkspaceInfo) {
+func printProjectTree(node *config.ProjectNode, level int, sessionByWorkspace map[string]tmux.SessionInfo, workspaceInfos map[string]types.WorkspaceInfo, reconfigureEnabled bool) {
 	if node == nil {
 		return
 	}
@@ -155,19 +166,20 @@ func printProjectTree(node *config.ProjectNode, level int, sessionByWorkspace ma
 		if node.Prefix != "" {
 			orchName = node.Prefix + ".orchestrator"
 		}
-		printLeaf(level+1, "◆ orchestrator", orchName, sessionByWorkspace, workspaceInfos)
+		allowDesired := !(node.Prefix == "" && orchName == "orchestrator")
+		printLeaf(level+1, "◆ orchestrator", orchName, sessionByWorkspace, workspaceInfos, reconfigureEnabled && allowDesired)
 	}
 
 	for _, ws := range node.Workspaces {
-		printLeaf(level+1, ws.Name, ws.MergedName, sessionByWorkspace, workspaceInfos)
+		printLeaf(level+1, ws.Name, ws.MergedName, sessionByWorkspace, workspaceInfos, reconfigureEnabled)
 	}
 
 	for _, child := range node.Children {
-		printProjectTree(child, level+1, sessionByWorkspace, workspaceInfos)
+		printProjectTree(child, level+1, sessionByWorkspace, workspaceInfos, reconfigureEnabled)
 	}
 }
 
-func printLeaf(level int, label, mergedName string, sessionByWorkspace map[string]tmux.SessionInfo, workspaceInfos map[string]types.WorkspaceInfo) {
+func printLeaf(level int, label, mergedName string, sessionByWorkspace map[string]tmux.SessionInfo, workspaceInfos map[string]types.WorkspaceInfo, reconfigureEnabled bool) {
 	indent := strings.Repeat("  ", level)
 	agentStatus := workspaceAgentStatus(workspaceInfos, mergedName)
 	statusText := workspaceStatusPreview(workspaceInfos, mergedName, 72)
@@ -182,10 +194,7 @@ func printLeaf(level int, label, mergedName string, sessionByWorkspace map[strin
 		}
 		fmt.Println()
 	} else {
-		tmuxStatus := "offline"
-		if agentStatus != "offline" {
-			tmuxStatus = "no-session"
-		}
+		tmuxStatus := reconfigureStatusTmuxState(agentStatus, reconfigureEnabled)
 		fmt.Printf("%s○ %-26s %-10s %-8s", indent, label, tmuxStatus, agentStatus)
 		if statusText != "" {
 			fmt.Printf(" %s", statusText)
