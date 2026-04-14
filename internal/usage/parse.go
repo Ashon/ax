@@ -9,11 +9,13 @@ import (
 // are ignored by encoding/json by default, which makes the parser
 // resilient to Claude Code format drift.
 type rawRecord struct {
-	Type      string      `json:"type"`
-	Timestamp time.Time   `json:"timestamp"`
-	SessionID string      `json:"sessionId"`
-	Cwd       string      `json:"cwd"`
-	Message   *rawMessage `json:"message"`
+	Type       string         `json:"type"`
+	Timestamp  time.Time      `json:"timestamp"`
+	SessionID  string         `json:"sessionId"`
+	Cwd        string         `json:"cwd"`
+	AgentID    string         `json:"agentId"`
+	Attachment *rawAttachment `json:"attachment"`
+	Message    *rawMessage    `json:"message"`
 }
 
 type rawMessage struct {
@@ -27,6 +29,11 @@ type rawUsage struct {
 	Output        int64 `json:"output_tokens"`
 	CacheRead     int64 `json:"cache_read_input_tokens"`
 	CacheCreation int64 `json:"cache_creation_input_tokens"`
+}
+
+type rawAttachment struct {
+	Type        string   `json:"type"`
+	AddedBlocks []string `json:"addedBlocks"`
 }
 
 // parsedRecord is the normalized form the Aggregator consumes. Lines
@@ -45,10 +52,22 @@ type parsedRecord struct {
 // an error only on malformed JSON; records with no usage payload yield
 // parsedRecord{HasUsage: false, ...} and no error.
 func parseLine(data []byte) (parsedRecord, error) {
-	var r rawRecord
-	if err := json.Unmarshal(data, &r); err != nil {
+	r, err := decodeRawRecord(data)
+	if err != nil {
 		return parsedRecord{}, err
 	}
+	return parsedRecordFromRaw(r), nil
+}
+
+func decodeRawRecord(data []byte) (rawRecord, error) {
+	var r rawRecord
+	if err := json.Unmarshal(data, &r); err != nil {
+		return rawRecord{}, err
+	}
+	return r, nil
+}
+
+func parsedRecordFromRaw(r rawRecord) parsedRecord {
 	p := parsedRecord{
 		SessionID: r.SessionID,
 		Cwd:       r.Cwd,
@@ -64,5 +83,5 @@ func parseLine(data []byte) (parsedRecord, error) {
 		}
 		p.HasUsage = true
 	}
-	return p, nil
+	return p
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	"github.com/ashon/ax/internal/daemon"
 	"github.com/mark3labs/mcp-go/server"
@@ -19,6 +20,15 @@ func Run(workspace, socketPath, configPath string) error {
 
 	// Connect to daemon
 	client := NewDaemonClient(socketPath, workspace)
+	if dir, err := os.Getwd(); err == nil {
+		description := ""
+		if _, cfg, err := loadToolConfig(client, configPath); err == nil {
+			if ws, ok := cfg.Workspaces[workspace]; ok {
+				description = strings.TrimSpace(ws.Description)
+			}
+		}
+		client.SetRegistrationInfo(dir, description)
+	}
 	if err := client.Connect(); err != nil {
 		return fmt.Errorf("connect to daemon: %w", err)
 	}

@@ -13,12 +13,17 @@ import (
 	"github.com/google/uuid"
 )
 
+// TaskStore owns persistent task state for the daemon and returns defensive
+// copies so callers cannot mutate the in-memory store without going through its
+// validation rules.
 type TaskStore struct {
 	mu       sync.RWMutex
 	tasks    map[string]*types.Task
 	filePath string
 }
 
+// NewTaskStore creates a persistent task store rooted in the daemon state dir.
+// Tasks are serialized to tasks.json under that directory.
 func NewTaskStore(stateDir string) *TaskStore {
 	return &TaskStore{
 		tasks:    make(map[string]*types.Task),
@@ -26,6 +31,8 @@ func NewTaskStore(stateDir string) *TaskStore {
 	}
 }
 
+// Load rehydrates tasks from disk. A missing or empty tasks file is treated as
+// an empty store.
 func (s *TaskStore) Load() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -64,6 +71,8 @@ func TasksFilePath(socketPath string) string {
 	return filepath.Join(filepath.Dir(ExpandSocketPath(socketPath)), "tasks.json")
 }
 
+// Create inserts a new pending task, applying default start mode and priority
+// when omitted, and persists the updated store before returning the live task.
 func (s *TaskStore) Create(title, description, assignee, createdBy string, startMode types.TaskStartMode, priority types.TaskPriority, staleAfterSeconds int) *types.Task {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -94,6 +103,7 @@ func (s *TaskStore) Create(title, description, assignee, createdBy string, start
 	return task
 }
 
+// Get returns a defensive copy of the task with the given ID.
 func (s *TaskStore) Get(id string) (*types.Task, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -107,6 +117,8 @@ func (s *TaskStore) Get(id string) (*types.Task, bool) {
 	return &cp, true
 }
 
+// Update validates the caller, applies status/result/log changes, suppresses
+// duplicate no-op status logs, and persists only when the task actually changed.
 func (s *TaskStore) Update(id string, status *types.TaskStatus, result *string, logMsg *string, workspace string) (*types.Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -154,6 +166,8 @@ func (s *TaskStore) Update(id string, status *types.TaskStatus, result *string, 
 	return &cp, nil
 }
 
+// List returns defensive copies of tasks filtered by assignee, creator, and
+// status when those filters are provided.
 func (s *TaskStore) List(assignee, createdBy string, status *types.TaskStatus) []types.Task {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -192,6 +206,8 @@ func (s *TaskStore) persist() {
 	_ = writeFileAtomic(s.filePath, data, 0o600)
 }
 
+// Snapshot returns copies of every stored task without applying additional
+// enrichment.
 func (s *TaskStore) Snapshot() []types.Task {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -206,6 +222,8 @@ func (s *TaskStore) Snapshot() []types.Task {
 	return result
 }
 
+// Refresh rewrites every stored task through transform and persists the updated
+// snapshots. Daemon observability fields are refreshed through this hook.
 func (s *TaskStore) Refresh(transform func(types.Task) types.Task) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
