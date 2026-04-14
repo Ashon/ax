@@ -327,6 +327,109 @@ func TestDaemonSuppressesDuplicateNoOpMessagesWithinWindow(t *testing.T) {
 	}
 }
 
+func TestDaemonSuppressesNoOpStatusChatterWithinWindow(t *testing.T) {
+	socketPath, cancel := startTestDaemon(t)
+	defer cancel()
+
+	conn1, scanner1 := connectAndRegister(t, socketPath, "orchestrator")
+	defer conn1.Close()
+
+	conn2, scanner2 := connectAndRegister(t, socketPath, "worker")
+	defer conn2.Close()
+
+	// First "ack" goes through normally.
+	firstEnv, _ := daemon.NewEnvelope("noop-1", daemon.MsgSendMessage, &daemon.SendMessagePayload{
+		To:      "worker",
+		Message: "ack",
+	})
+	resp1 := sendAndRead(t, conn1, scanner1, firstEnv)
+	if resp1.Type != daemon.MsgResponse {
+		t.Fatalf("expected first message to be accepted, got %s", resp1.Type)
+	}
+	if !scanner2.Scan() {
+		t.Fatal("expected push notification for first message")
+	}
+
+	// Second message is a different no-op status phrase but should be
+	// suppressed because there is already recent chatter from -> to.
+	secondEnv, _ := daemon.NewEnvelope("noop-2", daemon.MsgSendMessage, &daemon.SendMessagePayload{
+		To:      "worker",
+		Message: "still working on it",
+	})
+	resp2 := sendAndRead(t, conn1, scanner1, secondEnv)
+	if resp2.Type != daemon.MsgResponse {
+		t.Fatalf("expected second response, got %s", resp2.Type)
+	}
+
+	var payload daemon.ResponsePayload
+	resp2.DecodePayload(&payload)
+	var result map[string]string
+	if err := json.Unmarshal(payload.Data, &result); err != nil {
+		t.Fatalf("unmarshal suppressed response: %v", err)
+	}
+	if result["status"] != "suppressed" {
+		t.Fatalf("expected no-op chatter to be suppressed, got %#v", result)
+	}
+
+	readEnv, _ := daemon.NewEnvelope("read-noop", daemon.MsgReadMessages, &daemon.ReadMessagesPayload{Limit: 10})
+	readResp := sendAndRead(t, conn2, scanner2, readEnv)
+	var readPayload daemon.ResponsePayload
+	readResp.DecodePayload(&readPayload)
+	var readMessages daemon.ReadMessagesResponse
+	if err := json.Unmarshal(readPayload.Data, &readMessages); err != nil {
+		t.Fatalf("unmarshal read messages: %v", err)
+	}
+	if len(readMessages.Messages) != 1 {
+		t.Fatalf("expected only the first message delivered, got %d", len(readMessages.Messages))
+	}
+	if readMessages.Messages[0].Content != "ack" {
+		t.Fatalf("expected first ack delivered, got %q", readMessages.Messages[0].Content)
+	}
+}
+
+func TestDaemonDoesNotSuppressMeaningfulFollowUp(t *testing.T) {
+	socketPath, cancel := startTestDaemon(t)
+	defer cancel()
+
+	conn1, scanner1 := connectAndRegister(t, socketPath, "orchestrator")
+	defer conn1.Close()
+
+	conn2, scanner2 := connectAndRegister(t, socketPath, "worker")
+	defer conn2.Close()
+
+	firstEnv, _ := daemon.NewEnvelope("real-1", daemon.MsgSendMessage, &daemon.SendMessagePayload{
+		To:      "worker",
+		Message: "ack",
+	})
+	if resp := sendAndRead(t, conn1, scanner1, firstEnv); resp.Type != daemon.MsgResponse {
+		t.Fatalf("expected first response, got %s", resp.Type)
+	}
+	if !scanner2.Scan() {
+		t.Fatal("expected first push notification")
+	}
+
+	// A real instruction must NOT be suppressed even within the window.
+	followEnv, _ := daemon.NewEnvelope("real-2", daemon.MsgSendMessage, &daemon.SendMessagePayload{
+		To:      "worker",
+		Message: "Please regenerate the API client from openapi.yaml and run the integration suite.",
+	})
+	resp := sendAndRead(t, conn1, scanner1, followEnv)
+	if resp.Type != daemon.MsgResponse {
+		t.Fatalf("expected response, got %s", resp.Type)
+	}
+	var payload daemon.ResponsePayload
+	resp.DecodePayload(&payload)
+	var result map[string]string
+	_ = json.Unmarshal(payload.Data, &result)
+	if result["status"] == "suppressed" {
+		t.Fatalf("real follow-up instruction was incorrectly suppressed: %#v", result)
+	}
+
+	if !scanner2.Scan() {
+		t.Fatal("expected second push notification for real instruction")
+	}
+}
+
 func TestDaemonDoesNotSuppressTaskDispatchMessages(t *testing.T) {
 	socketPath, cancel := startTestDaemon(t)
 	defer cancel()
@@ -469,6 +572,64 @@ func TestDaemonReconnectPreservesLatestWorkspaceRegistration(t *testing.T) {
 			t.Fatalf("expected reconnect to preserve one active worker registration, got %+v", listResp.Workspaces)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestDaemonBroadcastDoesNotStallOnSlowReceiver verifies that one stalled
+// recipient (a registered workspace whose process never reads its socket)
+// cannot block the daemon from delivering broadcast pushes to other
+// healthy recipients. Before the per-connection async writer goroutine
+// was introduced, the broadcast loop performed synchronous writes while
+// holding the recipient's lock, which could stall the daemon entirely.
+func TestDaemonBroadcastDoesNotStallOnSlowReceiver(t *testing.T) {
+	socketPath, cancel := startTestDaemon(t)
+	defer cancel()
+
+	connOrch, scannerOrch := connectAndRegister(t, socketPath, "orchestrator")
+	defer connOrch.Close()
+
+	// "slow" registers but never reads from its socket, simulating an
+	// unresponsive worker.
+	connSlow, _ := connectAndRegister(t, socketPath, "slow")
+	defer connSlow.Close()
+
+	connFast, scannerFast := connectAndRegister(t, socketPath, "fast")
+	defer connFast.Close()
+
+	broadcastEnv, _ := daemon.NewEnvelope("bcast-1", daemon.MsgBroadcast, &daemon.BroadcastPayload{
+		Message: "deploy v2 starting",
+	})
+
+	done := make(chan *daemon.Envelope, 1)
+	go func() {
+		done <- sendAndRead(t, connOrch, scannerOrch, broadcastEnv)
+	}()
+
+	select {
+	case resp := <-done:
+		if resp.Type != daemon.MsgResponse {
+			t.Fatalf("expected broadcast response, got %s", resp.Type)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("broadcast send blocked on slow receiver")
+	}
+
+	// The fast worker must still receive its broadcast push promptly.
+	pushDone := make(chan daemon.Envelope, 1)
+	go func() {
+		if scannerFast.Scan() {
+			var env daemon.Envelope
+			_ = json.Unmarshal(scannerFast.Bytes(), &env)
+			pushDone <- env
+		}
+	}()
+	select {
+	case env := <-pushDone:
+		if env.Type != daemon.MsgPushMessage {
+			t.Fatalf("expected push_message to fast worker, got %s", env.Type)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("fast worker did not receive broadcast push in time")
 	}
 }
 

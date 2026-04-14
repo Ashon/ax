@@ -50,6 +50,7 @@ func New(socketPath string) *Daemon {
 	stateDir := filepath.Dir(sp)
 	logger := log.New(os.Stderr, "[ax-daemon] ", log.LstdFlags)
 	queue := NewPersistentMessageQueue(stateDir)
+	queue.SetLogger(logger)
 	if err := queue.Load(); err != nil {
 		logger.Printf("load queue state: %v", err)
 	}
@@ -143,11 +144,11 @@ func (d *Daemon) handleConn(conn net.Conn) {
 		if err != nil {
 			d.logger.Printf("handle error [%s]: %v", env.Type, err)
 			errEnv, _ := NewErrorEnvelope(env.ID, err.Error())
-			d.writeEnvelope(conn, errEnv)
+			d.dispatchResponse(conn, workspace, errEnv)
 			continue
 		}
 		if resp != nil {
-			d.writeEnvelope(conn, resp)
+			d.dispatchResponse(conn, workspace, resp)
 		}
 	}
 
@@ -162,6 +163,24 @@ func (d *Daemon) handleConn(conn net.Conn) {
 	}
 }
 
+// dispatchResponse routes a synchronous response back to the originating
+// connection. When the connection is registered, the response is queued on
+// the connection's writer goroutine so it cannot interleave with concurrent
+// push notifications. Otherwise we fall back to a direct, deadlined write.
+func (d *Daemon) dispatchResponse(conn net.Conn, workspace string, env *Envelope) {
+	if workspace != "" {
+		if entry, ok := d.registry.Get(workspace); ok && entry.Conn() == conn {
+			if !entry.Send(env, 5*time.Second) {
+				d.logger.Printf("response to %q dropped (writer closed or busy)", workspace)
+			}
+			return
+		}
+	}
+	if err := writeEnvelopeSync(conn, env); err != nil {
+		d.logger.Printf("write response failed: %v", err)
+	}
+}
+
 func (d *Daemon) handleEnvelope(conn net.Conn, env *Envelope, workspace *string) (*Envelope, error) {
 	switch env.Type {
 	case MsgRegister:
@@ -170,10 +189,12 @@ func (d *Daemon) handleEnvelope(conn net.Conn, env *Envelope, workspace *string)
 			return nil, fmt.Errorf("decode register: %w", err)
 		}
 		*workspace = p.Workspace
-		previousConn := d.registry.Register(p.Workspace, p.Dir, p.Description, conn)
-		if previousConn != nil {
+		entry, previous := d.registry.Register(p.Workspace, p.Dir, p.Description, conn)
+		d.startConnWriter(entry)
+		if previous != nil {
 			d.logger.Printf("workspace %q re-registered; closing previous connection", p.Workspace)
-			_ = previousConn.Close()
+			previous.Close()
+			_ = previous.Conn().Close()
 		}
 		d.refreshTaskSnapshots()
 		d.logger.Printf("registered workspace %q", p.Workspace)
@@ -213,12 +234,13 @@ func (d *Daemon) handleEnvelope(conn net.Conn, env *Envelope, workspace *string)
 		d.history.Append(*workspace, p.To, p.Message)
 		d.logger.Printf("message %s -> %s: %s", *workspace, p.To, truncate(p.Message, 50))
 
-		// Try to push notification to target
+		// Try to push notification to target via its writer goroutine.
+		// On failure, the wake scheduler retry below still covers delivery.
 		if entry, ok := d.registry.Get(p.To); ok {
 			pushEnv, _ := NewEnvelope("", MsgPushMessage, &msg)
-			entry.mu.Lock()
-			d.writeEnvelope(entry.conn, pushEnv)
-			entry.mu.Unlock()
+			if !entry.Send(pushEnv, 100*time.Millisecond) {
+				d.logger.Printf("push to %q dropped (outbox full or closed); wake scheduler will retry", p.To)
+			}
 		}
 
 		// Schedule wake retry for the target workspace
@@ -252,13 +274,15 @@ func (d *Daemon) handleEnvelope(conn net.Conn, env *Envelope, workspace *string)
 			d.history.Append(*workspace, ws.Name, p.Message)
 			recipients = append(recipients, ws.Name)
 
-			// Push notification
+			// Push notification (non-blocking; wake scheduler is the
+			// retry safety net if the target's outbox is full).
 			if entry, ok := d.registry.Get(ws.Name); ok {
 				pushEnv, _ := NewEnvelope("", MsgPushMessage, &msg)
-				entry.mu.Lock()
-				d.writeEnvelope(entry.conn, pushEnv)
-				entry.mu.Unlock()
+				if !entry.Send(pushEnv, 100*time.Millisecond) {
+					d.logger.Printf("broadcast push to %q dropped (outbox full or closed)", ws.Name)
+				}
 			}
+			d.wakeScheduler.Schedule(ws.Name, *workspace)
 		}
 		d.refreshTaskSnapshots()
 		return NewResponseEnvelope(env.ID, map[string]interface{}{
@@ -410,14 +434,52 @@ func (d *Daemon) handleEnvelope(conn net.Conn, env *Envelope, workspace *string)
 	}
 }
 
-func (d *Daemon) writeEnvelope(conn net.Conn, env *Envelope) {
+// writeDeadline bounds how long a single Write to a connection may block
+// before being treated as a failure. Slow receivers cannot stall the
+// daemon for longer than this.
+const writeDeadline = 5 * time.Second
+
+// writeEnvelopeSync marshals and writes a single envelope to conn with a
+// bounded deadline. It is the only place that touches the underlying
+// socket for outbound traffic; both the per-connection writer goroutine
+// and the early (pre-registration) response path go through it.
+func writeEnvelopeSync(conn net.Conn, env *Envelope) error {
 	data, err := json.Marshal(env)
 	if err != nil {
-		d.logger.Printf("marshal error: %v", err)
-		return
+		return fmt.Errorf("marshal envelope: %w", err)
 	}
 	data = append(data, '\n')
-	conn.Write(data)
+	if err := conn.SetWriteDeadline(time.Now().Add(writeDeadline)); err != nil {
+		// Some net.Conn implementations don't support deadlines; fall
+		// through and attempt the write anyway.
+		_ = err
+	}
+	if _, err := conn.Write(data); err != nil {
+		return fmt.Errorf("write envelope: %w", err)
+	}
+	return nil
+}
+
+// startConnWriter spawns a goroutine that owns all asynchronous writes
+// for a single connection entry. The writer drains the entry's outbox
+// until the entry is closed; on any write error it closes the underlying
+// connection so handleConn observes the disconnect and cleans up.
+func (d *Daemon) startConnWriter(entry *connEntry) {
+	go func() {
+		for {
+			select {
+			case <-entry.closeCh:
+				return
+			case env := <-entry.outbox:
+				if err := writeEnvelopeSync(entry.conn, env); err != nil {
+					d.logger.Printf("write to %q failed: %v", entry.info.Name, err)
+					entry.Close()
+					_ = entry.conn.Close()
+					return
+				}
+			}
+		}
+	}()
 }
 
 func truncate(s string, n int) string {
@@ -582,11 +644,10 @@ func (d *Daemon) shouldSuppressDuplicateMessage(from, to, content string) bool {
 		}
 	}
 
-	if !looksLikeNoOpStatusMessage(normalized) {
-		return false
-	}
-
-	return false
+	// Even when the new message isn't an exact duplicate, suppress no-op
+	// status chatter (e.g. "ack", "on it", "still working") if the sender
+	// already pinged the same recipient within the suppression window.
+	return looksLikeNoOpStatusMessage(normalized)
 }
 
 func normalizeMessageForSuppression(content string) string {
@@ -643,7 +704,7 @@ func persistSharedValues(path string, values map[string]string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	return writeFileAtomic(path, data, 0o600)
 }
 
 func copySharedValues(values map[string]string) map[string]string {
