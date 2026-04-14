@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
+	"sort"
 	"sync"
 	"sync/atomic"
 
@@ -21,7 +23,7 @@ type DaemonClient struct {
 	writeMu    sync.Mutex
 
 	// Pending request tracking
-	pending   map[string]chan *daemon.Envelope
+	pending   map[string]chan requestResult
 	pendingMu sync.Mutex
 
 	// Push message buffer
@@ -29,13 +31,21 @@ type DaemonClient struct {
 	pushMu       sync.Mutex
 
 	connected atomic.Bool
+
+	disconnectMu  sync.RWMutex
+	disconnectErr error
+}
+
+type requestResult struct {
+	env *daemon.Envelope
+	err error
 }
 
 func NewDaemonClient(socketPath, workspace string) *DaemonClient {
 	return &DaemonClient{
 		socketPath: daemon.ExpandSocketPath(socketPath),
 		workspace:  workspace,
-		pending:    make(map[string]chan *daemon.Envelope),
+		pending:    make(map[string]chan requestResult),
 	}
 }
 
@@ -45,6 +55,7 @@ func (c *DaemonClient) Connect() error {
 		return fmt.Errorf("connect to daemon: %w", err)
 	}
 	c.conn = conn
+	c.setDisconnectErr(nil)
 	c.connected.Store(true)
 
 	// Start reader goroutine
@@ -94,17 +105,21 @@ func (c *DaemonClient) readLoop() {
 			// Response to a pending request
 			c.pendingMu.Lock()
 			if ch, ok := c.pending[env.ID]; ok {
-				ch <- &env
+				ch <- requestResult{env: &env}
 				delete(c.pending, env.ID)
 			}
 			c.pendingMu.Unlock()
 		}
 	}
 
-	c.connected.Store(false)
+	c.markDisconnected(scanner.Err())
 }
 
 func (c *DaemonClient) sendRequest(msgType daemon.MessageType, payload any) (*daemon.Envelope, error) {
+	if !c.connected.Load() {
+		return nil, c.disconnectError()
+	}
+
 	id := uuid.New().String()
 	env, err := daemon.NewEnvelope(id, msgType, payload)
 	if err != nil {
@@ -112,7 +127,7 @@ func (c *DaemonClient) sendRequest(msgType daemon.MessageType, payload any) (*da
 	}
 
 	// Create response channel
-	ch := make(chan *daemon.Envelope, 1)
+	ch := make(chan requestResult, 1)
 	c.pendingMu.Lock()
 	c.pending[id] = ch
 	c.pendingMu.Unlock()
@@ -136,7 +151,11 @@ func (c *DaemonClient) sendRequest(msgType daemon.MessageType, payload any) (*da
 	}
 
 	// Wait for response
-	resp := <-ch
+	result := <-ch
+	if result.err != nil {
+		return nil, result.err
+	}
+	resp := result.env
 	if resp.Type == daemon.MsgError {
 		var errPayload daemon.ErrorPayload
 		resp.DecodePayload(&errPayload)
@@ -146,21 +165,69 @@ func (c *DaemonClient) sendRequest(msgType daemon.MessageType, payload any) (*da
 	return resp, nil
 }
 
+func (c *DaemonClient) markDisconnected(err error) {
+	c.connected.Store(false)
+	disconnectErr := normalizeDisconnectError(err)
+	c.setDisconnectErr(disconnectErr)
+
+	c.pendingMu.Lock()
+	pending := c.pending
+	c.pending = make(map[string]chan requestResult)
+	c.pendingMu.Unlock()
+
+	for _, ch := range pending {
+		ch <- requestResult{err: disconnectErr}
+	}
+}
+
+func normalizeDisconnectError(err error) error {
+	if err == nil {
+		err = io.EOF
+	}
+	return fmt.Errorf("daemon connection closed: %w", err)
+}
+
+func (c *DaemonClient) disconnectError() error {
+	c.disconnectMu.RLock()
+	defer c.disconnectMu.RUnlock()
+	if c.disconnectErr != nil {
+		return c.disconnectErr
+	}
+	return normalizeDisconnectError(nil)
+}
+
+func (c *DaemonClient) setDisconnectErr(err error) {
+	c.disconnectMu.Lock()
+	defer c.disconnectMu.Unlock()
+	c.disconnectErr = err
+}
+
 // High-level operations
 
-func (c *DaemonClient) SendMessage(to, message string) (string, error) {
+type SendMessageResult struct {
+	MessageID  string
+	Status     string
+	Suppressed bool
+}
+
+func (c *DaemonClient) SendMessage(to, message string) (*SendMessageResult, error) {
 	resp, err := c.sendRequest(daemon.MsgSendMessage, &daemon.SendMessagePayload{
 		To:      to,
 		Message: message,
 	})
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	var result map[string]string
 	var respPayload daemon.ResponsePayload
 	resp.DecodePayload(&respPayload)
 	json.Unmarshal(respPayload.Data, &result)
-	return result["message_id"], nil
+	sendResult := &SendMessageResult{
+		MessageID: result["message_id"],
+		Status:    result["status"],
+	}
+	sendResult.Suppressed = sendResult.Status == "suppressed"
+	return sendResult, nil
 }
 
 func (c *DaemonClient) ReadMessages(limit int, from string) ([]types.Message, error) {
@@ -176,14 +243,59 @@ func (c *DaemonClient) ReadMessages(limit int, from string) ([]types.Message, er
 	var result daemon.ReadMessagesResponse
 	json.Unmarshal(respPayload.Data, &result)
 
-	// Also include any pushed messages
+	// Also include any pushed messages while preserving unmatched buffered pushes
+	// for later calls and avoiding duplicate delivery of the same message ID.
 	c.pushMu.Lock()
-	pushed := c.pushMessages
-	c.pushMessages = nil
+	pushed, remaining := splitBufferedMessages(c.pushMessages, from)
+	c.pushMessages = remaining
 	c.pushMu.Unlock()
 
-	all := append(pushed, result.Messages...)
-	return all, nil
+	return mergeUniqueMessages(pushed, result.Messages), nil
+}
+
+func splitBufferedMessages(messages []types.Message, from string) ([]types.Message, []types.Message) {
+	if len(messages) == 0 {
+		return nil, nil
+	}
+	matched := make([]types.Message, 0, len(messages))
+	remaining := make([]types.Message, 0, len(messages))
+	for _, msg := range messages {
+		if from != "" && msg.From != from {
+			remaining = append(remaining, msg)
+			continue
+		}
+		matched = append(matched, msg)
+	}
+	return matched, remaining
+}
+
+func mergeUniqueMessages(first, second []types.Message) []types.Message {
+	if len(first) == 0 && len(second) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(first)+len(second))
+	merged := make([]types.Message, 0, len(first)+len(second))
+	appendUnique := func(messages []types.Message) {
+		for _, msg := range messages {
+			if msg.ID != "" {
+				if _, ok := seen[msg.ID]; ok {
+					continue
+				}
+				seen[msg.ID] = struct{}{}
+			}
+			merged = append(merged, msg)
+		}
+	}
+	appendUnique(first)
+	appendUnique(second)
+
+	sort.SliceStable(merged, func(i, j int) bool {
+		if merged[i].CreatedAt.Equal(merged[j].CreatedAt) {
+			return merged[i].ID < merged[j].ID
+		}
+		return merged[i].CreatedAt.Before(merged[j].CreatedAt)
+	})
+	return merged
 }
 
 func (c *DaemonClient) BroadcastMessage(message string) ([]string, error) {
@@ -262,11 +374,14 @@ func (c *DaemonClient) ListSharedValues() (map[string]string, error) {
 
 // Task operations
 
-func (c *DaemonClient) CreateTask(title, description, assignee string) (*types.Task, error) {
+func (c *DaemonClient) CreateTask(title, description, assignee string, startMode types.TaskStartMode, priority types.TaskPriority, staleAfterSeconds int) (*types.Task, error) {
 	resp, err := c.sendRequest(daemon.MsgCreateTask, &daemon.CreateTaskPayload{
-		Title:       title,
-		Description: description,
-		Assignee:    assignee,
+		Title:             title,
+		Description:       description,
+		Assignee:          assignee,
+		StartMode:         string(startMode),
+		Priority:          string(priority),
+		StaleAfterSeconds: staleAfterSeconds,
 	})
 	if err != nil {
 		return nil, err

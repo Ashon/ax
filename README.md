@@ -86,10 +86,11 @@ sudo mv ax /usr/local/bin/
 ```bash
 cd /path/to/your/project
 ax init
+ax init --codex
 ```
 
-Claude가 프로젝트 구조를 분석해 `.ax/config.yaml`을 자동 생성합니다.
-`--no-setup` 플래그로 수동 설정도 가능합니다.
+기본값은 `claude` setup agent입니다. `ax init --codex`를 사용하면 setup agent와 생성되는 기본 워크스페이스 런타임을 `codex`로 맞춥니다.
+`--claude`로 기본값을 명시할 수 있고, `--no-setup` 플래그로 수동 설정도 가능합니다.
 
 ### 2. 워크스페이스 기동
 
@@ -130,6 +131,7 @@ ax down
 
 ```yaml
 project: my-project
+orchestrator_runtime: claude
 
 workspaces:
   frontend:
@@ -160,6 +162,7 @@ workspaces:
 | `dir` | 작업 디렉터리 (상대/절대/`~` 경로) | `.` |
 | `description` | 에이전트 역할 설명 | - |
 | `runtime` | `claude` 또는 `codex` | `claude` |
+| `orchestrator_runtime` | 루트/서브 오케스트레이터 런타임 | `claude` |
 | `instructions` | 에이전트에게 전달할 지시사항 | - |
 | `agent` | 커스텀 에이전트 명령 (`"none"`이면 에이전트 미실행) | - |
 | `shell` | `agent: none` 시 사용할 셸 | - |
@@ -200,8 +203,10 @@ ax init --global
 ### 주요 명령어
 
 ```bash
-ax init                          # 프로젝트 초기화
+ax init                          # 프로젝트 초기화 (기본: claude)
+ax init --codex                  # 프로젝트 초기화 (codex 기반)
 ax up                            # 데몬 + 워크스페이스 기동
+ax refresh                       # MCP/프롬프트 산출물 리프레시
 ax down                          # 전체 종료
 ax status                        # 프로젝트 상태 표시
 ax shell                         # 오케스트레이터 대화 TUI
@@ -222,6 +227,14 @@ ax workspace interrupt <name>    # 에이전트에 Escape 전송
 
 ```bash
 ax send <workspace> <message>    # 메시지 전송 + 에이전트 웨이크
+```
+
+### 설정 산출물 리프레시
+
+```bash
+ax refresh                       # .mcp.json, AGENTS.md/CLAUDE.md, orchestrator 프롬프트 재생성
+ax refresh --start-missing       # 꺼져 있는 configured session도 함께 시작
+ax refresh --restart             # 실행 중 세션까지 재시작해서 런타임 변경 즉시 반영
 ```
 
 ### 데몬 관리

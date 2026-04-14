@@ -21,6 +21,8 @@ import (
 var (
 	initGlobal  bool
 	initNoSetup bool
+	initCodex   bool
+	initClaude  bool
 )
 
 var initCmd = &cobra.Command{
@@ -28,6 +30,10 @@ var initCmd = &cobra.Command{
 	Short: "Initialize .ax/config.yaml (interactively via a setup agent by default)",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		var dir, path, projectName string
+		runtime, err := resolveInitRuntime()
+		if err != nil {
+			return err
+		}
 
 		if initGlobal {
 			home, err := os.UserHomeDir()
@@ -54,7 +60,7 @@ var initCmd = &cobra.Command{
 		}
 
 		if !alreadyExists {
-			cfg := config.DefaultConfig(projectName)
+			cfg := config.DefaultConfigForRuntime(projectName, runtime)
 			if err := cfg.Save(path); err != nil {
 				return err
 			}
@@ -88,54 +94,100 @@ var initCmd = &cobra.Command{
 		}
 
 		// Launch setup agent to analyze the project and flesh out the config
-		fmt.Println("\nLaunching setup agent (claude)...")
+		fmt.Printf("\nLaunching setup agent (%s)...\n", runtime)
 		fmt.Println("The agent will analyze your project and help define workspaces.")
 		fmt.Println()
-		return runSetupAgent(dir, path)
+		return runSetupAgent(dir, path, runtime)
 	},
 }
 
-func runSetupAgent(projectDir, configPath string) error {
-	systemPrompt := buildSetupSystemPrompt(configPath)
+func runSetupAgent(projectDir, configPath, runtime string) error {
+	systemPrompt := buildSetupSystemPrompt(configPath, runtime)
 	userPrompt := "프로젝트 구조를 파악해서 워크스페이스 구성을 결정하고 config.yaml에 작성해주세요. 작성 완료 후 어떤 워크스페이스를 만들었는지 요약해주세요."
 
-	claudeBin, err := exec.LookPath("claude")
-	if err != nil {
-		fmt.Println("claude CLI not found — skipping setup.")
-		fmt.Printf("Edit %s manually and run: ax up\n", configPath)
+	switch runtime {
+	case "codex":
+		codexBin, err := exec.LookPath("codex")
+		if err != nil {
+			fmt.Println("codex CLI not found — skipping setup.")
+			fmt.Printf("Edit %s manually and run: ax up\n", configPath)
+			return nil
+		}
+
+		prompt := systemPrompt + "\n\n## 사용자 요청\n" + userPrompt
+		cmd := exec.Command(codexBin,
+			"exec",
+			"--dangerously-bypass-approvals-and-sandbox",
+			"--skip-git-repo-check",
+			"-C", projectDir,
+			prompt,
+		)
+		cmd.Dir = projectDir
+		cmd.Stdin = nil
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("start codex: %w", err)
+		}
 		return nil
-	}
 
-	cmd := exec.Command(claudeBin,
-		"-p",
-		"--dangerously-skip-permissions",
-		"--output-format", "stream-json",
-		"--verbose",
-		"--append-system-prompt", systemPrompt,
-		userPrompt,
-	)
-	cmd.Dir = projectDir
-	cmd.Stdin = nil
-	cmd.Stderr = os.Stderr
+	default:
+		claudeBin, err := exec.LookPath("claude")
+		if err != nil {
+			fmt.Println("claude CLI not found — skipping setup.")
+			fmt.Printf("Edit %s manually and run: ax up\n", configPath)
+			return nil
+		}
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("stdout pipe: %w", err)
-	}
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start claude: %w", err)
-	}
+		cmd := exec.Command(claudeBin,
+			"-p",
+			"--dangerously-skip-permissions",
+			"--output-format", "stream-json",
+			"--verbose",
+			"--append-system-prompt", systemPrompt,
+			userPrompt,
+		)
+		cmd.Dir = projectDir
+		cmd.Stdin = nil
+		cmd.Stderr = os.Stderr
 
-	finalText, uiErr := streamClaudeOutput(stdout)
-	waitErr := cmd.Wait()
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			return fmt.Errorf("stdout pipe: %w", err)
+		}
+		if err := cmd.Start(); err != nil {
+			return fmt.Errorf("start claude: %w", err)
+		}
 
-	if finalText != "" {
-		fmt.Println(finalText)
+		finalText, uiErr := streamClaudeOutput(stdout)
+		waitErr := cmd.Wait()
+
+		if finalText != "" {
+			fmt.Println(finalText)
+		}
+		if uiErr != nil {
+			return uiErr
+		}
+		return waitErr
 	}
-	if uiErr != nil {
-		return uiErr
+}
+
+func resolveInitRuntime() (string, error) {
+	if initCodex && initClaude {
+		return "", fmt.Errorf("--codex and --claude cannot be used together")
 	}
-	return waitErr
+	if initCodex {
+		return "codex", nil
+	}
+	return "claude", nil
+}
+
+func init() {
+	rootCmd.AddCommand(initCmd)
+	initCmd.Flags().BoolVarP(&initGlobal, "global", "g", false, "initialize global config at ~/.ax/config.yaml")
+	initCmd.Flags().BoolVar(&initNoSetup, "no-setup", false, "create a stub config only; skip setup agent")
+	initCmd.Flags().BoolVar(&initCodex, "codex", false, "initialize config and setup agent for Codex")
+	initCmd.Flags().BoolVar(&initClaude, "claude", false, "initialize config and setup agent for Claude (default)")
 }
 
 // streamClaudeOutput runs a bubbletea spinner UI while parsing
@@ -310,7 +362,7 @@ func shortPath(p string) string {
 	return p
 }
 
-func buildSetupSystemPrompt(configPath string) string {
+func buildSetupSystemPrompt(configPath, runtime string) string {
 	return fmt.Sprintf(`당신은 ax 프로젝트 셋업 에이전트입니다. 사용자가 요청하면 현재 디렉토리의 프로젝트를 분석해서 멀티 에이전트 워크스페이스 구성을 제안하고 %s 파일을 편집하세요.
 
 ## 절차
@@ -326,7 +378,7 @@ workspaces:
   <name>:
     dir: <프로젝트 루트 기준 상대 경로>
     description: <해당 에이전트의 역할 한 문장>
-    runtime: claude  # 또는 codex
+    runtime: %s
     instructions: |
       <해당 워크스페이스 에이전트가 받을 지침 — 무엇을 해야 하는지, 어떤 파일을 건드려야 하는지 등>
 ` + "```" + `
@@ -334,8 +386,9 @@ workspaces:
 ## 주의사항
 - 워크스페이스 이름은 kebab-case 또는 snake_case로 짧고 명확하게 (예: backend, frontend, infra, docs).
 - description은 한 문장으로 역할을 명확히 설명.
+- 이 초기화에서는 기본 런타임을 %s로 사용하세요.
 - instructions는 구체적으로 작성 — 그 에이전트가 어떤 디렉토리에서 작업하고, 어떤 원칙을 따라야 하는지.
-- 기존 %s 파일은 최소 stub만 있는 상태입니다. workspaces 섹션을 채워주세요.`, configPath, configPath, configPath)
+- 기존 %s 파일은 최소 stub만 있는 상태입니다. workspaces 섹션을 채워주세요.`, configPath, configPath, runtime, runtime, configPath)
 }
 
 // registerAsChild searches upward from dir for an ancestor .ax/config.yaml
@@ -528,10 +581,4 @@ func configPathExists(path string) (string, bool) {
 		return path, true
 	}
 	return "", false
-}
-
-func init() {
-	initCmd.Flags().BoolVarP(&initGlobal, "global", "g", false, "initialize global config at ~/.ax/config.yaml")
-	initCmd.Flags().BoolVar(&initNoSetup, "no-setup", false, "skip the interactive setup agent")
-	rootCmd.AddCommand(initCmd)
 }

@@ -75,16 +75,19 @@ type GetSharedPayload struct {
 // Task payloads
 
 type CreateTaskPayload struct {
-	Title       string `json:"title"`
-	Description string `json:"description,omitempty"`
-	Assignee    string `json:"assignee"`
+	Title             string `json:"title"`
+	Description       string `json:"description,omitempty"`
+	Assignee          string `json:"assignee"`
+	StartMode         string `json:"start_mode,omitempty"`
+	Priority          string `json:"priority,omitempty"`
+	StaleAfterSeconds int    `json:"stale_after_seconds,omitempty"`
 }
 
 type UpdateTaskPayload struct {
-	ID     string           `json:"id"`
+	ID     string            `json:"id"`
 	Status *types.TaskStatus `json:"status,omitempty"`
-	Result *string          `json:"result,omitempty"`
-	Log    *string          `json:"log,omitempty"`
+	Result *string           `json:"result,omitempty"`
+	Log    *string           `json:"log,omitempty"`
 }
 
 type GetTaskPayload struct {
@@ -92,8 +95,8 @@ type GetTaskPayload struct {
 }
 
 type ListTasksPayload struct {
-	Assignee  string           `json:"assignee,omitempty"`
-	CreatedBy string           `json:"created_by,omitempty"`
+	Assignee  string            `json:"assignee,omitempty"`
+	CreatedBy string            `json:"created_by,omitempty"`
 	Status    *types.TaskStatus `json:"status,omitempty"`
 }
 

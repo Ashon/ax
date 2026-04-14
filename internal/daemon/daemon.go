@@ -9,10 +9,19 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"sync"
+	"time"
+
+	"github.com/ashon/ax/internal/types"
 )
 
 const DefaultSocketPath = "~/.local/state/ax/daemon.sock"
+
+const duplicateSuppressionWindow = 15 * time.Second
+
+var duplicateNoOpPattern = regexp.MustCompile(`(?i)\b(ack|acked|acknowledged|received|noted|thanks?|thank you|roger|copy that|working on it|on it|looking into it|in progress|still working|status|no update|no-op|noop|same update|same status)\b`)
 
 func ExpandSocketPath(path string) string {
 	if len(path) > 0 && path[0] == '~' {
@@ -28,6 +37,7 @@ type Daemon struct {
 	queue         *MessageQueue
 	history       *History
 	sharedValues  map[string]string
+	sharedPath    string
 	sharedMu      sync.RWMutex
 	taskStore     *TaskStore
 	wakeScheduler *WakeScheduler
@@ -39,14 +49,32 @@ func New(socketPath string) *Daemon {
 	sp := ExpandSocketPath(socketPath)
 	stateDir := filepath.Dir(sp)
 	logger := log.New(os.Stderr, "[ax-daemon] ", log.LstdFlags)
-	queue := NewMessageQueue()
+	queue := NewPersistentMessageQueue(stateDir)
+	if err := queue.Load(); err != nil {
+		logger.Printf("load queue state: %v", err)
+	}
+	history := NewHistory(stateDir, 500)
+	if err := history.Load(); err != nil {
+		logger.Printf("load history state: %v", err)
+	}
+	taskStore := NewTaskStore(stateDir)
+	if err := taskStore.Load(); err != nil {
+		logger.Printf("load task state: %v", err)
+	}
+	sharedPath := filepath.Join(stateDir, "shared_values.json")
+	sharedValues, err := loadSharedValues(sharedPath)
+	if err != nil {
+		logger.Printf("load shared values: %v", err)
+		sharedValues = make(map[string]string)
+	}
 	return &Daemon{
 		socketPath:    sp,
 		registry:      NewRegistry(),
 		queue:         queue,
-		history:       NewHistory(stateDir, 500),
-		sharedValues:  make(map[string]string),
-		taskStore:     NewTaskStore(stateDir),
+		history:       history,
+		sharedValues:  sharedValues,
+		sharedPath:    sharedPath,
+		taskStore:     taskStore,
 		wakeScheduler: NewWakeScheduler(queue, logger),
 		logger:        logger,
 	}
@@ -125,8 +153,12 @@ func (d *Daemon) handleConn(conn net.Conn) {
 
 	// Cleanup on disconnect
 	if workspace != "" {
-		d.logger.Printf("workspace %q disconnected", workspace)
-		d.registry.Unregister(workspace)
+		if d.registry.UnregisterIfConn(workspace, conn) {
+			d.logger.Printf("workspace %q disconnected", workspace)
+			d.refreshTaskSnapshots()
+		} else {
+			d.logger.Printf("workspace %q disconnected on stale connection; active registration preserved", workspace)
+		}
 	}
 }
 
@@ -138,14 +170,23 @@ func (d *Daemon) handleEnvelope(conn net.Conn, env *Envelope, workspace *string)
 			return nil, fmt.Errorf("decode register: %w", err)
 		}
 		*workspace = p.Workspace
-		d.registry.Register(p.Workspace, p.Dir, p.Description, conn)
+		previousConn := d.registry.Register(p.Workspace, p.Dir, p.Description, conn)
+		if previousConn != nil {
+			d.logger.Printf("workspace %q re-registered; closing previous connection", p.Workspace)
+			_ = previousConn.Close()
+		}
+		d.refreshTaskSnapshots()
 		d.logger.Printf("registered workspace %q", p.Workspace)
 		return NewResponseEnvelope(env.ID, map[string]string{"status": "registered"})
 
 	case MsgUnregister:
 		if *workspace != "" {
-			d.registry.Unregister(*workspace)
-			d.logger.Printf("unregistered workspace %q", *workspace)
+			if d.registry.UnregisterIfConn(*workspace, conn) {
+				d.refreshTaskSnapshots()
+				d.logger.Printf("unregistered workspace %q", *workspace)
+			} else {
+				d.logger.Printf("ignored unregister for workspace %q from stale connection", *workspace)
+			}
 			*workspace = ""
 		}
 		return NewResponseEnvelope(env.ID, map[string]string{"status": "unregistered"})
@@ -161,6 +202,13 @@ func (d *Daemon) handleEnvelope(conn net.Conn, env *Envelope, workspace *string)
 		if p.To == *workspace {
 			return nil, fmt.Errorf("cannot send message to self")
 		}
+		if d.shouldSuppressDuplicateMessage(*workspace, p.To, p.Message) {
+			d.logger.Printf("suppressed duplicate no-op message %s -> %s: %s", *workspace, p.To, truncate(p.Message, 50))
+			return NewResponseEnvelope(env.ID, map[string]string{
+				"message_id": "",
+				"status":     "suppressed",
+			})
+		}
 		msg := d.queue.Enqueue(*workspace, p.To, p.Message)
 		d.history.Append(*workspace, p.To, p.Message)
 		d.logger.Printf("message %s -> %s: %s", *workspace, p.To, truncate(p.Message, 50))
@@ -175,6 +223,7 @@ func (d *Daemon) handleEnvelope(conn net.Conn, env *Envelope, workspace *string)
 
 		// Schedule wake retry for the target workspace
 		d.wakeScheduler.Schedule(p.To, *workspace)
+		d.refreshTaskSnapshots()
 
 		return NewResponseEnvelope(env.ID, map[string]string{
 			"message_id": msg.ID,
@@ -195,6 +244,10 @@ func (d *Daemon) handleEnvelope(conn net.Conn, env *Envelope, workspace *string)
 			if ws.Name == *workspace {
 				continue
 			}
+			if d.shouldSuppressDuplicateMessage(*workspace, ws.Name, p.Message) {
+				d.logger.Printf("suppressed duplicate no-op broadcast %s -> %s: %s", *workspace, ws.Name, truncate(p.Message, 50))
+				continue
+			}
 			msg := d.queue.Enqueue(*workspace, ws.Name, p.Message)
 			d.history.Append(*workspace, ws.Name, p.Message)
 			recipients = append(recipients, ws.Name)
@@ -207,6 +260,7 @@ func (d *Daemon) handleEnvelope(conn net.Conn, env *Envelope, workspace *string)
 				entry.mu.Unlock()
 			}
 		}
+		d.refreshTaskSnapshots()
 		return NewResponseEnvelope(env.ID, map[string]interface{}{
 			"recipients": recipients,
 			"count":      len(recipients),
@@ -229,6 +283,7 @@ func (d *Daemon) handleEnvelope(conn net.Conn, env *Envelope, workspace *string)
 		if d.queue.PendingCount(*workspace) == 0 {
 			d.wakeScheduler.Cancel(*workspace)
 		}
+		d.refreshTaskSnapshots()
 		return NewResponseEnvelope(env.ID, &ReadMessagesResponse{Messages: messages})
 
 	case MsgListWorkspaces:
@@ -244,6 +299,7 @@ func (d *Daemon) handleEnvelope(conn net.Conn, env *Envelope, workspace *string)
 			return nil, fmt.Errorf("not registered")
 		}
 		d.registry.SetStatus(*workspace, p.Status)
+		d.refreshTaskSnapshots()
 		return NewResponseEnvelope(env.ID, map[string]string{"status": "updated"})
 
 	case MsgSetShared:
@@ -253,7 +309,11 @@ func (d *Daemon) handleEnvelope(conn net.Conn, env *Envelope, workspace *string)
 		}
 		d.sharedMu.Lock()
 		d.sharedValues[p.Key] = p.Value
+		sharedValuesCopy := copySharedValues(d.sharedValues)
 		d.sharedMu.Unlock()
+		if err := persistSharedValues(d.sharedPath, sharedValuesCopy); err != nil {
+			d.logger.Printf("persist shared values: %v", err)
+		}
 		return NewResponseEnvelope(env.ID, map[string]string{"status": "stored"})
 
 	case MsgGetShared:
@@ -283,7 +343,25 @@ func (d *Daemon) handleEnvelope(conn net.Conn, env *Envelope, workspace *string)
 		if *workspace == "" {
 			return nil, fmt.Errorf("not registered")
 		}
-		task := d.taskStore.Create(p.Title, p.Description, p.Assignee, *workspace)
+		startMode := types.TaskStartMode(p.StartMode)
+		switch startMode {
+		case "", types.TaskStartDefault:
+			startMode = types.TaskStartDefault
+		case types.TaskStartFresh:
+		default:
+			return nil, fmt.Errorf("invalid task start mode %q", p.StartMode)
+		}
+		priority := types.TaskPriority(p.Priority)
+		switch priority {
+		case "", types.TaskPriorityNormal:
+			priority = types.TaskPriorityNormal
+		case types.TaskPriorityLow, types.TaskPriorityHigh, types.TaskPriorityUrgent:
+		default:
+			return nil, fmt.Errorf("invalid task priority %q", p.Priority)
+		}
+		task := d.taskStore.Create(p.Title, p.Description, p.Assignee, *workspace, startMode, priority, p.StaleAfterSeconds)
+		d.refreshTaskSnapshots()
+		task, _ = d.taskStore.Get(task.ID)
 		d.logger.Printf("task created: %s (assignee=%s, by=%s)", task.ID, task.Assignee, *workspace)
 		return NewResponseEnvelope(env.ID, &TaskResponse{Task: *task})
 
@@ -299,6 +377,8 @@ func (d *Daemon) handleEnvelope(conn net.Conn, env *Envelope, workspace *string)
 		if err != nil {
 			return nil, err
 		}
+		d.refreshTaskSnapshots()
+		task, _ = d.taskStore.Get(task.ID)
 		d.logger.Printf("task updated: %s (status=%s)", task.ID, task.Status)
 		return NewResponseEnvelope(env.ID, &TaskResponse{Task: *task})
 
@@ -311,7 +391,8 @@ func (d *Daemon) handleEnvelope(conn net.Conn, env *Envelope, workspace *string)
 		if !found {
 			return nil, fmt.Errorf("task %q not found", p.ID)
 		}
-		return NewResponseEnvelope(env.ID, &TaskResponse{Task: *task})
+		enriched := d.enrichTask(*task)
+		return NewResponseEnvelope(env.ID, &TaskResponse{Task: enriched})
 
 	case MsgListTasks:
 		var p ListTasksPayload
@@ -319,6 +400,9 @@ func (d *Daemon) handleEnvelope(conn net.Conn, env *Envelope, workspace *string)
 			return nil, fmt.Errorf("decode list_tasks: %w", err)
 		}
 		tasks := d.taskStore.List(p.Assignee, p.CreatedBy, p.Status)
+		for i := range tasks {
+			tasks[i] = d.enrichTask(tasks[i])
+		}
 		return NewResponseEnvelope(env.ID, &ListTasksResponse{Tasks: tasks})
 
 	default:
@@ -341,4 +425,231 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+func (d *Daemon) refreshTaskSnapshots() {
+	d.taskStore.Refresh(d.enrichTask)
+}
+
+func (d *Daemon) enrichTask(task types.Task) types.Task {
+	task.StaleInfo = d.computeTaskStaleInfo(task)
+	if task.Priority == "" {
+		task.Priority = types.TaskPriorityNormal
+	}
+	return task
+}
+
+func (d *Daemon) computeTaskStaleInfo(task types.Task) *types.TaskStaleInfo {
+	if task.Priority == "" {
+		task.Priority = types.TaskPriorityNormal
+	}
+	if task.Status != types.TaskPending && task.Status != types.TaskInProgress {
+		return nil
+	}
+
+	now := time.Now()
+	lastProgressAt := task.UpdatedAt
+	if len(task.Logs) > 0 {
+		lastProgressAt = task.Logs[len(task.Logs)-1].Timestamp
+	}
+	age := now.Sub(lastProgressAt)
+	if age < 0 {
+		age = 0
+	}
+
+	pendingMessages := d.queue.Pending(task.Assignee)
+	pendingCount := len(pendingMessages)
+	lastMessageAt := d.lastRelevantMessageAt(task, pendingMessages)
+
+	info := &types.TaskStaleInfo{
+		LastProgressAt:  lastProgressAt,
+		AgeSeconds:      int64(age / time.Second),
+		PendingMessages: pendingCount,
+		LastMessageAt:   lastMessageAt,
+	}
+	if d.wakeScheduler != nil {
+		if wakeState, ok := d.wakeScheduler.State(task.Assignee); ok {
+			info.WakePending = true
+			info.WakeAttempts = wakeState.Attempts
+			if !wakeState.NextRetry.IsZero() {
+				nextRetry := wakeState.NextRetry
+				info.NextWakeRetryAt = &nextRetry
+			}
+		}
+	}
+
+	if task.StaleAfterSeconds > 0 && age >= time.Duration(task.StaleAfterSeconds)*time.Second {
+		info.IsStale = true
+		info.Reason = fmt.Sprintf("no task progress update for %s (threshold %ds)", formatTaskAge(age), task.StaleAfterSeconds)
+		info.RecommendedAction = "inspect the assignee workspace and either append a progress log or redispatch/recover the task"
+	}
+
+	switch {
+	case task.Status == types.TaskPending && pendingCount == 0 && len(task.Logs) == 0:
+		info.StateDivergence = true
+		info.StateDivergenceNote = "task is still pending but no queued message remains for the assignee"
+		if info.RecommendedAction == "" {
+			info.RecommendedAction = "redispatch the task or confirm whether the assignee already consumed the request outside the task flow"
+		}
+	case task.Status == types.TaskInProgress && pendingCount > 0:
+		info.StateDivergence = true
+		info.StateDivergenceNote = fmt.Sprintf("task is in_progress while %d pending message(s) still exist for %s", pendingCount, task.Assignee)
+		if info.RecommendedAction == "" {
+			info.RecommendedAction = "check whether the pending inbox backlog or a missed handoff is preventing task completion"
+		}
+	}
+
+	if info.Reason == "" && info.StateDivergence {
+		info.Reason = info.StateDivergenceNote
+	}
+	if info.Reason == "" && pendingCount > 0 {
+		info.Reason = fmt.Sprintf("%d pending message(s) queued for %s", pendingCount, task.Assignee)
+	}
+	if info.RecommendedAction == "" && info.WakePending {
+		info.RecommendedAction = "wait for the scheduled wake retry or inspect the assignee workspace if retries keep failing"
+	}
+	if info.Reason == "" {
+		info.Reason = "awaiting next progress update"
+	}
+	return info
+}
+
+func (d *Daemon) lastRelevantMessageAt(task types.Task, pending []types.Message) *time.Time {
+	var latest *time.Time
+	setLatest := func(ts time.Time) {
+		if latest == nil || ts.After(*latest) {
+			copyTs := ts
+			latest = &copyTs
+		}
+	}
+
+	for _, msg := range pending {
+		setLatest(msg.CreatedAt)
+	}
+	for _, entry := range d.history.Recent(200) {
+		if taskRelatedHistory(entry, task) {
+			setLatest(entry.Timestamp)
+		}
+	}
+	return latest
+}
+
+func taskRelatedHistory(entry HistoryEntry, task types.Task) bool {
+	if strings.Contains(entry.Content, task.ID) {
+		return true
+	}
+	if entry.From == task.CreatedBy && entry.To == task.Assignee {
+		return true
+	}
+	if entry.From == task.Assignee && entry.To == task.CreatedBy {
+		return true
+	}
+	return false
+}
+
+func formatTaskAge(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	}
+}
+
+func (d *Daemon) shouldSuppressDuplicateMessage(from, to, content string) bool {
+	normalized := normalizeMessageForSuppression(content)
+	if normalized == "" {
+		return false
+	}
+
+	recent := d.history.RecentMatching(6, func(entry HistoryEntry) bool {
+		if entry.From != from || entry.To != to {
+			return false
+		}
+		return time.Since(entry.Timestamp) <= duplicateSuppressionWindow
+	})
+	if len(recent) == 0 {
+		return false
+	}
+
+	for _, entry := range recent {
+		if normalizeMessageForSuppression(entry.Content) == normalized {
+			return true
+		}
+	}
+
+	if !looksLikeNoOpStatusMessage(normalized) {
+		return false
+	}
+
+	return false
+}
+
+func normalizeMessageForSuppression(content string) string {
+	trimmed := strings.TrimSpace(strings.ToLower(content))
+	if trimmed == "" {
+		return ""
+	}
+	trimmed = strings.Join(strings.Fields(trimmed), " ")
+	return trimmed
+}
+
+func looksLikeNoOpStatusMessage(normalized string) bool {
+	if len(normalized) > 160 {
+		return false
+	}
+	if strings.Contains(normalized, "task id:") {
+		return false
+	}
+	if strings.Contains(normalized, "\n") {
+		return false
+	}
+	return duplicateNoOpPattern.MatchString(normalized)
+}
+
+func loadSharedValues(path string) (map[string]string, error) {
+	if path == "" {
+		return make(map[string]string), nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return make(map[string]string), nil
+		}
+		return nil, err
+	}
+	if len(data) == 0 {
+		return make(map[string]string), nil
+	}
+	var values map[string]string
+	if err := json.Unmarshal(data, &values); err != nil {
+		return nil, err
+	}
+	if values == nil {
+		values = make(map[string]string)
+	}
+	return values, nil
+}
+
+func persistSharedValues(path string, values map[string]string) error {
+	if path == "" {
+		return nil
+	}
+	data, err := json.Marshal(values)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
+}
+
+func copySharedValues(values map[string]string) map[string]string {
+	copied := make(map[string]string, len(values))
+	for k, v := range values {
+		copied[k] = v
+	}
+	return copied
 }

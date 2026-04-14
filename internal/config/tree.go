@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -12,7 +13,8 @@ import (
 // Each node knows its own workspaces and its child projects so callers
 // can render a tree without flattening workspace names.
 type ProjectNode struct {
-	Name                string
+	Name                string // actual project name from the child config itself
+	Alias               string // mount alias used by the parent children mapping
 	Prefix              string // fully-qualified prefix used for merged names
 	Dir                 string
 	OrchestratorRuntime string
@@ -30,10 +32,23 @@ type WorkspaceRef struct {
 	Instructions string
 }
 
+func (n *ProjectNode) DisplayName() string {
+	if n == nil {
+		return ""
+	}
+	if n.Alias == "" || n.Alias == n.Name {
+		return n.Name
+	}
+	return fmt.Sprintf("%s (%s)", n.Alias, n.Name)
+}
+
 // LoadTree reads a config and recursively walks its children to produce a
 // project tree. Unlike Load, it preserves the hierarchy instead of merging
 // child workspaces into the parent's map.
 func LoadTree(path string) (*ProjectNode, error) {
+	if err := validateConfigTree(path); err != nil {
+		return nil, err
+	}
 	seen := make(map[string]bool)
 	return loadTreeRecursive(path, "", seen)
 }
@@ -41,20 +56,21 @@ func LoadTree(path string) (*ProjectNode, error) {
 func loadTreeRecursive(path, prefix string, seen map[string]bool) (*ProjectNode, error) {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("resolve config path: %w", err)
 	}
 	if seen[absPath] {
-		return nil, nil
+		return nil, fmt.Errorf("%w at %s", ErrCyclicChildren, absPath)
 	}
 	seen[absPath] = true
+	defer delete(seen, absPath)
 
 	data, err := os.ReadFile(absPath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read config %s: %w", absPath, err)
 	}
 	var raw Config
 	if err := yaml.Unmarshal(data, &raw); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("parse config %s: %w", absPath, err)
 	}
 
 	configDir := filepath.Dir(absPath)
@@ -114,10 +130,16 @@ func loadTreeRecursive(path, prefix string, seen map[string]bool) (*ProjectNode,
 			continue
 		}
 		childNode, err := loadTreeRecursive(childPath, childPrefix, seen)
-		if err != nil || childNode == nil {
+		if err != nil {
+			if isStaleMissingChildError(err) {
+				continue
+			}
+			return nil, wrapChildLoadError(name, childDir, err)
+		}
+		if childNode == nil {
 			continue
 		}
-		childNode.Name = name
+		childNode.Alias = name
 		node.Children = append(node.Children, childNode)
 	}
 

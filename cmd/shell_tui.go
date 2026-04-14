@@ -3,17 +3,17 @@ package cmd
 import (
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/ashon/ax/internal/daemon"
 	"github.com/ashon/ax/internal/tmux"
 	"github.com/ashon/ax/internal/types"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 type inputMode int
 
 const (
-	modeInput   inputMode = iota
+	modeInput inputMode = iota
 	modeControl
 )
 
@@ -21,19 +21,23 @@ var modeInputStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("2
 var modeControlStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("3"))
 
 type shellModel struct {
-	width      int
-	height     int
-	selected   int
-	captures   map[string]string
-	prevCaps   map[string]string
-	activity   map[string]time.Time
-	sessions   []tmux.SessionInfo
-	runtimes   map[string]string
-	msgHistory []daemon.HistoryEntry
-	histPath   string
-	tasks      []types.Task
-	tasksPath  string
-	stream     streamView
+	width                  int
+	height                 int
+	selected               int
+	captures               map[string]string
+	prevCaps               map[string]string
+	activity               map[string]time.Time
+	sessions               []tmux.SessionInfo
+	runtimes               map[string]string
+	msgHistory             []daemon.HistoryEntry
+	histPath               string
+	tasks                  []types.Task
+	tasksPath              string
+	workspaceInfos         map[string]types.WorkspaceInfo
+	workspaceInfoUpdatedAt time.Time
+	stream                 streamView
+	taskSelected           int
+	taskFilter             taskFilterMode
 
 	mode        inputMode
 	viewTarget  string // workspace shown in main pane
@@ -42,16 +46,18 @@ type shellModel struct {
 
 func newShellModel(orchSession, socketPath string) shellModel {
 	return shellModel{
-		captures:    make(map[string]string),
-		prevCaps:    make(map[string]string),
-		activity:    make(map[string]time.Time),
-		runtimes:    loadWatchRuntimes(),
-		histPath:    daemon.HistoryFilePath(socketPath),
-		tasksPath:   daemon.TasksFilePath(socketPath),
-		stream:      streamMessages,
-		mode:        modeInput,
-		viewTarget:  "orchestrator",
-		orchSession: orchSession,
+		captures:       make(map[string]string),
+		prevCaps:       make(map[string]string),
+		activity:       make(map[string]time.Time),
+		runtimes:       loadWatchRuntimes(),
+		histPath:       daemon.HistoryFilePath(socketPath),
+		tasksPath:      daemon.TasksFilePath(socketPath),
+		workspaceInfos: make(map[string]types.WorkspaceInfo),
+		stream:         streamMessages,
+		taskFilter:     taskFilterActive,
+		mode:           modeInput,
+		viewTarget:     "orchestrator",
+		orchSession:    orchSession,
 	}
 }
 
@@ -100,6 +106,8 @@ func (m shellModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.msgHistory = readHistoryFile(m.histPath, 50)
 		m.tasks = readTasksFile(m.tasksPath)
+		m.workspaceInfos, m.workspaceInfoUpdatedAt = refreshWatchWorkspaceInfos(m.workspaceInfos, m.workspaceInfoUpdatedAt)
+		m.taskSelected = clampTaskSelection(m.taskSelected, m.tasks, m.taskFilter)
 		return m, tickCmd()
 	}
 	return m, nil
@@ -126,6 +134,16 @@ func (m shellModel) handleControlMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "t":
 		m.stream = (m.stream + 1) % 3
+		m.mode = modeInput
+	case "[":
+		m.taskSelected = moveTaskSelection(m.taskSelected, m.tasks, m.taskFilter, -1)
+		m.mode = modeInput
+	case "]":
+		m.taskSelected = moveTaskSelection(m.taskSelected, m.tasks, m.taskFilter, 1)
+		m.mode = modeInput
+	case "f":
+		m.taskFilter = nextTaskFilterMode(m.taskFilter)
+		m.taskSelected = clampTaskSelection(m.taskSelected, m.tasks, m.taskFilter)
 		m.mode = modeInput
 	case "x":
 		if m.selected < len(m.sessions) {
@@ -358,7 +376,7 @@ func (m shellModel) renderHelp() string {
 	if m.mode == modeControl {
 		return modeControlStyle.Render(" [CTRL] ") +
 			lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(
-				"j/k select · v view · o orch · t messages/tasks/off · x interrupt · q quit · esc back")
+				"j/k select · v view · o orch · t messages/tasks/off · [/ ] task · f filter · x interrupt · q quit · esc back")
 	}
 	return modeInputStyle.Render(" [INPUT] ") +
 		lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(
@@ -369,14 +387,16 @@ func (m shellModel) renderHelp() string {
 
 func (m shellModel) renderSidebar(w, h int) string {
 	wm := watchModel{
-		width:    m.width,
-		height:   m.height,
-		selected: m.selected,
-		captures: m.captures,
-		prevCaps: m.prevCaps,
-		activity: m.activity,
-		sessions: m.sessions,
-		runtimes: m.runtimes,
+		width:          m.width,
+		height:         m.height,
+		selected:       m.selected,
+		captures:       m.captures,
+		prevCaps:       m.prevCaps,
+		activity:       m.activity,
+		sessions:       m.sessions,
+		runtimes:       m.runtimes,
+		tasks:          m.tasks,
+		workspaceInfos: m.workspaceInfos,
 	}
 	return wm.renderSidebar(w, h)
 }
@@ -395,8 +415,10 @@ func (m shellModel) renderStream(totalW, totalH int) string {
 
 func (m shellModel) renderTasks(totalW, totalH int) string {
 	wm := watchModel{
-		tasks: m.tasks,
+		tasks:        m.tasks,
+		msgHistory:   m.msgHistory,
+		taskSelected: m.taskSelected,
+		taskFilter:   m.taskFilter,
 	}
 	return wm.renderTasks(totalW, totalH)
 }
-

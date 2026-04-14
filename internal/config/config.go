@@ -12,16 +12,18 @@ import (
 )
 
 const (
-	DefaultConfigDir  = ".ax"
-	DefaultConfigFile = "config.yaml"
-	LegacyConfigFile  = "ax.yaml"
+	DefaultConfigDir                = ".ax"
+	DefaultConfigFile               = "config.yaml"
+	LegacyConfigFile                = "ax.yaml"
+	DefaultCodexReasoningEffort     = "xhigh"
 )
 
 type Config struct {
-	Project             string               `yaml:"project"`
-	OrchestratorRuntime string               `yaml:"orchestrator_runtime,omitempty"`
-	Children            map[string]Child     `yaml:"children,omitempty"`
-	Workspaces          map[string]Workspace `yaml:"workspaces"`
+	Project                    string               `yaml:"project"`
+	OrchestratorRuntime        string               `yaml:"orchestrator_runtime,omitempty"`
+	CodexModelReasoningEffort  string               `yaml:"codex_model_reasoning_effort,omitempty"`
+	Children                   map[string]Child     `yaml:"children,omitempty"`
+	Workspaces                 map[string]Workspace `yaml:"workspaces"`
 }
 
 type Child struct {
@@ -30,21 +32,33 @@ type Child struct {
 }
 
 type Workspace struct {
-	Dir          string            `yaml:"dir"`
-	Description  string            `yaml:"description,omitempty"`
-	Shell        string            `yaml:"shell,omitempty"`
-	Runtime      string            `yaml:"runtime,omitempty"`      // claude or codex (default: claude)
-	Agent        string            `yaml:"agent,omitempty"`        // custom command to auto-start instead of runtime default
-	Instructions string            `yaml:"instructions,omitempty"` // agent instructions (written to the runtime's instruction file)
-	Env          map[string]string `yaml:"env,omitempty"`
+	Dir                         string            `yaml:"dir"`
+	Description                 string            `yaml:"description,omitempty"`
+	Shell                       string            `yaml:"shell,omitempty"`
+	Runtime                     string            `yaml:"runtime,omitempty"`                    // claude or codex (default: claude)
+	CodexModelReasoningEffort   string            `yaml:"codex_model_reasoning_effort,omitempty"`
+	Agent                       string            `yaml:"agent,omitempty"`                      // custom command to auto-start instead of runtime default
+	Instructions                string            `yaml:"instructions,omitempty"`               // agent instructions (written to the runtime's instruction file)
+	Env                         map[string]string `yaml:"env,omitempty"`
 }
 
 func Load(path string) (*Config, error) {
+	if err := validateConfigTree(path); err != nil {
+		return nil, err
+	}
 	seen := make(map[string]bool)
 	return loadRecursive(path, seen)
 }
 
 var ErrCyclicChildren = fmt.Errorf("cyclic ax children reference")
+
+func isStaleMissingChildError(err error) bool {
+	return errors.Is(err, os.ErrNotExist)
+}
+
+func wrapChildLoadError(name, dir string, err error) error {
+	return fmt.Errorf("load child %q at %s: %w", name, dir, err)
+}
 
 func loadRecursive(path string, seen map[string]bool) (*Config, error) {
 	path, err := filepath.Abs(path)
@@ -59,12 +73,12 @@ func loadRecursive(path string, seen map[string]bool) (*Config, error) {
 
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read config: %w", err)
+		return nil, fmt.Errorf("read config %s: %w", path, err)
 	}
 
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("parse config: %w", err)
+		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
 
 	if cfg.Project == "" {
@@ -78,14 +92,18 @@ func loadRecursive(path string, seen map[string]bool) (*Config, error) {
 	projectDir := configBaseDir(configDir)
 	for name, ws := range cfg.Workspaces {
 		ws.Dir = resolveDir(projectDir, ws.Dir)
+		if strings.TrimSpace(ws.CodexModelReasoningEffort) == "" {
+			ws.CodexModelReasoningEffort = strings.TrimSpace(cfg.CodexModelReasoningEffort)
+		}
 		cfg.Workspaces[name] = ws
 	}
 
 	merged := &Config{
-		Project:             cfg.Project,
-		OrchestratorRuntime: cfg.OrchestratorRuntime,
-		Children:            cfg.Children,
-		Workspaces:          make(map[string]Workspace, len(cfg.Workspaces)),
+		Project:                   cfg.Project,
+		OrchestratorRuntime:       cfg.OrchestratorRuntime,
+		CodexModelReasoningEffort: strings.TrimSpace(cfg.CodexModelReasoningEffort),
+		Children:                  cfg.Children,
+		Workspaces:                make(map[string]Workspace, len(cfg.Workspaces)),
 	}
 	for name, ws := range cfg.Workspaces {
 		merged.Workspaces[name] = ws
@@ -118,12 +136,11 @@ func loadRecursive(path string, seen map[string]bool) (*Config, error) {
 		}
 		childCfg, err := loadRecursive(childCfgPath, seen)
 		if err != nil {
-			// Cycles are fatal; other errors are degraded to warnings.
-			if errors.Is(err, ErrCyclicChildren) {
-				return nil, err
+			if isStaleMissingChildError(err) {
+				fmt.Fprintf(os.Stderr, "warning: child %q at %s has no config, skipping\n", name, child.Dir)
+				continue
 			}
-			fmt.Fprintf(os.Stderr, "warning: failed to load child %q: %v\n", name, err)
-			continue
+			return nil, wrapChildLoadError(name, child.Dir, err)
 		}
 
 		for childName, ws := range childCfg.Workspaces {
@@ -173,15 +190,37 @@ func FindConfigFile() (string, error) {
 }
 
 func DefaultConfig(projectName string) *Config {
+	return DefaultConfigForRuntime(projectName, "claude")
+}
+
+func DefaultConfigForRuntime(projectName, runtime string) *Config {
 	return &Config{
-		Project: projectName,
+		Project:                   projectName,
+		OrchestratorRuntime:       runtime,
+		CodexModelReasoningEffort: DefaultCodexReasoningEffort,
 		Workspaces: map[string]Workspace{
 			"main": {
-				Dir:         ".",
-				Description: "Main workspace",
+				Dir:                       ".",
+				Description:               "Main workspace",
+				Runtime:                   runtime,
+				CodexModelReasoningEffort: DefaultCodexReasoningEffort,
 			},
 		},
 	}
+}
+
+func (c *Config) CodexReasoningEffortForWorkspace(name string) string {
+	if c != nil {
+		if ws, ok := c.Workspaces[name]; ok {
+			if effort := strings.TrimSpace(ws.CodexModelReasoningEffort); effort != "" {
+				return effort
+			}
+		}
+		if effort := strings.TrimSpace(c.CodexModelReasoningEffort); effort != "" {
+			return effort
+		}
+	}
+	return DefaultCodexReasoningEffort
 }
 
 func resolveDir(baseDir, value string) string {

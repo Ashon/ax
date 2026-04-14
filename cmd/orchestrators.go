@@ -44,6 +44,11 @@ func createOrchestratorForNode(node *config.ProjectNode, parentName, socketPath,
 	if err := workspace.WriteMCPConfig(orchDir, selfName, socketPath, cfgPath); err != nil {
 		return fmt.Errorf("write %s mcp config: %w", selfName, err)
 	}
+	if runtime == agent.RuntimeCodex {
+		if err := workspace.EnsureCodexConfig(orchDir, selfName, socketPath, cfgPath); err != nil {
+			return fmt.Errorf("write %s codex config: %w", selfName, err)
+		}
+	}
 	if err := workspace.WriteOrchestratorPrompt(orchDir, node, node.Prefix, parentName, runtime); err != nil {
 		return fmt.Errorf("write %s prompt: %w", selfName, err)
 	}

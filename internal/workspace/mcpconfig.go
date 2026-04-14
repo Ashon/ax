@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/ashon/ax/internal/agent"
+	"github.com/ashon/ax/internal/daemon"
 )
 
 const MCPConfigFile = ".mcp.json"
@@ -78,6 +81,17 @@ func RemoveMCPConfig(dir string) error {
 
 	newData, _ := json.MarshalIndent(cfg, "", "  ")
 	return os.WriteFile(path, append(newData, '\n'), 0o644)
+}
+
+func EnsureCodexConfig(dir, workspace, socketPath, configPath string) error {
+	axBin, err := axBinaryPath()
+	if err != nil {
+		return fmt.Errorf("resolve ax binary: %w", err)
+	}
+	if _, err := agent.PrepareCodexHome(workspace, dir, daemon.ExpandSocketPath(socketPath), axBin, configPath); err != nil {
+		return fmt.Errorf("prepare codex home: %w", err)
+	}
+	return nil
 }
 
 func axBinaryPath() (string, error) {
