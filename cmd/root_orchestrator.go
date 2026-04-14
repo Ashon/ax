@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/ashon/ax/internal/agent"
+	"github.com/ashon/ax/internal/config"
 	"github.com/ashon/ax/internal/tmux"
 	"github.com/ashon/ax/internal/workspace"
 	"gopkg.in/yaml.v3"
@@ -114,4 +115,11 @@ func cleanupRootOrchestratorArtifacts(orchDir string) error {
 		}
 	}
 	return nil
+}
+
+func rootOrchestratorVisible(node *config.ProjectNode) bool {
+	if node == nil {
+		return false
+	}
+	return !(node.Prefix == "" && node.DisableRootOrchestrator)
 }

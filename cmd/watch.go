@@ -622,11 +622,13 @@ func collectKnownFromTree(node *config.ProjectNode, known map[string]bool) {
 	if node == nil {
 		return
 	}
-	orchName := "orchestrator"
-	if node.Prefix != "" {
-		orchName = node.Prefix + ".orchestrator"
+	if rootOrchestratorVisible(node) {
+		orchName := "orchestrator"
+		if node.Prefix != "" {
+			orchName = node.Prefix + ".orchestrator"
+		}
+		known[orchName] = true
 	}
-	known[orchName] = true
 	for _, ws := range node.Workspaces {
 		known[ws.MergedName] = true
 	}
@@ -647,23 +649,25 @@ func appendProjectEntries(node *config.ProjectNode, level int, sessionByWorkspac
 	})
 
 	// Project orchestrator first
-	orchName := "orchestrator"
-	if node.Prefix != "" {
-		orchName = node.Prefix + ".orchestrator"
-	}
-	orchLabel := "◆ orchestrator"
-	if idx, ok := sessionByWorkspace[orchName]; ok {
-		*entries = append(*entries, sidebarEntry{
-			label:        orchLabel,
-			sessionIndex: idx,
-			level:        level + 1,
-		})
-	} else {
-		*entries = append(*entries, sidebarEntry{
-			label:        orchLabel,
-			sessionIndex: -1,
-			level:        level + 1,
-		})
+	if rootOrchestratorVisible(node) {
+		orchName := "orchestrator"
+		if node.Prefix != "" {
+			orchName = node.Prefix + ".orchestrator"
+		}
+		orchLabel := "◆ orchestrator"
+		if idx, ok := sessionByWorkspace[orchName]; ok {
+			*entries = append(*entries, sidebarEntry{
+				label:        orchLabel,
+				sessionIndex: idx,
+				level:        level + 1,
+			})
+		} else {
+			*entries = append(*entries, sidebarEntry{
+				label:        orchLabel,
+				sessionIndex: -1,
+				level:        level + 1,
+			})
+		}
 	}
 
 	for _, ws := range node.Workspaces {
@@ -743,7 +747,11 @@ func loadWatchRuntimes() map[string]string {
 		return runtimes
 	}
 
-	runtimes["orchestrator"] = agent.NormalizeRuntime(cfg.OrchestratorRuntime)
+	if cfg.DisableRootOrchestrator {
+		delete(runtimes, "orchestrator")
+	} else {
+		runtimes["orchestrator"] = agent.NormalizeRuntime(cfg.OrchestratorRuntime)
+	}
 	for name, ws := range cfg.Workspaces {
 		runtime := agent.NormalizeRuntime(ws.Runtime)
 		runtimes[name] = runtime

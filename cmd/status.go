@@ -128,11 +128,13 @@ func collectKnownWorkspaces(node *config.ProjectNode, known map[string]bool) {
 	if node == nil {
 		return
 	}
-	orchName := "orchestrator"
-	if node.Prefix != "" {
-		orchName = node.Prefix + ".orchestrator"
+	if rootOrchestratorVisible(node) {
+		orchName := "orchestrator"
+		if node.Prefix != "" {
+			orchName = node.Prefix + ".orchestrator"
+		}
+		known[orchName] = true
 	}
-	known[orchName] = true
 	for _, ws := range node.Workspaces {
 		known[ws.MergedName] = true
 	}
@@ -148,11 +150,13 @@ func printProjectTree(node *config.ProjectNode, level int, sessionByWorkspace ma
 	indent := strings.Repeat("  ", level)
 	fmt.Printf("%s▾ %s\n", indent, node.DisplayName())
 
-	orchName := "orchestrator"
-	if node.Prefix != "" {
-		orchName = node.Prefix + ".orchestrator"
+	if rootOrchestratorVisible(node) {
+		orchName := "orchestrator"
+		if node.Prefix != "" {
+			orchName = node.Prefix + ".orchestrator"
+		}
+		printLeaf(level+1, "◆ orchestrator", orchName, sessionByWorkspace, workspaceInfos)
 	}
-	printLeaf(level+1, "◆ orchestrator", orchName, sessionByWorkspace, workspaceInfos)
 
 	for _, ws := range node.Workspaces {
 		printLeaf(level+1, ws.Name, ws.MergedName, sessionByWorkspace, workspaceInfos)
