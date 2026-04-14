@@ -19,11 +19,11 @@ func OrchestratorName(prefix string) string {
 	return prefix + ".orchestrator"
 }
 
-// WriteOrchestratorPrompt generates a scope-specific instruction file for
-// the orchestrator of a project. The root orchestrator learns about
+// OrchestratorPrompt returns the scope-specific instruction text for the
+// orchestrator of a project. The root orchestrator learns about
 // sub-orchestrators as delegation targets; sub-orchestrators learn about
 // their parent for escalation.
-func WriteOrchestratorPrompt(orchDir string, node *config.ProjectNode, prefix, parentName, runtime string) error {
+func OrchestratorPrompt(node *config.ProjectNode, prefix, parentName string) string {
 	var sb strings.Builder
 
 	selfName := OrchestratorName(prefix)
@@ -120,6 +120,7 @@ func WriteOrchestratorPrompt(orchDir string, node *config.ProjectNode, prefix, p
 	sb.WriteString("- 위 4가지 중 하나라도 빠졌다면 바로 위임하지 말고 메시지를 보강한 뒤 보내세요.\n\n")
 	sb.WriteString("### Execution Gate\n")
 	sb.WriteString("- 작업을 보낸 직후에는 불필요한 check-in을 보내지 말고 우선 `read_messages`, `list_tasks`, `get_task`로 진행 신호를 기다리세요.\n")
+	sb.WriteString("- **한 번 위임했다고 그 작업이 끝난 것으로 간주하지 마세요.** 오케스트레이터는 자신이 assign한 일이 실제 완료 결과, 명시적 blocker 보고, 실패 중 하나의 종결 상태에 도달할 때까지 계속 추적할 책임이 있습니다.\n")
 	sb.WriteString("- follow-up은 다음 경우에만 보냅니다: 약속한 산출물/기한이 지났는데 응답이 없을 때, 보고가 모순될 때, 요구한 증거가 빠졌을 때, 범위 이탈이 보일 때.\n")
 	sb.WriteString("- 단순 진행 확인(\"진행 중인가요?\", \"업데이트 있나요?\") 같은 noisy check-in은 금지합니다. 새 질문이나 구체 부족분이 있을 때만 후속 메시지를 보냅니다.\n")
 	sb.WriteString("- 응답이 없다고 해서 즉시 중복 위임하지 마세요. 먼저 task 로그/상태와 최근 메시지를 확인한 뒤, 정체가 확인되면 같은 요청을 반복하지 말고 부족한 정보나 우선순위를 보강해 재지시하세요.\n")
@@ -199,6 +200,7 @@ func WriteOrchestratorPrompt(orchDir string, node *config.ProjectNode, prefix, p
 	sb.WriteString("- 작업 실패 시 `update_task(id=..., status=\"failed\", result=\"실패 원인\")`\n\n")
 	sb.WriteString("### Completion Gate\n")
 	sb.WriteString("- 하위 보고를 완료로 수용하기 전에 요청한 범위, 기대 산출물, 성공 기준, 증거가 모두 충족됐는지 대조하세요.\n")
+	sb.WriteString("- 하위에 한 번 전달했다는 사실만으로 task를 닫지 마세요. assign한 일은 실제 완료 증거를 받거나, blocker를 상위에 명시적으로 보고하거나, 실패로 종료할 때까지 계속 소유하고 추적합니다.\n")
 	sb.WriteString("- 증거 없이 \"끝났다\", \"문제없다\", \"완료했다\"만 말하면 완료로 받지 마세요. 어떤 파일/테스트/검증/결과가 있는지 구체 follow-up을 보내세요.\n")
 	sb.WriteString("- 보고가 partial, weak, contradictory, no-op이면 그대로 전달하거나 조용히 수용하지 말고, 부족한 항목을 열거한 구체 follow-up 요청을 보내세요.\n")
 	sb.WriteString("- 하위 보고가 **이미 요청한 작업의 완료 결과만 담고 있고** 새 질문, 새 요청, 새 blocker가 없다면 추가 `send_message`를 보내지 마세요. task/result/status만 로컬에서 갱신하고 대화를 종료합니다.\n")
@@ -254,6 +256,16 @@ func WriteOrchestratorPrompt(orchDir string, node *config.ProjectNode, prefix, p
 		}
 	}
 
+	return sb.String()
+}
+
+// WriteOrchestratorPrompt generates a scope-specific instruction file for
+// the orchestrator of a project. The root orchestrator learns about
+// sub-orchestrators as delegation targets; sub-orchestrators learn about
+// their parent for escalation.
+func WriteOrchestratorPrompt(orchDir string, node *config.ProjectNode, prefix, parentName, runtime string) error {
+	content := OrchestratorPrompt(node, prefix, parentName)
+
 	instructionFile, err := agent.InstructionFile(runtime)
 	if err != nil {
 		return err
@@ -269,7 +281,7 @@ func WriteOrchestratorPrompt(orchDir string, node *config.ProjectNode, prefix, p
 			os.Remove(other)
 		}
 	}
-	return os.WriteFile(path, []byte(sb.String()), 0o644)
+	return os.WriteFile(path, []byte(content), 0o644)
 }
 
 func summarizeWorkspaces(node *config.ProjectNode) string {
