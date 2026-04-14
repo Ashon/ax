@@ -347,31 +347,3 @@ func TestRenderTasksScrollsSelectedTaskIntoView(t *testing.T) {
 	}
 }
 
-func TestShellRenderTasksUsesSharedViewportWindowing(t *testing.T) {
-	now := time.Now()
-	var tasks []types.Task
-	for i := 0; i < 7; i++ {
-		tasks = append(tasks, types.Task{
-			ID:        strings.Repeat(string(rune('k'+i)), 8) + "-0000-0000-0000-000000000000",
-			Title:     "Shell viewport " + string(rune('A'+i)),
-			Assignee:  "ax.cli",
-			CreatedBy: "ax.orchestrator",
-			Status:    types.TaskPending,
-			Priority:  types.TaskPriorityNormal,
-			UpdatedAt: now.Add(-time.Duration(i) * time.Minute),
-		})
-	}
-	m := shellModel{
-		taskFilter:   taskFilterAll,
-		taskSelected: 6,
-		tasks:        tasks,
-	}
-
-	view := xansi.Strip(m.renderTasks(90, 8))
-	if strings.Contains(view, "Shell viewport A") || strings.Contains(view, "Shell viewport B") {
-		t.Fatalf("expected shell task viewport to hide overflowed rows, got %q", view)
-	}
-	if !strings.Contains(view, "Shell viewport G") {
-		t.Fatalf("expected selected shell task to remain visible, got %q", view)
-	}
-}

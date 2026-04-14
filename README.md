@@ -6,8 +6,8 @@ tmux 기반 멀티 에이전트 LLM 워크스페이스 매니저
 
 ```
 ┌─────────────────────────────────────────────┐
-│                 ax shell                     │
-│            (orchestrator TUI)                │
+│           ax claude / ax codex               │
+│        (foreground orchestrator CLI)         │
 └──────────────────┬──────────────────────────┘
                    │
          ┌─────────┼─────────┐
@@ -103,11 +103,12 @@ ax up
 ### 3. 오케스트레이터와 대화
 
 ```bash
-ax shell
+ax claude   # 또는 ax codex
 ```
 
-루트 오케스트레이터와 대화하는 TUI가 열립니다.
-오케스트레이터가 요청을 분석해 적절한 워크스페이스 에이전트에 분배합니다.
+현재 터미널에서 코딩 에이전트 CLI(`claude` 또는 `codex`)를 포그라운드로 실행합니다.
+실행된 CLI는 루트 오케스트레이터의 프롬프트와 MCP 설정을 그대로 상속받아 ax 데몬에 `orchestrator` 정체성으로 등록되며, 요청을 분석해 적절한 워크스페이스 / 서브 오케스트레이터에 분배합니다.
+CLI를 종료하면 루트 오케스트레이터 세션도 함께 종료됩니다. 서브 오케스트레이터와 워크스페이스는 계속 실행됩니다.
 
 ### 4. 워크스페이스 모니터링
 
@@ -205,11 +206,12 @@ ax init --global
 ```bash
 ax init                          # 프로젝트 초기화 (기본: claude)
 ax init --codex                  # 프로젝트 초기화 (codex 기반)
-ax up                            # 데몬 + 워크스페이스 기동
+ax up                            # 데몬 + 워크스페이스 + 서브 오케스트레이터 기동
 ax refresh                       # MCP/프롬프트 산출물 리프레시
 ax down                          # 전체 종료
 ax status                        # 프로젝트 상태 표시
-ax shell                         # 오케스트레이터 대화 TUI
+ax claude                        # 루트 오케스트레이터로 Claude CLI 실행 (포그라운드)
+ax codex                         # 루트 오케스트레이터로 Codex CLI 실행 (포그라운드)
 ax watch                         # 워크스페이스 모니터링 TUI
 ```
 

@@ -54,7 +54,7 @@ var upCmd = &cobra.Command{
 			return err
 		}
 
-		fmt.Println("\nRun 'ax shell' to start a conversation with the root orchestrator.")
+		fmt.Println("\nRun 'ax claude' or 'ax codex' to launch the root orchestrator CLI.")
 		return nil
 	},
 }
