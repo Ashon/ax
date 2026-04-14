@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -9,9 +10,163 @@ import (
 	"github.com/ashon/ax/internal/daemon"
 	"github.com/ashon/ax/internal/tmux"
 	"github.com/ashon/ax/internal/types"
+	"github.com/ashon/ax/internal/usage"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	xansi "github.com/charmbracelet/x/ansi"
 )
+
+func TestResolveWatchInitialViewDefaultAndSelections(t *testing.T) {
+	cases := []struct {
+		name     string
+		agents   bool
+		tasks    bool
+		messages bool
+		tokens   bool
+		want     streamView
+		only     bool
+	}{
+		{name: "default", want: streamMessages},
+		{name: "agents", agents: true, want: streamHidden},
+		{name: "tasks", tasks: true, want: streamTasks, only: true},
+		{name: "messages", messages: true, want: streamMessages, only: true},
+		{name: "tokens", tokens: true, want: streamTokens, only: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, only, err := resolveWatchInitialView(tc.agents, tc.tasks, tc.messages, tc.tokens)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("stream = %v, want %v", got, tc.want)
+			}
+			if only != tc.only {
+				t.Fatalf("streamOnly = %v, want %v", only, tc.only)
+			}
+		})
+	}
+}
+
+func TestResolveWatchInitialViewRejectsConflictingFlags(t *testing.T) {
+	_, _, err := resolveWatchInitialView(true, false, false, true)
+	if err == nil {
+		t.Fatal("expected conflicting watch flags to fail")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestNewWatchModelUsesRequestedInitialView(t *testing.T) {
+	model := newWatchModel(streamTokens, true)
+	if model.stream != streamTokens {
+		t.Fatalf("initial stream = %v, want %v", model.stream, streamTokens)
+	}
+	if !model.streamOnly {
+		t.Fatal("expected stream-only mode to be preserved")
+	}
+}
+
+func TestWatchViewStreamOnlyHidesAgentsPane(t *testing.T) {
+	m := watchModel{
+		width:      96,
+		height:     18,
+		stream:     streamTasks,
+		streamOnly: true,
+		sessions: []tmux.SessionInfo{
+			{Name: "ax-ax_cli", Workspace: "ax.cli"},
+		},
+		captures: map[string]string{
+			"ax.cli": "SELECTED PANE CONTENT",
+		},
+		tasks: []types.Task{
+			{
+				ID:        "task-1",
+				Title:     "Watch tasks view should be standalone",
+				Assignee:  "ax.cli",
+				Status:    types.TaskPending,
+				UpdatedAt: time.Now(),
+			},
+		},
+	}
+
+	view := xansi.Strip(m.View())
+	if strings.Contains(view, "SELECTED PANE CONTENT") {
+		t.Fatalf("did not expect selected session pane content in stream-only view %q", view)
+	}
+	if strings.Contains(view, "╭─ agents ") {
+		t.Fatalf("did not expect agents sidebar in stream-only view %q", view)
+	}
+	if !strings.Contains(view, "╭─ tasks ") {
+		t.Fatalf("expected tasks pane in stream-only view %q", view)
+	}
+}
+
+func TestWatchViewDefaultSplitKeepsAgentsPane(t *testing.T) {
+	oldConfigPath := configPath
+	configPath = filepath.Join(t.TempDir(), "missing.yaml")
+	defer func() { configPath = oldConfigPath }()
+
+	m := watchModel{
+		width:      96,
+		height:     18,
+		stream:     streamTasks,
+		streamOnly: false,
+		sessions: []tmux.SessionInfo{
+			{Name: "ax-ax_cli", Workspace: "ax.cli"},
+		},
+		captures: map[string]string{
+			"ax.cli": "SELECTED PANE CONTENT",
+		},
+		runtimes: map[string]string{
+			"ax.cli": "codex",
+		},
+		tasks: []types.Task{
+			{
+				ID:        "task-1",
+				Title:     "Watch split view should keep agent pane",
+				Assignee:  "ax.cli",
+				Status:    types.TaskPending,
+				UpdatedAt: time.Now(),
+			},
+		},
+		workspaceInfos: map[string]types.WorkspaceInfo{
+			"ax.cli": {Name: "ax.cli", Status: types.StatusOnline},
+		},
+	}
+
+	view := xansi.Strip(m.View())
+	if !strings.Contains(view, "SELECTED PANE CONTENT") {
+		t.Fatalf("expected selected session pane content in split view %q", view)
+	}
+	if !strings.Contains(view, "╭─ agents ") {
+		t.Fatalf("expected agents sidebar in split view %q", view)
+	}
+}
+
+func TestWatchStreamOnlyTabCyclesVisibleViews(t *testing.T) {
+	m := watchModel{stream: streamTasks, streamOnly: true}
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	got := next.(watchModel)
+	if got.stream != streamTokens {
+		t.Fatalf("expected tasks -> tokens in stream-only cycle, got %v", got.stream)
+	}
+
+	next, _ = got.Update(tea.KeyMsg{Type: tea.KeyTab})
+	got = next.(watchModel)
+	if got.stream != streamMessages {
+		t.Fatalf("expected tokens -> messages in stream-only cycle, got %v", got.stream)
+	}
+
+	next, _ = got.Update(tea.KeyMsg{Type: tea.KeyTab})
+	got = next.(watchModel)
+	if got.stream != streamTasks {
+		t.Fatalf("expected messages -> tasks in stream-only cycle, got %v", got.stream)
+	}
+}
 
 func TestSanitizeDisplayLineRemovesANSIAndControls(t *testing.T) {
 	in := "A\aB\x1b]8;;https://example.com\x1b\\LINK\x1b]8;;\x1b\\ \x1b[31mred\x1b[0m 😀 e\u0301 ─"
@@ -63,7 +218,7 @@ func runeIndex(s string, target rune, occurrence int) int {
 	return -1
 }
 
-func TestRenderSidebarShowsStatusTextAndAttention(t *testing.T) {
+func TestRenderSidebarShowsCompactRowAndSelectedDetail(t *testing.T) {
 	oldConfigPath := configPath
 	configPath = filepath.Join(t.TempDir(), "missing.yaml")
 	defer func() { configPath = oldConfigPath }()
@@ -120,7 +275,7 @@ func TestRenderSidebarShowsStatusTextAndAttention(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		"D1 S1",
+		"codex",
 		"Inspecting divergence",
 		"↑1.2k ↓345",
 		"$0.67",
@@ -128,6 +283,259 @@ func TestRenderSidebarShowsStatusTextAndAttention(t *testing.T) {
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected %q in sidebar view %q", want, view)
 		}
+	}
+}
+
+func TestRenderSidebarHidesUnselectedDetailLines(t *testing.T) {
+	oldConfigPath := configPath
+	configPath = filepath.Join(t.TempDir(), "missing.yaml")
+	defer func() { configPath = oldConfigPath }()
+
+	m := watchModel{
+		selected:    0,
+		spinnerTick: 0,
+		sessions: []tmux.SessionInfo{
+			{Name: "ax-ax_cli", Workspace: "ax.cli"},
+			{Name: "ax-ax_runtime", Workspace: "ax.runtime"},
+		},
+		runtimes: map[string]string{
+			"ax.cli":     "codex",
+			"ax.runtime": "claude",
+		},
+		tokenData: map[string]agentTokens{
+			"ax.cli":     {Workspace: "ax.cli", Cost: "$0.67"},
+			"ax.runtime": {Workspace: "ax.runtime", Cost: "$0.40"},
+		},
+		workspaceInfos: map[string]types.WorkspaceInfo{
+			"ax.cli": {
+				Name:       "ax.cli",
+				Status:     types.StatusOnline,
+				StatusText: "Selected status detail",
+			},
+			"ax.runtime": {
+				Name:       "ax.runtime",
+				Status:     types.StatusOnline,
+				StatusText: "Unselected detail should stay hidden",
+			},
+		},
+	}
+
+	view := xansi.Strip(m.renderSidebar(38, 10))
+	for _, want := range []string{"codex", "$0.67", "claude", "$0.40", "Selected status detail"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected %q in compact sidebar view %q", want, view)
+		}
+	}
+	if strings.Contains(view, "Unselected detail should stay hidden") {
+		t.Fatalf("did not expect unselected detail line in compact sidebar view %q", view)
+	}
+}
+
+func TestRenderSidebarStateMarkerDistinguishesStatesAndAnimates(t *testing.T) {
+	offline := xansi.Strip(renderSidebarStateMarker(sidebarAgentStateOffline, 0))
+	idle := xansi.Strip(renderSidebarStateMarker(sidebarAgentStateIdle, 0))
+	running0 := xansi.Strip(renderSidebarStateMarker(sidebarAgentStateRunning, 0))
+	running1 := xansi.Strip(renderSidebarStateMarker(sidebarAgentStateRunning, 6))
+
+	if offline != "○" {
+		t.Fatalf("expected offline marker ○, got %q", offline)
+	}
+	if idle != "●" {
+		t.Fatalf("expected idle marker ●, got %q", idle)
+	}
+	if running0 == offline || running0 == idle {
+		t.Fatalf("expected running marker to differ from offline/idle, got %q", running0)
+	}
+	if running0 == running1 {
+		t.Fatalf("expected running marker to animate, got same frame %q", running0)
+	}
+}
+
+func TestWatchShouldRefreshDataRespectsThrottle(t *testing.T) {
+	now := time.Now()
+
+	if !watchShouldRefreshData(time.Time{}, now, false) {
+		t.Fatal("expected zero last refresh to force a refresh")
+	}
+	if !watchShouldRefreshData(now, now, true) {
+		t.Fatal("expected forced refresh to bypass throttle")
+	}
+	if watchShouldRefreshData(now, now.Add(100*time.Millisecond), false) {
+		t.Fatal("expected refresh inside throttle window to be skipped")
+	}
+	if !watchShouldRefreshData(now, now.Add(watchDataRefreshInterval), false) {
+		t.Fatal("expected refresh at throttle boundary to run")
+	}
+}
+
+func TestWatchShouldRefreshSessionsUsesSeparateCadence(t *testing.T) {
+	now := time.Now()
+	if !watchShouldRefreshSessions(time.Time{}, now, false) {
+		t.Fatal("expected zero last session refresh to force a refresh")
+	}
+	if watchShouldRefreshSessions(now, now.Add(500*time.Millisecond), false) {
+		t.Fatal("expected session refresh inside interval to be skipped")
+	}
+	if !watchShouldRefreshSessions(now, now.Add(watchSessionRefreshInterval), false) {
+		t.Fatal("expected session refresh at interval boundary to run")
+	}
+}
+
+func TestPlanCaptureTargetsPrioritizesFocusedAndRotatesBackground(t *testing.T) {
+	sessions := []tmux.SessionInfo{
+		{Name: "ax-a", Workspace: "a"},
+		{Name: "ax-b", Workspace: "b"},
+		{Name: "ax-c", Workspace: "c"},
+		{Name: "ax-d", Workspace: "d"},
+	}
+
+	targets, nextCursor := planCaptureTargets(sessions, map[string]bool{"c": true}, 0, 2)
+	if got := []string{targets[0].Workspace, targets[1].Workspace, targets[2].Workspace}; strings.Join(got, ",") != "c,a,b" {
+		t.Fatalf("unexpected first capture batch order: %v", got)
+	}
+	if nextCursor != 2 {
+		t.Fatalf("expected next cursor 2, got %d", nextCursor)
+	}
+
+	targets, nextCursor = planCaptureTargets(sessions, map[string]bool{"c": true}, nextCursor, 2)
+	if got := []string{targets[0].Workspace, targets[1].Workspace, targets[2].Workspace}; strings.Join(got, ",") != "c,d,a" {
+		t.Fatalf("unexpected rotated capture batch order: %v", got)
+	}
+	if nextCursor != 1 {
+		t.Fatalf("expected wrapped next cursor 1, got %d", nextCursor)
+	}
+}
+
+func TestReadHistoryFileIfChangedReusesCachedEntries(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.jsonl")
+	line := `{"from":"a","to":"b","content":"hello","timestamp":"2026-04-14T00:00:00Z"}` + "\n"
+	if err := os.WriteFile(path, []byte(line), 0o644); err != nil {
+		t.Fatalf("write history: %v", err)
+	}
+
+	entries, modTime := readHistoryFileIfChanged(path, time.Time{}, nil, 50)
+	if len(entries) != 1 {
+		t.Fatalf("expected one entry, got %d", len(entries))
+	}
+
+	cached := []daemon.HistoryEntry{{Content: "cached"}}
+	reused, reusedModTime := readHistoryFileIfChanged(path, modTime, cached, 50)
+	if reusedModTime != modTime {
+		t.Fatalf("expected unchanged mod time, got %v vs %v", reusedModTime, modTime)
+	}
+	if len(reused) != 1 || reused[0].Content != "cached" {
+		t.Fatalf("expected cached history to be reused, got %+v", reused)
+	}
+}
+
+func TestRenderSidebarUsesDerivedStateMarkers(t *testing.T) {
+	oldConfigPath := configPath
+	configPath = filepath.Join(t.TempDir(), "missing.yaml")
+	defer func() { configPath = oldConfigPath }()
+
+	m := watchModel{
+		spinnerTick: 0,
+		captures: map[string]string{
+			"ax.cli":     "Ready for input\n❯",
+			"ax.runtime": "Thinking through changes",
+		},
+		sessions: []tmux.SessionInfo{
+			{Name: "ax-ax_cli", Workspace: "ax.cli"},
+			{Name: "ax-ax_runtime", Workspace: "ax.runtime"},
+		},
+		runtimes: map[string]string{
+			"ax.cli":     "codex",
+			"ax.runtime": "claude",
+		},
+		workspaceInfos: map[string]types.WorkspaceInfo{
+			"ax.cli":     {Name: "ax.cli", Status: types.StatusOnline},
+			"ax.runtime": {Name: "ax.runtime", Status: types.StatusOnline},
+		},
+	}
+
+	view := xansi.Strip(m.renderSidebar(38, 10))
+	for _, want := range []string{"● cli", "⠁ runtime"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected %q in sidebar view %q", want, view)
+		}
+	}
+}
+
+func TestDeriveSidebarAgentStateRequiresActiveEvidenceForSpinner(t *testing.T) {
+	now := time.Now()
+
+	if got := deriveSidebarAgentState("Connected and waiting", time.Time{}, now); got != sidebarAgentStateIdle {
+		t.Fatalf("expected plain online capture to stay idle, got %q", got)
+	}
+	if got := deriveSidebarAgentState("Thinking through changes", time.Time{}, now); got != sidebarAgentStateRunning {
+		t.Fatalf("expected active status line to be running, got %q", got)
+	}
+	if got := deriveSidebarAgentState("Working without prompt", now.Add(-2*time.Second), now); got != sidebarAgentStateRunning {
+		t.Fatalf("expected recent capture activity to keep spinner running, got %q", got)
+	}
+	if got := deriveSidebarAgentState("Working without prompt", now.Add(-10*time.Second), now); got != sidebarAgentStateIdle {
+		t.Fatalf("expected stale non-idle capture to fall back to idle marker, got %q", got)
+	}
+}
+
+func TestShellRenderSidebarSharesStateMarkerBehavior(t *testing.T) {
+	oldConfigPath := configPath
+	configPath = filepath.Join(t.TempDir(), "missing.yaml")
+	defer func() { configPath = oldConfigPath }()
+
+	m := shellModel{
+		width:       80,
+		height:      24,
+		spinnerTick: 6,
+		captures: map[string]string{
+			"ax.cli": "Thinking through shell sidebar rendering",
+		},
+		sessions: []tmux.SessionInfo{
+			{Name: "ax-ax_cli", Workspace: "ax.cli"},
+		},
+		runtimes: map[string]string{
+			"ax.cli": "codex",
+		},
+		workspaceInfos: map[string]types.WorkspaceInfo{
+			"ax.cli": {Name: "ax.cli", Status: types.StatusOnline},
+		},
+	}
+
+	view := xansi.Strip(m.renderSidebar(38, 8))
+	if !strings.Contains(view, "⠃ cli") {
+		t.Fatalf("expected animated running marker in shell sidebar view %q", view)
+	}
+}
+
+func TestShellRenderSidebarUsesStaticMarkerForOnlineNonRunningCapture(t *testing.T) {
+	oldConfigPath := configPath
+	configPath = filepath.Join(t.TempDir(), "missing.yaml")
+	defer func() { configPath = oldConfigPath }()
+
+	m := shellModel{
+		width:       80,
+		height:      24,
+		spinnerTick: 6,
+		captures: map[string]string{
+			"ax.cli": "Connected and waiting",
+		},
+		sessions: []tmux.SessionInfo{
+			{Name: "ax-ax_cli", Workspace: "ax.cli"},
+		},
+		runtimes: map[string]string{
+			"ax.cli": "codex",
+		},
+		workspaceInfos: map[string]types.WorkspaceInfo{
+			"ax.cli": {Name: "ax.cli", Status: types.StatusOnline},
+		},
+	}
+
+	view := xansi.Strip(m.renderSidebar(38, 8))
+	if strings.Contains(view, "⠃ cli") {
+		t.Fatalf("did not expect spinner frame for non-running online capture: %q", view)
+	}
+	if !strings.Contains(view, "● cli") {
+		t.Fatalf("expected static online marker in shell sidebar view %q", view)
 	}
 }
 
@@ -373,5 +781,78 @@ func TestShellRenderTasksUsesSharedViewportWindowing(t *testing.T) {
 	}
 	if !strings.Contains(view, "Shell viewport G") {
 		t.Fatalf("expected selected shell task to remain visible, got %q", view)
+	}
+}
+
+func TestRenderTokensCombinesLiveUsageAndHistoryTrend(t *testing.T) {
+	now := time.Date(2026, 4, 14, 16, 0, 0, 0, time.UTC)
+	m := watchModel{
+		sessions: []tmux.SessionInfo{
+			{Name: "ax-ax_cli", Workspace: "ax.cli"},
+			{Name: "ax-ax_runtime", Workspace: "ax.runtime"},
+		},
+		tokenData: map[string]agentTokens{
+			"ax.cli": {
+				Workspace: "ax.cli",
+				Up:        "1.2k",
+				Down:      "345",
+				Cost:      "$0.67",
+			},
+		},
+		trendData: map[string]usage.WorkspaceTrend{
+			"ax.cli": {
+				Workspace:     "ax.cli",
+				Available:     true,
+				WindowStart:   now.Add(-24 * time.Hour),
+				WindowEnd:     now,
+				BucketMinutes: 180,
+				Total:         usage.Tokens{Input: 2000, Output: 1000, CacheRead: 500},
+				LatestTokens:  usage.Tokens{Input: 120, Output: 40},
+				Buckets: []usage.UsageBucket{
+					{Totals: usage.Tokens{Input: 10}},
+					{Totals: usage.Tokens{Input: 20}},
+					{Totals: usage.Tokens{Input: 30}},
+					{Totals: usage.Tokens{Input: 40}},
+				},
+			},
+		},
+	}
+
+	view := xansi.Strip(m.renderTokens(100, 12))
+	for _, want := range []string{"live usage", "history 24h", "ax.cli", "↑1.2k", "24H", "TREND"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected %q in tokens view %q", want, view)
+		}
+	}
+	if !strings.Contains(view, "▂") && !strings.Contains(view, "▄") && !strings.Contains(view, "█") {
+		t.Fatalf("expected sparkline glyphs in tokens view %q", view)
+	}
+}
+
+func TestRenderTokensKeepsLiveUsageVisibleWhenHistoryUnavailable(t *testing.T) {
+	m := watchModel{
+		sessions: []tmux.SessionInfo{
+			{Name: "ax-ax_cli", Workspace: "ax.cli"},
+		},
+		tokenData: map[string]agentTokens{
+			"ax.cli": {
+				Workspace: "ax.cli",
+				Up:        "512",
+				Down:      "128",
+			},
+		},
+		trendData: map[string]usage.WorkspaceTrend{
+			"ax.cli": {
+				Workspace: "ax.cli",
+				Error:     "no transcript",
+			},
+		},
+	}
+
+	view := xansi.Strip(m.renderTokens(100, 10))
+	for _, want := range []string{"live usage", "↑512", "history 24h", "unavailable"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected %q in tokens view %q", want, view)
+		}
 	}
 }

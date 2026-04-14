@@ -6,6 +6,7 @@ import (
 	"github.com/ashon/ax/internal/daemon"
 	"github.com/ashon/ax/internal/tmux"
 	"github.com/ashon/ax/internal/types"
+	"github.com/ashon/ax/internal/usage"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -23,7 +24,12 @@ var modeControlStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(
 type shellModel struct {
 	width                  int
 	height                 int
+	spinnerTick            int
+	dataRefreshedAt        time.Time
+	sessionsRefreshedAt    time.Time
+	forceDataRefresh       bool
 	selected               int
+	captureCursor          int
 	captures               map[string]string
 	prevCaps               map[string]string
 	activity               map[string]time.Time
@@ -31,14 +37,21 @@ type shellModel struct {
 	runtimes               map[string]string
 	msgHistory             []daemon.HistoryEntry
 	histPath               string
+	historyFileModTime     time.Time
 	tasks                  []types.Task
 	tasksPath              string
+	tasksFileModTime       time.Time
 	tokenData              map[string]agentTokens
+	trendData              map[string]usage.WorkspaceTrend
+	sidebarStates          map[string]string
 	workspaceInfos         map[string]types.WorkspaceInfo
 	workspaceInfoUpdatedAt time.Time
+	trendUpdatedAt         time.Time
 	stream                 streamView
 	taskSelected           int
 	taskFilter             taskFilterMode
+	mainResize             tmuxResizeState
+	previewResize          tmuxResizeState
 
 	mode        inputMode
 	viewTarget  string // workspace shown in main pane
@@ -47,19 +60,22 @@ type shellModel struct {
 
 func newShellModel(orchSession, socketPath string) shellModel {
 	return shellModel{
-		captures:       make(map[string]string),
-		prevCaps:       make(map[string]string),
-		activity:       make(map[string]time.Time),
-		runtimes:       loadWatchRuntimes(),
-		histPath:       daemon.HistoryFilePath(socketPath),
-		tasksPath:      daemon.TasksFilePath(socketPath),
-		tokenData:      make(map[string]agentTokens),
-		workspaceInfos: make(map[string]types.WorkspaceInfo),
-		stream:         streamMessages,
-		taskFilter:     taskFilterActive,
-		mode:           modeInput,
-		viewTarget:     "orchestrator",
-		orchSession:    orchSession,
+		captures:         make(map[string]string),
+		prevCaps:         make(map[string]string),
+		activity:         make(map[string]time.Time),
+		runtimes:         loadWatchRuntimes(),
+		histPath:         daemon.HistoryFilePath(socketPath),
+		tasksPath:        daemon.TasksFilePath(socketPath),
+		tokenData:        make(map[string]agentTokens),
+		trendData:        make(map[string]usage.WorkspaceTrend),
+		sidebarStates:    make(map[string]string),
+		workspaceInfos:   make(map[string]types.WorkspaceInfo),
+		stream:           streamMessages,
+		taskFilter:       taskFilterActive,
+		mode:             modeInput,
+		viewTarget:       "orchestrator",
+		orchSession:      orchSession,
+		forceDataRefresh: true,
 	}
 }
 
@@ -79,8 +95,17 @@ func (m shellModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.forceDataRefresh = true
 	case tickMsg:
-		m.sessions, _ = tmux.ListSessions()
+		m.spinnerTick++
+		now := time.Time(msg)
+		if !watchShouldRefreshData(m.dataRefreshedAt, now, m.forceDataRefresh) {
+			return m, tickCmd()
+		}
+		if watchShouldRefreshSessions(m.sessionsRefreshedAt, now, len(m.sessions) == 0) {
+			m.sessions, _ = tmux.ListSessions()
+			m.sessionsRefreshedAt = now
+		}
 		m.selected = clampSelection(m.selected, m.sessions)
 
 		// Resize main pane (viewTarget) and preview pane (selected) to match
@@ -88,33 +113,27 @@ func (m shellModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			mainW, mainH, previewH := m.layoutHeights()
 			if mainW > 10 && mainH > 5 {
 				if viewSession := m.currentViewSession(); viewSession != "" {
-					resizeTmuxWindow(viewSession, mainW, mainH)
+					resizeTmuxWindowIfNeeded(&m.mainResize, viewSession, mainW, mainH)
 				}
 			}
 			if previewH > 5 {
 				if previewSession := m.previewSession(); previewSession != "" {
-					resizeTmuxWindow(previewSession, mainW, previewH)
+					resizeTmuxWindowIfNeeded(&m.previewResize, previewSession, mainW, previewH)
 				}
 			}
 		}
 
-		for _, s := range m.sessions {
-			content := capturePane(s.Name)
-			if prev, ok := m.prevCaps[s.Workspace]; ok && prev != content {
-				m.activity[s.Workspace] = time.Now()
-			}
-			m.prevCaps[s.Workspace] = m.captures[s.Workspace]
-			m.captures[s.Workspace] = content
-		}
-		for _, s := range m.sessions {
-			if t := parseAgentTokens(s.Workspace, m.captures[s.Workspace]); t.Up != "" || t.Down != "" || t.Cost != "" {
-				m.tokenData[s.Workspace] = t
-			}
-		}
-		m.msgHistory = readHistoryFile(m.histPath, 50)
-		m.tasks = readTasksFile(m.tasksPath)
+		targets, nextCursor := planCaptureTargets(m.sessions, m.focusedWorkspaces(), m.captureCursor, watchBackgroundCaptureBatchSize)
+		m.captureCursor = nextCursor
+		refreshSessionCaptures(targets, m.captures, m.prevCaps, m.activity, m.sidebarStates, m.tokenData, now)
+
+		m.msgHistory, m.historyFileModTime = readHistoryFileIfChanged(m.histPath, m.historyFileModTime, m.msgHistory, 50)
+		m.tasks, m.tasksFileModTime = readTasksFileIfChanged(m.tasksPath, m.tasksFileModTime, m.tasks)
 		m.workspaceInfos, m.workspaceInfoUpdatedAt = refreshWatchWorkspaceInfos(m.workspaceInfos, m.workspaceInfoUpdatedAt)
+		m.trendData, m.trendUpdatedAt = refreshWatchTokenTrends(m.trendData, m.trendUpdatedAt, m.sessions, now, m.forceDataRefresh)
 		m.taskSelected = clampTaskSelection(m.taskSelected, m.tasks, m.taskFilter)
+		m.dataRefreshedAt = now
+		m.forceDataRefresh = false
 		return m, tickCmd()
 	}
 	return m, nil
@@ -133,8 +152,10 @@ func (m shellModel) handleControlMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Navigation — stay in control mode
 	case "k", "up":
 		m.selected = moveSelection(m.selected, m.sessions, -1)
+		m.forceDataRefresh = true
 	case "j", "down":
 		m.selected = moveSelection(m.selected, m.sessions, 1)
+		m.forceDataRefresh = true
 
 	// Actions — execute and return to input mode
 	case "q":
@@ -161,9 +182,11 @@ func (m shellModel) handleControlMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.selected < len(m.sessions) {
 			m.viewTarget = m.sessions[m.selected].Workspace
 		}
+		m.forceDataRefresh = true
 		m.mode = modeInput
 	case "o":
 		m.viewTarget = "orchestrator"
+		m.forceDataRefresh = true
 		m.mode = modeInput
 	case "ctrl+a":
 		m.mode = modeInput
@@ -289,6 +312,17 @@ func (m shellModel) previewSession() string {
 	return ""
 }
 
+func (m shellModel) focusedWorkspaces() map[string]bool {
+	focused := make(map[string]bool, 2)
+	if m.viewTarget != "" {
+		focused[m.viewTarget] = true
+	}
+	if preview := m.previewWorkspace(); preview != "" {
+		focused[preview] = true
+	}
+	return focused
+}
+
 // layoutHeights computes the inner dimensions for the main pane and preview
 // pane based on the current terminal size. Returns (mainW, mainH, previewH).
 // previewH is 0 when no preview pane is shown.
@@ -396,17 +430,20 @@ func (m shellModel) renderHelp() string {
 
 func (m shellModel) renderSidebar(w, h int) string {
 	wm := watchModel{
-		width:          m.width,
-		height:         m.height,
-		selected:       m.selected,
-		captures:       m.captures,
-		prevCaps:       m.prevCaps,
-		activity:       m.activity,
-		sessions:       m.sessions,
-		runtimes:       m.runtimes,
-		tasks:          m.tasks,
-		tokenData:      m.tokenData,
-		workspaceInfos: m.workspaceInfos,
+		width:           m.width,
+		height:          m.height,
+		spinnerTick:     m.spinnerTick,
+		dataRefreshedAt: m.dataRefreshedAt,
+		selected:        m.selected,
+		captures:        m.captures,
+		prevCaps:        m.prevCaps,
+		activity:        m.activity,
+		sessions:        m.sessions,
+		runtimes:        m.runtimes,
+		tasks:           m.tasks,
+		tokenData:       m.tokenData,
+		sidebarStates:   m.sidebarStates,
+		workspaceInfos:  m.workspaceInfos,
 	}
 	return wm.renderSidebar(w, h)
 }
@@ -435,7 +472,9 @@ func (m shellModel) renderTasks(totalW, totalH int) string {
 
 func (m shellModel) renderTokens(totalW, totalH int) string {
 	wm := watchModel{
+		sessions:  m.sessions,
 		tokenData: m.tokenData,
+		trendData: m.trendData,
 	}
 	return wm.renderTokens(totalW, totalH)
 }

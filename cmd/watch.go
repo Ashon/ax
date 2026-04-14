@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/ashon/ax/internal/daemon"
 	"github.com/ashon/ax/internal/tmux"
 	"github.com/ashon/ax/internal/types"
+	"github.com/ashon/ax/internal/usage"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	xansi "github.com/charmbracelet/x/ansi"
@@ -27,11 +29,22 @@ var watchCmd = &cobra.Command{
 	Use:   "watch",
 	Short: "Monitor workspace sessions with interactive TUI",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		p := tea.NewProgram(newWatchModel(), tea.WithAltScreen())
-		_, err := p.Run()
+		initialStream, streamOnly, err := resolveWatchInitialView(watchShowAgents, watchShowTasks, watchShowMessages, watchShowTokens)
+		if err != nil {
+			return err
+		}
+		p := tea.NewProgram(newWatchModel(initialStream, streamOnly), tea.WithAltScreen())
+		_, err = p.Run()
 		return err
 	},
 }
+
+var (
+	watchShowAgents   bool
+	watchShowTasks    bool
+	watchShowMessages bool
+	watchShowTokens   bool
+)
 
 // Styles
 var (
@@ -82,7 +95,7 @@ var (
 	tokenDownRe      = regexp.MustCompile(`↓\s*([\d.]+[kKmM]?)\s*tokens`)
 	tokenAnyRe       = regexp.MustCompile(`([\d.]+[kKmM]?)\s*tokens`)
 	costRe           = regexp.MustCompile(`\$[\d.]+`)
-	agentStateRe     = regexp.MustCompile(`(thinking|Harmonizing|Crystallizing|Nesting)`)
+	agentStateRe     = regexp.MustCompile(`(?i)(thinking|Harmonizing|Crystallizing|Nesting)`)
 	claudeDoneLineRe = regexp.MustCompile(`\bDone \(`)
 )
 
@@ -91,14 +104,36 @@ type tickMsg time.Time
 const watchFPS = 60
 const watchMessagePaneMinHeight = 6
 const watchSidebarWidth = 34
+const watchDataRefreshInterval = 250 * time.Millisecond
+const watchSessionRefreshInterval = time.Second
+const watchBackgroundCaptureBatchSize = 4
+const sidebarRecentActivityWindow = 5 * time.Second
 const watchWorkspaceRefreshInterval = time.Second
+const watchTrendRefreshInterval = 15 * time.Second
+const watchTrendWindowMinutes = 24 * 60
+const watchTrendBucketMinutes = 3 * 60
+
+var (
+	sidebarRunningFrames = []string{"⠁", "⠃", "⠇", "⠧", "⠷", "⠿", "⠷", "⠧", "⠇", "⠃"}
+)
+
+const (
+	sidebarAgentStateOffline = "offline"
+	sidebarAgentStateIdle    = "idle"
+	sidebarAgentStateRunning = "running"
+)
 
 type watchModel struct {
 	width                  int
 	height                 int
+	spinnerTick            int
+	dataRefreshedAt        time.Time
+	sessionsRefreshedAt    time.Time
+	forceDataRefresh       bool
 	selected               int
 	taskSelected           int
 	taskFilter             taskFilterMode
+	captureCursor          int
 	captures               map[string]string
 	prevCaps               map[string]string    // previous tick captures for activity detection
 	activity               map[string]time.Time // last activity time per workspace
@@ -106,12 +141,19 @@ type watchModel struct {
 	runtimes               map[string]string
 	msgHistory             []daemon.HistoryEntry
 	histPath               string
+	historyFileModTime     time.Time
 	tasks                  []types.Task
 	tasksPath              string
+	tasksFileModTime       time.Time
 	tokenData              map[string]agentTokens
+	trendData              map[string]usage.WorkspaceTrend
+	sidebarStates          map[string]string
 	workspaceInfos         map[string]types.WorkspaceInfo
 	workspaceInfoUpdatedAt time.Time
+	trendUpdatedAt         time.Time
 	stream                 streamView
+	streamOnly             bool
+	mainResize             tmuxResizeState
 }
 
 type sidebarEntry struct {
@@ -122,20 +164,61 @@ type sidebarEntry struct {
 	level        int
 }
 
-func newWatchModel() watchModel {
+type tmuxResizeState struct {
+	sessionName string
+	width       int
+	height      int
+}
+
+func newWatchModel(initialStream streamView, streamOnly bool) watchModel {
 	return watchModel{
-		captures:       make(map[string]string),
-		prevCaps:       make(map[string]string),
-		activity:       make(map[string]time.Time),
-		runtimes:       loadWatchRuntimes(),
-		histPath:       daemon.HistoryFilePath(socketPath),
-		tasksPath:      daemon.TasksFilePath(socketPath),
-		tokenData:      make(map[string]agentTokens),
-		workspaceInfos: make(map[string]types.WorkspaceInfo),
-		stream:         streamMessages,
-		taskFilter:     taskFilterActive,
-		taskSelected:   0,
+		captures:         make(map[string]string),
+		prevCaps:         make(map[string]string),
+		activity:         make(map[string]time.Time),
+		runtimes:         loadWatchRuntimes(),
+		histPath:         daemon.HistoryFilePath(socketPath),
+		tasksPath:        daemon.TasksFilePath(socketPath),
+		tokenData:        make(map[string]agentTokens),
+		trendData:        make(map[string]usage.WorkspaceTrend),
+		sidebarStates:    make(map[string]string),
+		workspaceInfos:   make(map[string]types.WorkspaceInfo),
+		stream:           initialStream,
+		streamOnly:       streamOnly,
+		taskFilter:       taskFilterActive,
+		taskSelected:     0,
+		forceDataRefresh: true,
 	}
+}
+
+func resolveWatchInitialView(agents, tasks, messages, tokens bool) (streamView, bool, error) {
+	selectionCount := 0
+	selected := streamMessages
+	streamOnly := false
+
+	if agents {
+		selectionCount++
+		selected = streamHidden
+	}
+	if tasks {
+		selectionCount++
+		selected = streamTasks
+		streamOnly = true
+	}
+	if messages {
+		selectionCount++
+		selected = streamMessages
+		streamOnly = true
+	}
+	if tokens {
+		selectionCount++
+		selected = streamTokens
+		streamOnly = true
+	}
+
+	if selectionCount > 1 {
+		return streamMessages, false, fmt.Errorf("watch view flags are mutually exclusive; use only one of --agents, --tasks, --messages, or --tokens")
+	}
+	return selected, streamOnly, nil
 }
 
 func (m watchModel) Init() tea.Cmd {
@@ -150,10 +233,23 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "up", "k":
 			m.selected = moveSelection(m.selected, m.sessions, -1)
+			m.forceDataRefresh = true
 		case "down", "j":
 			m.selected = moveSelection(m.selected, m.sessions, 1)
+			m.forceDataRefresh = true
 		case "tab":
-			m.stream = (m.stream + 1) % streamViewCount
+			if m.streamOnly {
+				switch m.stream {
+				case streamMessages:
+					m.stream = streamTasks
+				case streamTasks:
+					m.stream = streamTokens
+				default:
+					m.stream = streamMessages
+				}
+			} else {
+				m.stream = (m.stream + 1) % streamViewCount
+			}
 		case "[", "H":
 			m.taskSelected = moveTaskSelection(m.taskSelected, m.tasks, m.taskFilter, -1)
 		case "]", "L":
@@ -169,39 +265,42 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.forceDataRefresh = true
 	case tickMsg:
-		m.sessions, _ = tmux.ListSessions()
+		m.spinnerTick++
+		now := time.Time(msg)
+		if !watchShouldRefreshData(m.dataRefreshedAt, now, m.forceDataRefresh) {
+			return m, tickCmd()
+		}
+		if watchShouldRefreshSessions(m.sessionsRefreshedAt, now, len(m.sessions) == 0) {
+			m.sessions, _ = tmux.ListSessions()
+			m.sessionsRefreshedAt = now
+		}
 		m.selected = clampSelection(m.selected, m.sessions)
 
 		// Resize selected session's tmux window to match main panel
-		if m.selected < len(m.sessions) && m.width > 0 {
+		if !m.streamOnly && m.selected < len(m.sessions) && m.width > 0 {
 			sideW := watchSidebarWidth
 			mainW := m.width - sideW - 2 // inner content width
 			streamH := streamPaneHeight(m.height, m.stream)
 			mainH := m.height - streamH - 3 // inner content height
 			if mainW > 10 && mainH > 5 {
 				selected := m.sessions[m.selected]
-				resizeTmuxWindow(selected.Name, mainW, mainH)
+				resizeTmuxWindowIfNeeded(&m.mainResize, selected.Name, mainW, mainH)
 			}
 		}
 
-		for _, s := range m.sessions {
-			content := capturePane(s.Name)
-			if prev, ok := m.prevCaps[s.Workspace]; ok && prev != content {
-				m.activity[s.Workspace] = time.Now()
-			}
-			m.prevCaps[s.Workspace] = m.captures[s.Workspace]
-			m.captures[s.Workspace] = content
-		}
-		for _, s := range m.sessions {
-			if t := parseAgentTokens(s.Workspace, m.captures[s.Workspace]); t.Up != "" || t.Down != "" || t.Cost != "" {
-				m.tokenData[s.Workspace] = t
-			}
-		}
-		m.msgHistory = readHistoryFile(m.histPath, 50)
-		m.tasks = readTasksFile(m.tasksPath)
+		targets, nextCursor := planCaptureTargets(m.sessions, watchFocusedWorkspaces(m.sessions, m.selected), m.captureCursor, watchBackgroundCaptureBatchSize)
+		m.captureCursor = nextCursor
+		refreshSessionCaptures(targets, m.captures, m.prevCaps, m.activity, m.sidebarStates, m.tokenData, now)
+
+		m.msgHistory, m.historyFileModTime = readHistoryFileIfChanged(m.histPath, m.historyFileModTime, m.msgHistory, 50)
+		m.tasks, m.tasksFileModTime = readTasksFileIfChanged(m.tasksPath, m.tasksFileModTime, m.tasks)
 		m.workspaceInfos, m.workspaceInfoUpdatedAt = refreshWatchWorkspaceInfos(m.workspaceInfos, m.workspaceInfoUpdatedAt)
+		m.trendData, m.trendUpdatedAt = refreshWatchTokenTrends(m.trendData, m.trendUpdatedAt, m.sessions, now, m.forceDataRefresh)
 		m.taskSelected = clampTaskSelection(m.taskSelected, m.tasks, m.taskFilter)
+		m.dataRefreshedAt = now
+		m.forceDataRefresh = false
 		return m, tickCmd()
 	}
 	return m, nil
@@ -212,6 +311,15 @@ func (m watchModel) View() string {
 		return "Loading... (waiting for sessions)"
 	}
 
+	footer := m.renderFooter(m.width)
+	if m.streamOnly {
+		contentH := m.height - lipgloss.Height(footer)
+		if contentH < watchMessagePaneMinHeight {
+			contentH = watchMessagePaneMinHeight
+		}
+		return lipgloss.JoinVertical(lipgloss.Left, m.renderSelectedStream(m.width, contentH), footer)
+	}
+
 	// Layout: sidebar outerW + main outerW = total width
 	sideW := watchSidebarWidth
 	mainW := m.width - sideW
@@ -220,7 +328,6 @@ func (m watchModel) View() string {
 	}
 
 	streamH := streamPaneHeight(m.height, m.stream)
-	footer := m.renderFooter(m.width)
 	contentH := m.height - streamH - lipgloss.Height(footer)
 
 	// === Sidebar ===
@@ -238,15 +345,7 @@ func (m watchModel) View() string {
 	top := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, mainContent)
 
 	// === Stream pane (messages, tasks, or tokens) ===
-	var stream string
-	switch m.stream {
-	case streamMessages:
-		stream = m.renderStream(m.width, streamH)
-	case streamTasks:
-		stream = m.renderTasks(m.width, streamH)
-	case streamTokens:
-		stream = m.renderTokens(m.width, streamH)
-	}
+	stream := m.renderSelectedStream(m.width, streamH)
 
 	parts := []string{top}
 	if stream != "" {
@@ -259,9 +358,26 @@ func (m watchModel) View() string {
 
 func (m watchModel) renderFooter(totalW int) string {
 	summary := footerSummarySt.Render(fitDisplayText(m.footerTokenSummary(totalW), totalW))
+	helpText := " ↑↓ agent · [/ ] task · f filter · x interrupt · tab msgs/tasks/tokens/off · q quit"
+	if m.streamOnly {
+		helpText = " [/ ] task · f filter · tab msgs/tasks/tokens · q quit"
+	}
 	help := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(
-		fitDisplayText(" ↑↓ agent · [/ ] task · f filter · x interrupt · tab msgs/tasks/tokens/off · q quit", totalW))
+		fitDisplayText(helpText, totalW))
 	return lipgloss.JoinVertical(lipgloss.Left, summary, help)
+}
+
+func (m watchModel) renderSelectedStream(totalW, totalH int) string {
+	switch m.stream {
+	case streamMessages:
+		return m.renderStream(totalW, totalH)
+	case streamTasks:
+		return m.renderTasks(totalW, totalH)
+	case streamTokens:
+		return m.renderTokens(totalW, totalH)
+	default:
+		return ""
+	}
 }
 
 func (m watchModel) renderSidebar(w, h int) string {
@@ -278,11 +394,11 @@ func (m watchModel) renderSidebar(w, h int) string {
 	}
 	topLine := borderClr.Render("╭─") + title + borderClr.Render(strings.Repeat("─", pad)+"╮")
 
-	// Agent list
-	actDot := lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Render("●")
-	idleDot := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("○")
-
 	var lines []string
+	stateNow := m.dataRefreshedAt
+	if stateNow.IsZero() {
+		stateNow = time.Now()
+	}
 	for _, entry := range buildSidebarEntries(m.sessions) {
 		if entry.group {
 			left := sidebarStyle.Render(strings.Repeat("  ", entry.level) + entry.label)
@@ -298,36 +414,23 @@ func (m watchModel) renderSidebar(w, h int) string {
 		statusText := workspaceStatusPreview(m.workspaceInfos, workspaceName, max(0, innerW-6))
 		cursor := "  "
 		left := ""
-		right := ""
 		secondary := ""
-		tokenSummary := ""
+		right := ""
 
 		if entry.sessionIndex < 0 || entry.sessionIndex >= len(m.sessions) {
 			// Workspace defined but not running
 			dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-			left = "  " + strings.Repeat("  ", entry.level) + "○ " + dimStyle.Render(entry.label)
-			rightParts := []string{dimStyle.Render("offline")}
-			if attention != "" {
-				rightParts = append(rightParts, taskFailClr.Render(attention))
-			}
-			right = strings.Join(rightParts, " ")
-			secondary = statusText
-			if secondary == "" {
-				secondary = workspaceAgentStatus(m.workspaceInfos, workspaceName)
-				if secondary == "offline" {
-					secondary = ""
-				}
-			}
+			left = "  " + strings.Repeat("  ", entry.level) + renderSidebarStateMarker(sidebarAgentStateOffline, m.spinnerTick) + " " + dimStyle.Render(entry.label)
+			right = formatSidebarRowMeta("offline", "", attention, max(0, innerW-lipgloss.Width(left)-1))
 		} else {
 			s := m.sessions[entry.sessionIndex]
 			agentStatus := parseAgentStatus(m.captures[s.Workspace])
 			runtime := m.runtimes[s.Workspace]
-
-			dot := idleDot
-			lastActive, hasActivity := m.activity[s.Workspace]
-			if hasActivity && time.Since(lastActive) < 5*time.Second {
-				dot = actDot
+			state := m.sidebarStates[s.Workspace]
+			if state == "" {
+				state = deriveSidebarAgentState(m.captures[s.Workspace], m.activity[s.Workspace], stateNow)
 			}
+			marker := renderSidebarStateMarker(state, m.spinnerTick)
 
 			nameStyle := unselectedStyle
 			if entry.sessionIndex == m.selected {
@@ -335,36 +438,20 @@ func (m watchModel) renderSidebar(w, h int) string {
 				nameStyle = selectedStyle
 			}
 
-			left = cursor + strings.Repeat("  ", entry.level) + dot + " " + nameStyle.Render(entry.label)
-			var rightParts []string
-			if runtime != "" {
-				rightParts = append(rightParts, runtimeStyle.Render(runtime))
-			}
-			if attention != "" {
-				rightParts = append(rightParts, taskFailClr.Render(attention))
-			}
-			right = strings.Join(rightParts, " ")
+			left = cursor + strings.Repeat("  ", entry.level) + marker + " " + nameStyle.Render(entry.label)
+			tokenSummary := formatSidebarTokenSummary(m.tokenData[s.Workspace], max(0, innerW-lipgloss.Width(left)-1))
+			right = formatSidebarRowMeta(runtime, tokenSummary, attention, max(0, innerW-lipgloss.Width(left)-1))
 			secondary = statusText
 			if secondary == "" {
 				secondary = agentStatus
 			}
-			tokenSummary = formatSidebarTokenSummary(m.tokenData[s.Workspace], max(0, innerW-(4+2*entry.level)))
 		}
 
 		lines = append(lines, renderWatchSidebarLine(left, right, innerW))
-		if secondary != "" {
-			secondaryStyle := sidebarStyle
-			if entry.sessionIndex == m.selected {
-				secondaryStyle = selectedStyle
-			}
+		if secondary != "" && entry.sessionIndex == m.selected {
 			prefix := "    " + strings.Repeat("  ", entry.level)
 			secondaryLine := prefix + fitDisplayText(secondary, max(0, innerW-lipgloss.Width(prefix)))
-			lines = append(lines, renderWatchSidebarLine(secondaryStyle.Render(secondaryLine), "", innerW))
-		}
-		if tokenSummary != "" {
-			prefix := "    " + strings.Repeat("  ", entry.level)
-			tokenLine := prefix + fitDisplayText(tokenSummary, max(0, innerW-lipgloss.Width(prefix)))
-			lines = append(lines, renderWatchSidebarLine(tokenSidebarSty.Render(tokenLine), "", innerW))
+			lines = append(lines, renderWatchSidebarLine(selectedStyle.Render(secondaryLine), "", innerW))
 		}
 	}
 
@@ -771,6 +858,95 @@ func refreshWatchWorkspaceInfos(current map[string]types.WorkspaceInfo, last tim
 	return next, now
 }
 
+func loadWatchWorkspaceDirs() map[string]string {
+	dirs := make(map[string]string)
+	if cwd, err := os.Getwd(); err == nil {
+		dirs["orchestrator"] = cwd
+	}
+
+	cfgPath, err := resolveConfigPath()
+	if err != nil {
+		return dirs
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return dirs
+	}
+	for name, ws := range cfg.Workspaces {
+		dirs[name] = ws.Dir
+	}
+	if _, ok := dirs["orchestrator"]; !ok {
+		dirs["orchestrator"] = watchConfigRootDir(cfgPath)
+	}
+	return dirs
+}
+
+func watchConfigRootDir(cfgPath string) string {
+	cfgPath = filepath.Clean(cfgPath)
+	if filepath.Base(cfgPath) == config.LegacyConfigFile {
+		return filepath.Dir(cfgPath)
+	}
+	if filepath.Base(cfgPath) == config.DefaultConfigFile && filepath.Base(filepath.Dir(cfgPath)) == config.DefaultConfigDir {
+		return filepath.Dir(filepath.Dir(cfgPath))
+	}
+	return filepath.Dir(cfgPath)
+}
+
+func loadWatchTokenTrends(sessions []tmux.SessionInfo) (map[string]usage.WorkspaceTrend, bool) {
+	sp := daemon.ExpandSocketPath(socketPath)
+	if !isDaemonRunning(sp) {
+		return map[string]usage.WorkspaceTrend{}, true
+	}
+
+	dirByWorkspace := loadWatchWorkspaceDirs()
+	requests := make([]daemon.UsageTrendWorkspace, 0, len(sessions))
+	seen := make(map[string]struct{}, len(sessions))
+	for _, session := range sessions {
+		if _, ok := seen[session.Workspace]; ok {
+			continue
+		}
+		seen[session.Workspace] = struct{}{}
+		cwd := strings.TrimSpace(dirByWorkspace[session.Workspace])
+		if cwd == "" {
+			continue
+		}
+		requests = append(requests, daemon.UsageTrendWorkspace{
+			Workspace: session.Workspace,
+			Cwd:       cwd,
+		})
+	}
+	if len(requests) == 0 {
+		return map[string]usage.WorkspaceTrend{}, true
+	}
+
+	client, err := newCLIClient()
+	if err != nil {
+		return nil, false
+	}
+	defer client.Close()
+
+	trends, err := client.GetUsageTrends(requests, watchTrendWindowMinutes, watchTrendBucketMinutes)
+	if err != nil {
+		return nil, false
+	}
+	result := make(map[string]usage.WorkspaceTrend, len(trends))
+	for _, trend := range trends {
+		result[trend.Workspace] = trend
+	}
+	return result, true
+}
+
+func refreshWatchTokenTrends(current map[string]usage.WorkspaceTrend, last time.Time, sessions []tmux.SessionInfo, now time.Time, force bool) (map[string]usage.WorkspaceTrend, time.Time) {
+	if !last.IsZero() && !force && now.Sub(last) < watchTrendRefreshInterval {
+		return current, last
+	}
+	next, ok := loadWatchTokenTrends(sessions)
+	if !ok {
+		return current, now
+	}
+	return next, now
+}
+
 type workspaceAttention struct {
 	Stale    int
 	Diverged int
@@ -853,6 +1029,178 @@ func renderWatchSidebarLine(left, right string, innerW int) string {
 	return borderClr.Render("│") + left + strings.Repeat(" ", gap) + right + borderClr.Render("│")
 }
 
+func resizeTmuxWindowIfNeeded(state *tmuxResizeState, sessionName string, w, h int) {
+	if sessionName == "" || w <= 0 || h <= 0 {
+		return
+	}
+	if state.sessionName == sessionName && state.width == w && state.height == h {
+		return
+	}
+	resizeTmuxWindow(sessionName, w, h)
+	state.sessionName = sessionName
+	state.width = w
+	state.height = h
+}
+
+func watchShouldRefreshData(last, now time.Time, force bool) bool {
+	if force || last.IsZero() {
+		return true
+	}
+	return now.Sub(last) >= watchDataRefreshInterval
+}
+
+func watchShouldRefreshSessions(last, now time.Time, force bool) bool {
+	if force || last.IsZero() {
+		return true
+	}
+	return now.Sub(last) >= watchSessionRefreshInterval
+}
+
+func watchFocusedWorkspaces(sessions []tmux.SessionInfo, selected int) map[string]bool {
+	focused := make(map[string]bool, 1)
+	if selected >= 0 && selected < len(sessions) {
+		focused[sessions[selected].Workspace] = true
+	}
+	return focused
+}
+
+func planCaptureTargets(sessions []tmux.SessionInfo, focused map[string]bool, cursor, batchSize int) ([]tmux.SessionInfo, int) {
+	targets := make([]tmux.SessionInfo, 0, min(len(sessions), len(focused)+batchSize))
+	background := make([]tmux.SessionInfo, 0, len(sessions))
+	for _, session := range sessions {
+		if focused[session.Workspace] {
+			targets = append(targets, session)
+			continue
+		}
+		background = append(background, session)
+	}
+	if len(background) == 0 || batchSize <= 0 {
+		return targets, 0
+	}
+	if cursor < 0 || cursor >= len(background) {
+		cursor = 0
+	}
+	count := min(batchSize, len(background))
+	for i := 0; i < count; i++ {
+		idx := (cursor + i) % len(background)
+		targets = append(targets, background[idx])
+	}
+	return targets, (cursor + count) % len(background)
+}
+
+func refreshSessionCaptures(targets []tmux.SessionInfo, captures, prevCaps map[string]string, activity map[string]time.Time, sidebarStates map[string]string, tokenData map[string]agentTokens, now time.Time) {
+	for _, session := range targets {
+		content := capturePane(session.Name)
+		previous := captures[session.Workspace]
+		if previous != "" && previous != content {
+			activity[session.Workspace] = now
+		}
+		prevCaps[session.Workspace] = previous
+		captures[session.Workspace] = content
+		sidebarStates[session.Workspace] = deriveSidebarAgentState(content, activity[session.Workspace], now)
+		if tokens := parseAgentTokens(session.Workspace, content); tokens.Up != "" || tokens.Down != "" || tokens.Total != "" || tokens.Cost != "" {
+			tokenData[session.Workspace] = tokens
+		}
+	}
+}
+
+func deriveSidebarAgentState(content string, lastActivity, now time.Time) string {
+	if sidebarCaptureLooksIdle(content) {
+		return sidebarAgentStateIdle
+	}
+	if sidebarCaptureLooksRunning(content) {
+		return sidebarAgentStateRunning
+	}
+	if !lastActivity.IsZero() && !now.IsZero() && now.Sub(lastActivity) < sidebarRecentActivityWindow {
+		return sidebarAgentStateRunning
+	}
+	return sidebarAgentStateIdle
+}
+
+func sidebarCaptureLooksRunning(content string) bool {
+	lastLine := sidebarLastNonEmptyLine(content)
+	if lastLine == "" || claudeDoneLineRe.MatchString(lastLine) {
+		return false
+	}
+	return agentStateRe.MatchString(lastLine)
+}
+
+func sidebarLastNonEmptyLine(content string) string {
+	lines := strings.Split(strings.TrimRight(sanitizeDisplayLine(content), "\n"), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func sidebarCaptureLooksIdle(content string) bool {
+	lastLine := sidebarLastNonEmptyLine(content)
+	if lastLine == "" {
+		return false
+	}
+
+	idlePatterns := []string{"❯", "> ", "$ ", "# ", "claude>"}
+	for _, pattern := range idlePatterns {
+		if strings.HasSuffix(lastLine, pattern) || lastLine == strings.TrimSpace(pattern) {
+			return true
+		}
+	}
+	return lastLine == ">" || lastLine == "❯"
+}
+
+func renderSidebarStateMarker(state string, tick int) string {
+	switch state {
+	case sidebarAgentStateRunning:
+		frame := sidebarRunningFrames[(tick/6)%len(sidebarRunningFrames)]
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Render(frame)
+	case sidebarAgentStateIdle:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Render("●")
+	default:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("○")
+	}
+}
+
+func formatSidebarRowMeta(runtime, tokenSummary, attention string, width int) string {
+	runtimeText := ""
+	if runtime != "" {
+		runtimeText = runtimeStyle.Render(runtime)
+	}
+	tokenText := ""
+	if tokenSummary != "" {
+		tokenText = tokenSidebarSty.Render(tokenSummary)
+	}
+	attentionText := ""
+	if attention != "" {
+		attentionText = taskFailClr.Render(attention)
+	}
+
+	return firstFittingDisplay(width,
+		joinSidebarMeta(runtimeText, tokenText, attentionText),
+		joinSidebarMeta(runtimeText, tokenText),
+		joinSidebarMeta(runtimeText, attentionText),
+		joinSidebarMeta(tokenText, attentionText),
+		runtimeText,
+		tokenText,
+		attentionText,
+	)
+}
+
+func joinSidebarMeta(parts ...string) string {
+	filtered := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			filtered = append(filtered, part)
+		}
+	}
+	return strings.Join(filtered, " ")
+}
+
+// tokenEntriesFromMap keeps only rows with parsed token data and sorts the
+// detailed tokens pane by descending cost so the most expensive agents surface first.
 func tokenEntriesFromMap(tokenData map[string]agentTokens) []agentTokens {
 	entries := make([]agentTokens, 0, len(tokenData))
 	for _, t := range tokenData {
@@ -866,6 +1214,8 @@ func tokenEntriesFromMap(tokenData map[string]agentTokens) []agentTokens {
 	return entries
 }
 
+// summarizeTokenEntries aggregates directional usage, standalone Claude done-line
+// totals, and the subset of agents that reported an explicit cost.
 func summarizeTokenEntries(entries []agentTokens, sessionCount int) tokenTotals {
 	summary := tokenTotals{
 		ReportingAgents: len(entries),
@@ -917,6 +1267,8 @@ func firstFittingDisplay(width int, candidates ...string) string {
 	return fitDisplayText(last, width)
 }
 
+// formatSidebarTokenSummary compresses per-agent usage for narrow sidebar rows,
+// preferring the richest representation that still fits.
 func formatSidebarTokenSummary(tokens agentTokens, width int) string {
 	if width <= 0 {
 		return ""
@@ -931,6 +1283,8 @@ func formatSidebarTokenSummary(tokens agentTokens, width int) string {
 	return firstFittingDisplay(width, full, total, tokens.Cost, io)
 }
 
+// footerTokenSummary builds the always-visible aggregate usage line shown above
+// the watch help text, including total-only Claude done-line usage when present.
 func (m watchModel) footerTokenSummary(totalW int) string {
 	summary := summarizeTokenEntries(tokenEntriesFromMap(m.tokenData), len(m.sessions))
 	counts := fmt.Sprintf("%d/%d agents", summary.ReportingAgents, summary.SessionCount)
@@ -964,6 +1318,8 @@ func (m watchModel) footerTokenSummary(totalW int) string {
 	)
 }
 
+// extractDoneLineTotal parses Claude Code completion summaries such as
+// "Done (16 tool uses · 93.9k tokens · 59s)" when no directional token split exists.
 func extractDoneLineTotal(line string) string {
 	if !claudeDoneLineRe.MatchString(line) {
 		return ""
@@ -975,6 +1331,8 @@ func extractDoneLineTotal(line string) string {
 	return matches[len(matches)-1][1]
 }
 
+// renderTaskListLines formats the compact two-line summary shown in the left
+// column of the tasks split view.
 func renderTaskListLines(task types.Task, selected bool, width int) []string {
 	cursor := "  "
 	nameStyle := lipgloss.NewStyle()
@@ -1006,6 +1364,8 @@ func renderTaskListLines(task types.Task, selected bool, width int) []string {
 	return []string{line1, fitDisplayText(line2, width)}
 }
 
+// renderTaskSplitTopBorder draws the connected top border for the list/detail
+// split layout used when at least one task matches the current filter.
 func renderTaskSplitTopBorder(title string, listW, detailW int) string {
 	leftSegmentW := listW + 1
 	rightSegmentW := detailW + 1
@@ -1019,6 +1379,8 @@ func renderTaskSplitTopBorder(title string, listW, detailW int) string {
 		taskBorderClr.Render(strings.Repeat("─", leftFill)+"┬"+strings.Repeat("─", rightSegmentW)+"╮")
 }
 
+// renderTaskSplitBottomBorder mirrors renderTaskSplitTopBorder so the divider
+// column stays aligned across the full split view.
 func renderTaskSplitBottomBorder(listW, detailW int) string {
 	leftSegmentW := listW + 1
 	rightSegmentW := detailW + 1
@@ -1208,6 +1570,206 @@ func formatTokenCount(v float64) string {
 	return fmt.Sprintf("%.0f", v)
 }
 
+func liveTokenLines(innerW int, entries []agentTokens, summary tokenTotals) []string {
+	lines := []string{tokenDimClr.Render(" live usage ")}
+	if len(entries) == 0 {
+		return append(lines, tokenDimClr.Render("  (no token data)"))
+	}
+
+	header := fmt.Sprintf(" %-24s %10s %10s %10s", "WORKSPACE", "INPUT", "OUTPUT", "COST")
+	lines = append(lines, tokenDimClr.Render(header))
+
+	maxCost := 0.0
+	for _, e := range entries {
+		if c := parseCostValue(e.Cost); c > maxCost {
+			maxCost = c
+		}
+	}
+
+	for _, e := range entries {
+		up := parseTokenValue(e.Up)
+		down := parseTokenValue(e.Down)
+		total := parseTokenValue(e.Total)
+		cost := parseCostValue(e.Cost)
+
+		sty := tokenNormalClr
+		if maxCost > 0 && cost >= maxCost*0.8 {
+			sty = tokenHighClr
+		}
+
+		upStr := "-"
+		if e.Up != "" {
+			upStr = "↑" + formatTokenCount(up)
+		}
+		downStr := "-"
+		if e.Down != "" {
+			downStr = "↓" + formatTokenCount(down)
+		} else if e.Total != "" {
+			downStr = "Σ" + formatTokenCount(total)
+		}
+		costStr := e.Cost
+		if costStr == "" {
+			costStr = "-"
+		}
+
+		ws := e.Workspace
+		if len(ws) > 24 {
+			ws = ws[:23] + "…"
+		}
+		line := fmt.Sprintf(" %-24s %10s %10s %10s", ws, upStr, downStr, costStr)
+		lines = append(lines, sty.Render(line))
+	}
+
+	lines = append(lines, tokenDimClr.Render(" "+strings.Repeat("─", max(0, innerW-2))))
+	totalOut := "-"
+	if summary.TotalDown > 0 {
+		totalOut = "↓" + formatTokenCount(summary.TotalDown)
+	} else if summary.StandaloneTotal > 0 {
+		totalOut = "Σ" + formatTokenCount(summary.StandaloneTotal)
+	}
+	totalIn := "-"
+	if summary.TotalUp > 0 {
+		totalIn = "↑" + formatTokenCount(summary.TotalUp)
+	}
+	totalLine := fmt.Sprintf(" %-24s %10s %10s %10s",
+		fmt.Sprintf("TOTAL (%d agents)", summary.ReportingAgents),
+		totalIn,
+		totalOut,
+		func() string {
+			if summary.CostAgents == 0 {
+				return "-"
+			}
+			return fmt.Sprintf("$%.2f", summary.TotalCost)
+		}())
+	lines = append(lines, tokenSumClr.Render(totalLine))
+	return lines
+}
+
+func trendTokenLines(innerW int, sessions []tmux.SessionInfo, trendData map[string]usage.WorkspaceTrend) []string {
+	lines := []string{tokenDimClr.Render(" history 24h ")}
+	seen := make(map[string]struct{}, len(sessions))
+	workspaceOrder := make([]string, 0, len(sessions))
+	for _, session := range sessions {
+		if _, ok := seen[session.Workspace]; ok {
+			continue
+		}
+		seen[session.Workspace] = struct{}{}
+		workspaceOrder = append(workspaceOrder, session.Workspace)
+	}
+
+	type trendRow struct {
+		workspace string
+		last      int64
+		total     int64
+		spark     string
+	}
+	rows := make([]trendRow, 0, len(workspaceOrder))
+	unavailable := 0
+	for _, workspace := range workspaceOrder {
+		trend, ok := trendData[workspace]
+		if !ok || !trend.Available {
+			unavailable++
+			continue
+		}
+		bucketTotals := make([]int64, 0, len(trend.Buckets))
+		for _, bucket := range trend.Buckets {
+			bucketTotals = append(bucketTotals, bucket.Totals.Total())
+		}
+		rows = append(rows, trendRow{
+			workspace: workspace,
+			last:      trend.LatestTokens.Total(),
+			total:     trend.Total.Total(),
+			spark:     renderTokenSparkline(bucketTotals),
+		})
+	}
+
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].total == rows[j].total {
+			return rows[i].workspace < rows[j].workspace
+		}
+		return rows[i].total > rows[j].total
+	})
+
+	if len(rows) == 0 {
+		if unavailable > 0 {
+			return append(lines, tokenDimClr.Render(fmt.Sprintf("  (%d workspace(s) unavailable)", unavailable)))
+		}
+		return append(lines, tokenDimClr.Render("  (no history data yet)"))
+	}
+
+	header := fmt.Sprintf(" %-18s %10s %10s %-8s", "WORKSPACE", "LAST", "24H", "TREND")
+	lines = append(lines, tokenDimClr.Render(header))
+	for _, row := range rows {
+		ws := row.workspace
+		if len(ws) > 18 {
+			ws = ws[:17] + "…"
+		}
+		line := fmt.Sprintf(" %-18s %10s %10s %-8s",
+			ws,
+			formatTokenCount(float64(row.last)),
+			formatTokenCount(float64(row.total)),
+			row.spark,
+		)
+		lines = append(lines, tokenNormalClr.Render(line))
+	}
+	if unavailable > 0 {
+		lines = append(lines, tokenDimClr.Render(fmt.Sprintf("  %d workspace(s) unavailable", unavailable)))
+	}
+	return lines
+}
+
+func renderTokenSparkline(values []int64) string {
+	if len(values) == 0 {
+		return ""
+	}
+	var maxValue int64
+	for _, value := range values {
+		if value > maxValue {
+			maxValue = value
+		}
+	}
+	if maxValue <= 0 {
+		return strings.Repeat("·", len(values))
+	}
+
+	levels := []rune("▁▂▃▄▅▆▇█")
+	out := make([]rune, len(values))
+	for i, value := range values {
+		if value <= 0 {
+			out[i] = '·'
+			continue
+		}
+		idx := int(float64(value) / float64(maxValue) * float64(len(levels)-1))
+		if idx < 0 {
+			idx = 0
+		}
+		if idx >= len(levels) {
+			idx = len(levels) - 1
+		}
+		out[i] = levels[idx]
+	}
+	return string(out)
+}
+
+func splitTokenSectionBudget(innerH int, wantTrend bool) (int, int) {
+	if !wantTrend || innerH < 6 {
+		return innerH, 0
+	}
+	trendH := innerH / 3
+	if trendH < 2 {
+		trendH = 2
+	}
+	liveH := innerH - trendH
+	if liveH < 4 {
+		liveH = min(4, innerH)
+		trendH = innerH - liveH
+	}
+	if trendH < 0 {
+		trendH = 0
+	}
+	return liveH, trendH
+}
+
 var (
 	tokenBorderClr = lipgloss.NewStyle().Foreground(lipgloss.Color("13"))
 	tokenTitleSty  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("13"))
@@ -1217,6 +1779,8 @@ var (
 	tokenSumClr    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
 )
 
+// renderTokens renders the optional detailed usage pane. Rows that only have a
+// Claude done-line total use the output column to show Σ total tokens.
 func (m watchModel) renderTokens(totalW, totalH int) string {
 	innerW := totalW - 2
 	innerH := totalH - 2
@@ -1232,84 +1796,16 @@ func (m watchModel) renderTokens(totalW, totalH int) string {
 	}
 	topLine := tokenBorderClr.Render("╭─") + title + tokenBorderClr.Render(strings.Repeat("─", pad)+"╮")
 
-	// Collect and sort token data
 	entries := tokenEntriesFromMap(m.tokenData)
 	summary := summarizeTokenEntries(entries, len(m.sessions))
+	liveLines := liveTokenLines(innerW, entries, summary)
+	trendLines := trendTokenLines(innerW, m.sessions, m.trendData)
+	liveBudget, trendBudget := splitTokenSectionBudget(innerH, len(trendLines) > 0)
 
-	// Find max cost for highlighting
-	maxCost := 0.0
-	for _, e := range entries {
-		if c := parseCostValue(e.Cost); c > maxCost {
-			maxCost = c
-		}
-	}
-
-	// Header
 	var tokenLines []string
-	if len(entries) == 0 {
-		tokenLines = append(tokenLines, tokenDimClr.Render("  (no token data)"))
-	} else {
-		header := fmt.Sprintf(" %-24s %10s %10s %10s",
-			"WORKSPACE", "INPUT", "OUTPUT", "COST")
-		tokenLines = append(tokenLines, tokenDimClr.Render(header))
-
-		for _, e := range entries {
-			up := parseTokenValue(e.Up)
-			down := parseTokenValue(e.Down)
-			total := parseTokenValue(e.Total)
-			cost := parseCostValue(e.Cost)
-
-			sty := tokenNormalClr
-			if maxCost > 0 && cost >= maxCost*0.8 {
-				sty = tokenHighClr
-			}
-
-			upStr := "-"
-			if e.Up != "" {
-				upStr = "↑" + formatTokenCount(up)
-			}
-			downStr := "-"
-			if e.Down != "" {
-				downStr = "↓" + formatTokenCount(down)
-			} else if e.Total != "" {
-				downStr = "Σ" + formatTokenCount(total)
-			}
-			costStr := e.Cost
-			if costStr == "" {
-				costStr = "-"
-			}
-
-			ws := e.Workspace
-			if len(ws) > 24 {
-				ws = ws[:23] + "…"
-			}
-			line := fmt.Sprintf(" %-24s %10s %10s %10s", ws, upStr, downStr, costStr)
-			tokenLines = append(tokenLines, sty.Render(line))
-		}
-
-		// Separator + total
-		tokenLines = append(tokenLines, tokenDimClr.Render(" "+strings.Repeat("─", innerW-2)))
-		totalOut := "-"
-		if summary.TotalDown > 0 {
-			totalOut = "↓" + formatTokenCount(summary.TotalDown)
-		} else if summary.StandaloneTotal > 0 {
-			totalOut = "Σ" + formatTokenCount(summary.StandaloneTotal)
-		}
-		totalIn := "-"
-		if summary.TotalUp > 0 {
-			totalIn = "↑" + formatTokenCount(summary.TotalUp)
-		}
-		totalLine := fmt.Sprintf(" %-24s %10s %10s %10s",
-			fmt.Sprintf("TOTAL (%d agents)", summary.ReportingAgents),
-			totalIn,
-			totalOut,
-			func() string {
-				if summary.CostAgents == 0 {
-					return "-"
-				}
-				return fmt.Sprintf("$%.2f", summary.TotalCost)
-			}())
-		tokenLines = append(tokenLines, tokenSumClr.Render(totalLine))
+	tokenLines = append(tokenLines, liveLines[:min(len(liveLines), liveBudget)]...)
+	if trendBudget > 0 {
+		tokenLines = append(tokenLines, trendLines[:min(len(trendLines), trendBudget)]...)
 	}
 
 	var bodyLines []string
@@ -1375,6 +1871,18 @@ func readHistoryFile(path string, maxEntries int) []daemon.HistoryEntry {
 	return entries
 }
 
+func readHistoryFileIfChanged(path string, lastMod time.Time, cached []daemon.HistoryEntry, maxEntries int) ([]daemon.HistoryEntry, time.Time) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, time.Time{}
+	}
+	modTime := info.ModTime()
+	if !lastMod.IsZero() && !modTime.After(lastMod) {
+		return cached, lastMod
+	}
+	return readHistoryFile(path, maxEntries), modTime
+}
+
 func readTasksFile(path string) []types.Task {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -1399,6 +1907,18 @@ func readTasksFile(path string) []types.Task {
 		return tasks[i].UpdatedAt.After(tasks[j].UpdatedAt)
 	})
 	return tasks
+}
+
+func readTasksFileIfChanged(path string, lastMod time.Time, cached []types.Task) ([]types.Task, time.Time) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, time.Time{}
+	}
+	modTime := info.ModTime()
+	if !lastMod.IsZero() && !modTime.After(lastMod) {
+		return cached, lastMod
+	}
+	return readTasksFile(path), modTime
 }
 
 func taskSortOrder(s types.TaskStatus) int {
@@ -1431,6 +1951,8 @@ func taskStatusStyle(s types.TaskStatus) lipgloss.Style {
 	}
 }
 
+// renderTasks renders the filtered task list and the currently selected task's
+// detail pane in a connected split layout.
 func (m watchModel) renderTasks(totalW, totalH int) string {
 	innerW := totalW - 2
 	innerH := totalH - 2
@@ -1606,5 +2128,9 @@ func fitDisplayText(s string, width int) string {
 }
 
 func init() {
+	watchCmd.Flags().BoolVar(&watchShowAgents, "agents", false, "open the agents-only watch view (stream pane hidden)")
+	watchCmd.Flags().BoolVar(&watchShowTasks, "tasks", false, "open the tasks watch view")
+	watchCmd.Flags().BoolVar(&watchShowMessages, "messages", false, "open the messages watch view")
+	watchCmd.Flags().BoolVar(&watchShowTokens, "tokens", false, "open the tokens watch view")
 	rootCmd.AddCommand(watchCmd)
 }

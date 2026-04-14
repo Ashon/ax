@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ashon/ax/internal/types"
+	"github.com/ashon/ax/internal/usage"
 )
 
 const DefaultSocketPath = "~/.local/state/ax/daemon.sock"
@@ -334,6 +335,27 @@ func (d *Daemon) handleEnvelope(conn net.Conn, env *Envelope, workspace *string)
 		}
 		d.sharedMu.RUnlock()
 		return NewResponseEnvelope(env.ID, &ListSharedResponse{Values: vals})
+
+	case MsgUsageTrends:
+		var p UsageTrendsPayload
+		if err := env.DecodePayload(&p); err != nil {
+			return nil, fmt.Errorf("decode usage_trends: %w", err)
+		}
+		since := time.Duration(p.SinceMinutes) * time.Minute
+		bucket := time.Duration(p.BucketMinutes) * time.Minute
+		now := time.Now()
+		requests := make([]usage.WorkspaceBinding, 0, len(p.Workspaces))
+		for _, req := range p.Workspaces {
+			requests = append(requests, usage.WorkspaceBinding{
+				Name: req.Workspace,
+				Dir:  req.Cwd,
+			})
+		}
+		trends, err := usage.QueryWorkspaceTrends(requests, now, since, bucket)
+		if err != nil {
+			return nil, fmt.Errorf("query usage_trends: %w", err)
+		}
+		return NewResponseEnvelope(env.ID, &UsageTrendsResponse{Trends: trends})
 
 	case MsgCreateTask:
 		var p CreateTaskPayload

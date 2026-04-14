@@ -78,6 +78,17 @@ func registerTools(srv *server.MCPServer, client *DaemonClient, configPath strin
 		listWorkspacesHandler(client),
 	)
 
+	// get_usage_trends
+	srv.AddTool(
+		mcp.NewTool("get_usage_trends",
+			mcp.WithDescription("Return recent Claude token trend data for active ax workspaces, including per-agent breakout when transcript attribution is available."),
+			mcp.WithString("workspace", mcp.Description("Optional workspace name filter. When omitted, queries all active workspaces.")),
+			mcp.WithNumber("since_minutes", mcp.Description("History window in minutes. Defaults to 180.")),
+			mcp.WithNumber("bucket_minutes", mcp.Description("Bucket size in minutes. Defaults to 5.")),
+		),
+		getUsageTrendsHandler(client, configPath),
+	)
+
 	// set_status
 	srv.AddTool(
 		mcp.NewTool("set_status",
@@ -214,12 +225,21 @@ type agentInfo struct {
 	LaunchMode  string            `json:"launch_mode"`
 	Command     string            `json:"command,omitempty"`
 	Active      bool              `json:"active"`
+	State       string            `json:"state"`
 	Status      types.AgentStatus `json:"status,omitempty"`
 	StatusText  string            `json:"status_text,omitempty"`
 	ConnectedAt *time.Time        `json:"connected_at,omitempty"`
 	Instruction string            `json:"instruction_file,omitempty"`
 	Preview     string            `json:"instructions_preview,omitempty"`
 }
+
+const (
+	agentStateOffline = "offline"
+	agentStateIdle    = "idle"
+	agentStateRunning = "running"
+)
+
+var workspaceIsIdle = tmux.IsIdle
 
 type workspaceListResult struct {
 	Workspace  string                `json:"workspace"`
@@ -254,6 +274,7 @@ func listAgentsHandler(client *DaemonClient, configPath string) server.ToolHandl
 				Dir:         ws.Dir,
 				Description: ws.Description,
 				Active:      false,
+				State:       agentStateOffline,
 				Preview:     instructionPreview(ws.Instructions),
 			}
 
@@ -275,6 +296,7 @@ func listAgentsHandler(client *DaemonClient, configPath string) server.ToolHandl
 
 			if active, ok := activeByName[name]; ok {
 				info.Active = true
+				info.State = deriveAgentState(name)
 				info.Status = active.Status
 				info.StatusText = active.StatusText
 				info.ConnectedAt = active.ConnectedAt
@@ -301,6 +323,33 @@ func listAgentsHandler(client *DaemonClient, configPath string) server.ToolHandl
 			"active_count": len(activeWorkspaces),
 			"agents":       agents,
 		}, "", "  ")
+		return mcp.NewToolResultText(string(data)), nil
+	}
+}
+
+func getUsageTrendsHandler(client *DaemonClient, configPath string) server.ToolHandlerFunc {
+	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		workspaceName := strings.TrimSpace(request.GetString("workspace", ""))
+		sinceMinutes := int(request.GetFloat("since_minutes", 180))
+		bucketMinutes := int(request.GetFloat("bucket_minutes", 5))
+
+		requests, err := buildUsageTrendRequests(client, configPath, workspaceName)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		trends, err := client.GetUsageTrends(requests, sinceMinutes, bucketMinutes)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to query usage trends: %v", err)), nil
+		}
+
+		payload := map[string]any{
+			"workspace":      workspaceName,
+			"since_minutes":  sinceMinutes,
+			"bucket_minutes": bucketMinutes,
+			"trends":         trends,
+		}
+		data, _ := json.MarshalIndent(payload, "", "  ")
 		return mcp.NewToolResultText(string(data)), nil
 	}
 }
@@ -369,6 +418,58 @@ func loadToolConfig(configPath string) (string, *config.Config, error) {
 	return cfgPath, cfg, nil
 }
 
+func buildUsageTrendRequests(client *DaemonClient, configPath, workspaceName string) ([]daemon.UsageTrendWorkspace, error) {
+	active, err := client.ListWorkspaces()
+	if err != nil {
+		return nil, fmt.Errorf("list active workspaces: %w", err)
+	}
+	activeByName := make(map[string]types.WorkspaceInfo, len(active))
+	for _, ws := range active {
+		activeByName[ws.Name] = ws
+	}
+
+	if workspaceName != "" {
+		if ws, ok := activeByName[workspaceName]; ok && strings.TrimSpace(ws.Dir) != "" {
+			return []daemon.UsageTrendWorkspace{{
+				Workspace: workspaceName,
+				Cwd:       strings.TrimSpace(ws.Dir),
+			}}, nil
+		}
+
+		cfgPath, cfg, err := loadToolConfig(configPath)
+		if err != nil {
+			return nil, fmt.Errorf("load ax config for workspace %q: %w", workspaceName, err)
+		}
+		if ws, ok := cfg.Workspaces[workspaceName]; ok && strings.TrimSpace(ws.Dir) != "" {
+			return []daemon.UsageTrendWorkspace{{
+				Workspace: workspaceName,
+				Cwd:       strings.TrimSpace(ws.Dir),
+			}}, nil
+		}
+		return nil, fmt.Errorf("workspace %q not found in active registry or %s", workspaceName, cfgPath)
+	}
+
+	requests := make([]daemon.UsageTrendWorkspace, 0, len(active))
+	seen := make(map[string]struct{}, len(active))
+	for _, ws := range active {
+		if _, ok := seen[ws.Name]; ok {
+			continue
+		}
+		seen[ws.Name] = struct{}{}
+		if strings.TrimSpace(ws.Dir) == "" {
+			continue
+		}
+		requests = append(requests, daemon.UsageTrendWorkspace{
+			Workspace: ws.Name,
+			Cwd:       strings.TrimSpace(ws.Dir),
+		})
+	}
+	sort.Slice(requests, func(i, j int) bool {
+		return requests[i].Workspace < requests[j].Workspace
+	})
+	return requests, nil
+}
+
 func instructionPreview(instructions string) string {
 	if strings.TrimSpace(instructions) == "" {
 		return ""
@@ -387,6 +488,7 @@ func matchesAgentQuery(info agentInfo, query string) bool {
 		info.Description,
 		info.Runtime,
 		info.Command,
+		info.State,
 		info.Preview,
 		info.StatusText,
 	}
@@ -396,6 +498,13 @@ func matchesAgentQuery(info agentInfo, query string) bool {
 		}
 	}
 	return false
+}
+
+func deriveAgentState(workspace string) string {
+	if workspaceIsIdle(workspace) {
+		return agentStateIdle
+	}
+	return agentStateRunning
 }
 
 func waitForWorkspaceReply(ctx context.Context, client *DaemonClient, from string, timeout int) (string, error) {
