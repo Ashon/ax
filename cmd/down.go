@@ -11,7 +11,6 @@ import (
 
 	"github.com/ashon/ax/internal/config"
 	"github.com/ashon/ax/internal/daemon"
-	"github.com/ashon/ax/internal/tmux"
 	"github.com/ashon/ax/internal/workspace"
 	"github.com/spf13/cobra"
 )
@@ -35,13 +34,13 @@ var downCmd = &cobra.Command{
 			return err
 		}
 
-		// Stop orchestrator sessions (root + any sub-orchestrators)
+		// Stop sub-orchestrator sessions. The root orchestrator is no
+		// longer a managed tmux session — it runs in the user's
+		// terminal via `ax claude` / `ax codex` — so there is nothing
+		// to destroy for it here.
 		if tree, err := config.LoadTree(cfgPath); err == nil {
 			fmt.Println("\nStopping orchestrators:")
 			destroyOrchestrators(tree)
-		} else if tmux.SessionExists("orchestrator") {
-			tmux.DestroySession("orchestrator")
-			fmt.Println("  orchestrator: stopped")
 		}
 
 		// Remove orchestrator .mcp.json

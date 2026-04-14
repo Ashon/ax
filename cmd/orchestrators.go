@@ -14,8 +14,13 @@ import (
 	"github.com/ashon/ax/internal/workspace"
 )
 
-// ensureOrchestrators walks the project tree and makes sure an orchestrator
-// tmux session exists for each project (root + every sub-project).
+// ensureOrchestrators walks the project tree and makes sure each project's
+// orchestrator artifacts (prompt + MCP config) exist. Sub-orchestrators
+// (every non-root node) also get a long-running tmux session, since they
+// need to be always-on for cross-project delegation. The root orchestrator
+// no longer runs as a managed tmux session — it is started on demand by
+// `ax claude` / `ax codex`, which run the coding-agent CLI in the user's
+// foreground terminal using the artifacts written here.
 func ensureOrchestrators(tree *config.ProjectNode, socketPath, cfgPath string) error {
 	if tree == nil {
 		return nil
@@ -25,6 +30,8 @@ func ensureOrchestrators(tree *config.ProjectNode, socketPath, cfgPath string) e
 
 func createOrchestratorForNode(node *config.ProjectNode, parentName, socketPath, cfgPath string) error {
 	selfName := workspace.OrchestratorName(node.Prefix)
+	isRoot := node.Prefix == ""
+
 	orchDir, err := orchestratorDir(node)
 	if err != nil {
 		return fmt.Errorf("resolve orchestrator dir for %s: %w", selfName, err)
@@ -53,7 +60,9 @@ func createOrchestratorForNode(node *config.ProjectNode, parentName, socketPath,
 		return fmt.Errorf("write %s prompt: %w", selfName, err)
 	}
 
-	if !tmux.SessionExists(selfName) {
+	// Only sub-orchestrators run as managed tmux sessions; the root
+	// orchestrator is launched interactively via `ax claude` / `ax codex`.
+	if !isRoot && !tmux.SessionExists(selfName) {
 		exe, err := os.Executable()
 		if err != nil {
 			return fmt.Errorf("resolve ax binary: %w", err)
@@ -115,7 +124,9 @@ func destroyOrchestratorForNode(node *config.ProjectNode) {
 // refreshOrchestratorTree is called after registering a new sub-project.
 // It reloads the topmost config, regenerates all orchestrator prompt files
 // so they mention the new child, creates any missing sub-orchestrator
-// sessions, and notifies the running root orchestrator of the new child.
+// sessions, and — if the user happens to have a root orchestrator CLI
+// (`ax claude`/`ax codex`) currently running — notifies it of the new
+// child via the daemon.
 func refreshOrchestratorTree(newChildName string) error {
 	cfgPath, err := resolveConfigPath()
 	if err != nil {
