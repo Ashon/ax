@@ -29,6 +29,7 @@ tmux 기반 멀티 에이전트 LLM 워크스페이스 매니저
 
 - tmux 세션 기반 에이전트 격리
 - Unix 소켓 데몬을 통한 비동기 메시지 패싱
+- task 생성/진행/완료 상태 추적과 stale 신호 계산
 - MCP 표준 도구 인터페이스로 에이전트 간 통신
 - 계층적 프로젝트 트리와 서브 오케스트레이터 지원
 - BubbleTea 기반 TUI (shell, watch)
@@ -52,12 +53,13 @@ tmux 기반 멀티 에이전트 LLM 워크스페이스 매니저
 │  │  claude/codex  │  │     │  │ Registry │ │ MessageQueue│  │
 │  │  CLI agent     │  │     │  └──────────┘ └────────────┘  │
 │  └───────┬────────┘  │     │  ┌──────────┐ ┌────────────┐  │
-│          │           │     │  │ History  │ │SharedValues │  │
+│          │           │     │  │ History  │ │ TaskStore  │  │
 │  ┌───────┴────────┐  │     │  └──────────┘ └────────────┘  │
-│  │  MCP server    │──╋────▶│                                │
-│  │  (ax mcp-server)│ │     └────────────────────────────────┘
-│  └────────────────┘  │                    ▲
-└──────────────────────┘                    │
+│  │  MCP server    │──╋────▶│  ┌────────────┐ ┌────────────┐ │
+│  │  (ax mcp-server)│ │     │  │SharedValues│ │WakeScheduler│ │
+│  └────────────────┘  │     │  └────────────┘ └────────────┘ │
+└──────────────────────┘     └────────────────────────────────┘
+                                            ▲
                                             │
 ┌──────────────┐  ┌──────────────┐  ┌───────┴──────┐
 │ workspace-A  │  │ workspace-B  │  │ workspace-C  │
@@ -70,7 +72,7 @@ tmux 기반 멀티 에이전트 LLM 워크스페이스 매니저
 
 | 구성 요소 | 역할 |
 |-----------|------|
-| **ax daemon** | Unix 소켓 기반 중앙 메시지 브로커. 워크스페이스 등록/해제, 메시지 큐, 공유 값 저장소 |
+| **ax daemon** | Unix 소켓 기반 중앙 메시지 브로커. 워크스페이스 등록/해제, 메시지 큐, 공유 값 저장소, task 저장소, wake 재시도 스케줄링 |
 | **MCP server** | 각 워크스페이스에 stdio로 연결되는 MCP 서버. 에이전트가 사용할 도구 노출 |
 | **Workspace** | 하나의 tmux 세션 + 에이전트 런타임(claude/codex). 격리된 작업 환경 |
 | **Orchestrator** | 다른 워크스페이스들을 조율하는 특수 에이전트. 자동 생성된 프롬프트로 역할 부여 |
@@ -115,11 +117,13 @@ ax/
     │   ├── registry.go              #     워크스페이스 등록 관리
     │   ├── msgqueue.go              #     워크스페이스별 메시지 큐
     │   ├── history.go               #     JSONL 메시지 히스토리
+    │   ├── taskstore.go             #     task 저장/검증/persist
+    │   ├── wakescheduler.go         #     wake 재시도/backoff 스케줄러
     │   └── daemon_test.go           #     프로토콜/레지스트리/큐 테스트
     │
     ├── mcpserver/                   #   MCP 프로토콜 서버
     │   ├── server.go                #     MCP 서버 설정 및 도구 등록
-    │   ├── tools.go                 #     12개 MCP 도구 구현
+    │   ├── tools.go                 #     17개 MCP 도구 구현
     │   └── client.go                #     데몬 연결 클라이언트
     │
     ├── agent/                       #   에이전트 런타임 추상화
@@ -171,6 +175,8 @@ ax/
 - Unix 도메인 소켓(`~/.local/state/ax/daemon.sock`)으로 통신
 - 뉴라인 구분 JSON 프로토콜
 - 워크스페이스 레지스트리, 메시지 큐, 공유 값 저장소 관리
+- `tasks.json` 기반 task 저장과 stale/queue/wake 관측 정보 계산
+- unread 메시지에 대한 tmux wake 재시도 스케줄링
 - PID 파일(`daemon.pid`)로 생존 확인
 
 ### MCP Server
@@ -255,6 +261,8 @@ go test -v -run TestLoadMerges ./...   # 특정 테스트
 
 - `internal/config/config_test.go`: 재귀적 자식 로딩, 순환 참조 방지
 - `internal/daemon/daemon_test.go`: 프로토콜 직렬화, 레지스트리, 메시지 큐, 공유 값
+- `internal/daemon/taskstore_test.go`: task 기본값, 권한, 상태 전이, 중복 no-op 로그 억제
+- `internal/daemon/task_observability_test.go`: stale/divergence/wake 상태 계산
 
 ---
 
@@ -374,6 +382,13 @@ type Child struct {
 | `ax run-agent` | (내부) 워크스페이스 내에서 에이전트 실행 |
 | `ax mcp-server` | (내부) MCP 서버 시작 |
 
+### TUI 메모
+
+- `ax watch`는 config 트리와 현재 tmux 세션을 결합해 사이드바를 그린다. 상태 마커는 `offline`=`○`, `idle`=`●`, `running`=스피너이며, 하단 스트림은 `messages` / `tasks` / `tokens` / `off`를 순환한다.
+- `ax watch`의 task pane은 `tasks.json`을 직접 읽어 active/all/completed/failed 필터와 stale/divergence/queued 배지를 표시한다.
+- `ax shell`은 기본적으로 오케스트레이터 세션을 메인 pane에 보여주고, `Ctrl+A`로 control mode에 들어가 `v`(선택 워크스페이스 보기), `o`(오케스트레이터 복귀), `t`(stream 전환), `x`(interrupt) 같은 조작을 한다.
+- `ax shell`도 `watch`와 동일한 messages/tasks/tokens 스트림과 workspace status/task 관측 정보를 재사용한다.
+
 ---
 
 ## 데몬 프로토콜
@@ -404,9 +419,19 @@ type Child struct {
 | `set_shared` | Client → Daemon | 공유 키-값 저장 |
 | `get_shared` | Client → Daemon | 공유 키-값 조회 |
 | `list_shared` | Client → Daemon | 모든 공유 값 목록 |
+| `create_task` | Client → Daemon | 새 task 생성 |
+| `update_task` | Client → Daemon | task 상태/결과/로그 갱신 |
+| `get_task` | Client → Daemon | 단일 task 조회 |
+| `list_tasks` | Client → Daemon | task 목록 조회 |
 | `push_message` | Daemon → Client | 새 메시지 푸시 알림 |
 | `response` | Daemon → Client | 요청 성공 응답 |
 | `error` | Daemon → Client | 요청 실패 응답 |
+
+### Task 관련 동작
+
+- `create_task`는 `title`, `description`, `assignee`, `start_mode`, `priority`, `stale_after_seconds`를 받아 `pending` 상태 task를 만들고 `tasks.json`에 persist한다.
+- `update_task`는 assignee 또는 creator가 로그를 남길 수 있고, 상태 변경과 `result` 설정은 assignee가 담당한다. 상태 전이는 `pending → in_progress → completed|failed` 단방향이다.
+- `get_task`와 `list_tasks` 응답은 단순 저장본이 아니라 daemon이 계산한 `stale_info`를 포함한다. 여기에는 pending message 수, 마지막 관련 메시지 시각, wake 재시도 상태, task/message divergence 정보가 들어간다.
 
 ### 연결 생명주기
 
@@ -417,12 +442,13 @@ type Child struct {
 4. 연결 종료 시 자동 unregister
 ```
 
-### 메시지 큐
+### 메시지 큐와 wake
 
 - 워크스페이스별 독립 큐
 - `send_message`로 대상 큐에 enqueue
 - `read_messages`로 자신의 큐에서 dequeue (소비 후 삭제)
 - 대상 워크스페이스가 연결 중이면 `push_message`로 즉시 알림
+- MCP `send_message`/`request` 도구는 tmux로 즉시 wake를 시도하고, daemon의 `WakeScheduler`는 unread 메시지가 남아 있으면 idle 상태를 기다리며 backoff 재시도를 이어간다.
 
 ### 히스토리
 
@@ -433,7 +459,7 @@ type Child struct {
 
 ## MCP 도구
 
-에이전트가 사용할 수 있는 MCP 도구 목록이다. `internal/mcpserver/tools.go`에서 등록된다.
+에이전트가 사용할 수 있는 MCP 도구 목록이다. `internal/mcpserver/tools.go`에서 등록되며 현재 17개이다.
 
 ### 통신 도구
 
@@ -448,7 +474,7 @@ type Child struct {
 
 | 도구 | 파라미터 | 설명 |
 |------|----------|------|
-| `list_agents` | `query`, `active_only` | 설정된 에이전트 목록 (활성 상태 포함) |
+| `list_agents` | `query`, `active_only` | 설정된 에이전트 목록. launch mode, 활성 여부, `state`(`offline`/`idle`/`running`), `status_text` 포함 |
 | `inspect_agent` | `name` (필수), `question`, `timeout` | 에이전트에 상태 질의 후 응답 대기 |
 | `list_workspaces` | - | 활성 워크스페이스 목록 |
 
@@ -457,7 +483,22 @@ type Child struct {
 | 도구 | 파라미터 | 설명 |
 |------|----------|------|
 | `set_status` | `status` (필수) | 자신의 상태 텍스트 갱신 |
+
+### 세션 제어 도구
+
+| 도구 | 파라미터 | 설명 |
+|------|----------|------|
 | `interrupt_agent` | `name` (필수) | 대상 에이전트에 Escape 전송 |
+| `send_keys` | `workspace` (필수), `keys` (필수 배열) | tmux 세션에 raw/special key 시퀀스를 주입. resuming prompt, yes/no 확인창, 입력 대기 해소에 사용 |
+
+### Task 도구
+
+| 도구 | 파라미터 | 설명 |
+|------|----------|------|
+| `create_task` | `title` (필수), `description`, `assignee` (필수), `start_mode`, `priority`, `stale_after_seconds` | 새 task 생성 |
+| `update_task` | `id` (필수), `status`, `result`, `log` | task 상태/결과 갱신 또는 progress log 추가 |
+| `get_task` | `id` (필수) | 단일 task 상세 조회 |
+| `list_tasks` | `assignee`, `created_by`, `status` | 조건별 task 목록 조회 |
 
 ### 공유 저장소 도구
 
@@ -477,6 +518,15 @@ type Child struct {
 // 2. 프롬프트 텍스트 입력
 // 3. Enter 전송
 ```
+
+즉시 wake 이후에도 unread 메시지가 남아 있으면 daemon의 `WakeScheduler`가 `5s → 10s → 20s → 40s → 60s` backoff로 최대 10회까지 재시도한다. 재시도는 tmux 세션이 존재하고 에이전트가 idle로 보일 때만 수행된다.
+
+### TaskStore / WakeScheduler
+
+- `TaskStore` (`internal/daemon/taskstore.go`)는 daemon 상태 디렉터리의 `tasks.json`에 task를 저장한다. `Create`/`Update`/`Refresh`는 변경 사항을 즉시 persist하고, `Get`/`List`/`Snapshot`은 방어적 복사본을 반환한다.
+- `TaskStore.Update`는 assignee/creator 권한, monotonic status transition, assignee 전용 `result` 쓰기, 중복 no-op 로그 억제를 함께 검증한다.
+- `WakeScheduler` (`internal/daemon/wakescheduler.go`)는 workspace별 pending wake를 추적한다. `send_message`가 메시지를 enqueue하면 scheduler entry가 등록되고, `read_messages`로 inbox가 비워지면 cancel된다.
+- `WakeScheduler.State`는 watch/diagnostics에서 볼 수 있는 현재 wake 재시도 상태(`sender`, `attempts`, `next_retry`)를 노출한다.
 
 ---
 
@@ -660,11 +710,14 @@ MCP Server A ──[Unix socket]──▶ Daemon
   │                               │
   │                               ├─ queue.Enqueue("A", "B", msg)
   │                               ├─ history.Append("A", "B", msg)
+  │                               ├─ wakeScheduler.Schedule("B", "A")
   │                               └─ push_message → MCP Server B (연결 중이면)
   │
   ├─ wakeAgent("B", "A")
   │   └─ tmux send-keys: "read_messages로 메시지 확인..."
   │
+  └─ daemon retry
+      └─ idle 상태가 될 때까지 WakeScheduler가 backoff 재시도
   ▼
 에이전트 B (claude)
   │
