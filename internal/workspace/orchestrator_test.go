@@ -64,3 +64,27 @@ func TestWriteOrchestratorPromptDistinguishesAliasAndProjectName(t *testing.T) {
 		t.Fatalf("expected root prompt to list child display identity, got:\n%s", string(rootPrompt))
 	}
 }
+
+func TestOrchestratorPromptRequiresTrackingAssignedWorkToClosure(t *testing.T) {
+	root := &config.ProjectNode{Name: "root"}
+	rootPrompt := OrchestratorPrompt(root, "", "")
+	for _, want := range []string{
+		"오케스트레이터는 자신이 assign한 일이 실제 완료 결과, 명시적 blocker 보고, 실패 중 하나의 종결 상태에 도달할 때까지 계속 추적할 책임이 있습니다.",
+		"assign한 일은 실제 완료 증거를 받거나, blocker를 상위에 명시적으로 보고하거나, 실패로 종료할 때까지 계속 소유하고 추적합니다.",
+	} {
+		if !strings.Contains(rootPrompt, want) {
+			t.Fatalf("expected root prompt to contain %q\n%s", want, rootPrompt)
+		}
+	}
+
+	child := &config.ProjectNode{Name: "shared", Prefix: "shared"}
+	subPrompt := OrchestratorPrompt(child, child.Prefix, "orchestrator")
+	for _, want := range []string{
+		"오케스트레이터는 자신이 assign한 일이 실제 완료 결과, 명시적 blocker 보고, 실패 중 하나의 종결 상태에 도달할 때까지 계속 추적할 책임이 있습니다.",
+		"assign한 일은 실제 완료 증거를 받거나, blocker를 상위에 명시적으로 보고하거나, 실패로 종료할 때까지 계속 소유하고 추적합니다.",
+	} {
+		if !strings.Contains(subPrompt, want) {
+			t.Fatalf("expected sub prompt to contain %q\n%s", want, subPrompt)
+		}
+	}
+}
