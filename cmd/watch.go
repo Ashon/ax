@@ -185,8 +185,16 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		for _, s := range m.sessions {
-			content := capturePane(s.Name)
+		for i, s := range m.sessions {
+			// Selected session needs fresh content every tick so the main
+			// pane stays live; other sessions can be throttled to ~5 Hz
+			// which is plenty for sidebar activity dots + token parsing.
+			var content string
+			if i == m.selected {
+				content = capturePaneThrottled(s.Name, 0)
+			} else {
+				content = capturePaneThrottled(s.Name, 200*time.Millisecond)
+			}
 			if prev, ok := m.prevCaps[s.Workspace]; ok && prev != content {
 				m.activity[s.Workspace] = time.Now()
 			}
@@ -201,7 +209,10 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.msgHistory = readHistoryFile(m.histPath, 50)
 		m.tasks = readTasksFile(m.tasksPath)
 		m.workspaceInfos, m.workspaceInfoUpdatedAt = refreshWatchWorkspaceInfos(m.workspaceInfos, m.workspaceInfoUpdatedAt)
-		m.taskSelected = clampTaskSelection(m.taskSelected, m.tasks, m.taskFilter)
+		// Reuse the tasks-file cache version so the filter cache hits on
+		// unchanged data instead of re-sorting on every tick.
+		m.taskSelected = clampIndex(m.taskSelected,
+			len(filterTasksCached(m.tasks, m.taskFilter, tasksCacheVersionFor(m.tasksPath))))
 		return m, tickCmd()
 	}
 	return m, nil
@@ -283,7 +294,7 @@ func (m watchModel) renderSidebar(w, h int) string {
 	idleDot := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render("○")
 
 	var lines []string
-	for _, entry := range buildSidebarEntries(m.sessions) {
+	for _, entry := range buildSidebarEntriesCached(m.sessions) {
 		if entry.group {
 			left := sidebarStyle.Render(strings.Repeat("  ", entry.level) + entry.label)
 			lines = append(lines, renderWatchSidebarLine(left, "", innerW))
@@ -1353,7 +1364,7 @@ func sanitizeDisplayLine(s string) string {
 	}, s)
 }
 
-func readHistoryFile(path string, maxEntries int) []daemon.HistoryEntry {
+func readHistoryFileUncached(path string, maxEntries int) []daemon.HistoryEntry {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil
@@ -1375,7 +1386,7 @@ func readHistoryFile(path string, maxEntries int) []daemon.HistoryEntry {
 	return entries
 }
 
-func readTasksFile(path string) []types.Task {
+func readTasksFileUncached(path string) []types.Task {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil
@@ -1438,7 +1449,7 @@ func (m watchModel) renderTasks(totalW, totalH int) string {
 		innerH = 1
 	}
 
-	filtered := filterTasks(m.tasks, m.taskFilter)
+	filtered := filterTasksCached(m.tasks, m.taskFilter, tasksCacheVersionFor(m.tasksPath))
 	title := taskTitleStyle.Render(fmt.Sprintf(" tasks %s %d/%d ", m.taskFilter.label(), len(filtered), len(m.tasks)))
 	titleW := lipgloss.Width(title)
 
@@ -1479,7 +1490,7 @@ func (m watchModel) renderTasks(totalW, totalH int) string {
 		topLine = renderTaskSplitTopBorder(title, listW, detailW)
 		botLine = renderTaskSplitBottomBorder(listW, detailW)
 
-		selectedIdx := clampTaskSelection(m.taskSelected, m.tasks, m.taskFilter)
+		selectedIdx := clampIndex(m.taskSelected, len(filtered))
 		viewport := computeTaskListViewport(len(filtered), selectedIdx, innerH)
 		var listLines []string
 		for i := viewport.Start; i < viewport.End; i++ {

@@ -113,15 +113,21 @@ func filterTasks(tasks []types.Task, filter taskFilterMode) []types.Task {
 }
 
 func clampTaskSelection(current int, tasks []types.Task, filter taskFilterMode) int {
-	filtered := filterTasks(tasks, filter)
-	if len(filtered) == 0 {
+	return clampIndex(current, len(filterTasks(tasks, filter)))
+}
+
+// clampIndex clamps current into [0, n) and returns 0 when n is 0. It lets
+// callers that already have a filtered slice avoid re-running filterTasks
+// just to re-clamp.
+func clampIndex(current, n int) int {
+	if n <= 0 {
 		return 0
 	}
 	if current < 0 {
 		return 0
 	}
-	if current >= len(filtered) {
-		return len(filtered) - 1
+	if current >= n {
+		return n - 1
 	}
 	return current
 }
