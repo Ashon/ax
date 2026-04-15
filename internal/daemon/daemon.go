@@ -83,6 +83,10 @@ func New(socketPath string) *Daemon {
 		logger:         logger,
 	}
 	d.wakeScheduler.SetQueueRefiller(d.recoverRunnableTaskMessages)
+	d.wakeScheduler.SetRetryAfterSuccessfulWake(func(workspace string) bool {
+		_, ok := d.registry.Get(workspace)
+		return !ok
+	})
 	return d
 }
 

@@ -9,16 +9,23 @@ import (
 	"github.com/ashon/ax/internal/tmux"
 )
 
+var (
+	wakeSchedulerSessionExists = tmux.SessionExists
+	wakeSchedulerSessionIdle   = tmux.IsIdle
+	wakeSchedulerWakeWorkspace = tmux.WakeWorkspace
+)
+
 // WakeScheduler retries tmux wake attempts for workspaces that have unread
 // messages. It uses exponential backoff and checks whether the target agent
 // is idle before sending keys, to avoid interfering with a busy agent.
 type WakeScheduler struct {
-	mu      sync.Mutex
-	pending map[string]*pendingWake
-	queue   *MessageQueue
-	logger  *log.Logger
-	notify  chan struct{} // signals the run loop to check immediately
-	refill  func(workspace string) int
+	mu                       sync.Mutex
+	pending                  map[string]*pendingWake
+	queue                    *MessageQueue
+	logger                   *log.Logger
+	notify                   chan struct{} // signals the run loop to check immediately
+	refill                   func(workspace string) int
+	retryAfterSuccessfulWake func(workspace string) bool
 }
 
 type pendingWake struct {
@@ -75,6 +82,15 @@ func (s *WakeScheduler) SetQueueRefiller(refill func(workspace string) int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.refill = refill
+}
+
+// SetRetryAfterSuccessfulWake installs an optional policy hook that decides
+// whether a workspace should remain on the retry schedule after a successful
+// tmux wake. Returning false removes the workspace from the retry queue.
+func (s *WakeScheduler) SetRetryAfterSuccessfulWake(fn func(workspace string) bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.retryAfterSuccessfulWake = fn
 }
 
 // Schedule registers a pending wake for the target workspace.
@@ -169,13 +185,13 @@ func (s *WakeScheduler) process() {
 		}
 
 		// Check if session exists
-		if !tmux.SessionExists(pw.Workspace) {
+		if !wakeSchedulerSessionExists(pw.Workspace) {
 			s.Cancel(pw.Workspace)
 			continue
 		}
 
 		// Check if agent is idle before attempting wake
-		if !tmux.IsIdle(pw.Workspace) {
+		if !wakeSchedulerSessionIdle(pw.Workspace) {
 			// Not idle — reschedule without incrementing attempts
 			s.mu.Lock()
 			if entry, ok := s.pending[pw.Workspace]; ok {
@@ -186,21 +202,31 @@ func (s *WakeScheduler) process() {
 		}
 
 		// Agent is idle and has pending messages — attempt wake
-		err := tmux.WakeWorkspace(pw.Workspace, WakePrompt(pw.Sender, false))
+		err := wakeSchedulerWakeWorkspace(pw.Workspace, WakePrompt(pw.Sender, false))
 
 		s.mu.Lock()
 		if entry, ok := s.pending[pw.Workspace]; ok {
 			entry.Attempts++
-			if err != nil || entry.Attempts >= wakeMaxAttempts {
+			keepRetrying := true
+			if err == nil && s.retryAfterSuccessfulWake != nil {
+				keepRetrying = s.retryAfterSuccessfulWake(pw.Workspace)
+			}
+			if err != nil || entry.Attempts >= wakeMaxAttempts || !keepRetrying {
 				delete(s.pending, pw.Workspace)
-				if err != nil {
-					s.logger.Printf("wake %q failed (attempt %d): %v", pw.Workspace, entry.Attempts, err)
-				} else {
-					s.logger.Printf("wake %q max attempts reached (%d)", pw.Workspace, entry.Attempts)
+				if s.logger != nil {
+					if err != nil {
+						s.logger.Printf("wake %q failed (attempt %d): %v", pw.Workspace, entry.Attempts, err)
+					} else if !keepRetrying {
+						s.logger.Printf("wake %q succeeded and retry policy cleared further nudges", pw.Workspace)
+					} else {
+						s.logger.Printf("wake %q max attempts reached (%d)", pw.Workspace, entry.Attempts)
+					}
 				}
 			} else {
 				entry.NextRetry = time.Now().Add(wakeBackoff(entry.Attempts))
-				s.logger.Printf("wake %q attempt %d, next retry in %v", pw.Workspace, entry.Attempts, wakeBackoff(entry.Attempts))
+				if s.logger != nil {
+					s.logger.Printf("wake %q attempt %d, next retry in %v", pw.Workspace, entry.Attempts, wakeBackoff(entry.Attempts))
+				}
 			}
 		}
 		s.mu.Unlock()
