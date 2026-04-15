@@ -77,12 +77,12 @@ func TasksFilePath(socketPath string) string {
 // Create inserts a new pending task, applying default start mode and priority
 // when omitted, and persists the updated store before returning the live task.
 func (s *TaskStore) Create(title, description, assignee, createdBy, parentTaskID string, startMode types.TaskStartMode, priority types.TaskPriority, staleAfterSeconds int) (*types.Task, error) {
-	return s.CreateWithWorkflow(title, description, assignee, createdBy, parentTaskID, startMode, types.TaskWorkflowParallel, priority, staleAfterSeconds, "")
+	return s.CreateWithWorkflow(title, description, assignee, createdBy, parentTaskID, startMode, types.TaskWorkflowParallel, priority, staleAfterSeconds, "", "")
 }
 
 // CreateWithWorkflow is the daemon's internal constructor used when richer
 // dispatch and sequencing metadata must be persisted with the task record.
-func (s *TaskStore) CreateWithWorkflow(title, description, assignee, createdBy, parentTaskID string, startMode types.TaskStartMode, workflowMode types.TaskWorkflowMode, priority types.TaskPriority, staleAfterSeconds int, dispatchBody string) (*types.Task, error) {
+func (s *TaskStore) CreateWithWorkflow(title, description, assignee, createdBy, parentTaskID string, startMode types.TaskStartMode, workflowMode types.TaskWorkflowMode, priority types.TaskPriority, staleAfterSeconds int, dispatchBody, dispatchConfigPath string) (*types.Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -98,20 +98,21 @@ func (s *TaskStore) CreateWithWorkflow(title, description, assignee, createdBy, 
 
 	now := time.Now()
 	task := &types.Task{
-		ID:                uuid.New().String(),
-		Title:             title,
-		Description:       description,
-		Assignee:          assignee,
-		CreatedBy:         createdBy,
-		ParentTaskID:      strings.TrimSpace(parentTaskID),
-		Version:           1,
-		Status:            types.TaskPending,
-		StartMode:         startMode,
-		WorkflowMode:      workflowMode,
-		Priority:          priority,
-		StaleAfterSeconds: staleAfterSeconds,
-		CreatedAt:         now,
-		UpdatedAt:         now,
+		ID:                 uuid.New().String(),
+		Title:              title,
+		Description:        description,
+		Assignee:           assignee,
+		CreatedBy:          createdBy,
+		ParentTaskID:       strings.TrimSpace(parentTaskID),
+		Version:            1,
+		Status:             types.TaskPending,
+		StartMode:          startMode,
+		WorkflowMode:       workflowMode,
+		Priority:           priority,
+		StaleAfterSeconds:  staleAfterSeconds,
+		DispatchConfigPath: strings.TrimSpace(dispatchConfigPath),
+		CreatedAt:          now,
+		UpdatedAt:          now,
 	}
 	if trimmed := strings.TrimSpace(dispatchBody); trimmed != "" {
 		task.DispatchMessage = formatTaskDispatchMessage(task.ID, trimmed)

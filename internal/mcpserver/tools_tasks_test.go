@@ -17,30 +17,7 @@ import (
 func TestStartTaskHandlerCreatesAndDispatchesTaskAwareMessage(t *testing.T) {
 	const taskID = "11111111-1111-1111-1111-111111111111"
 
-	oldDispatchRunnableTarget := dispatchRunnableTarget
-	dispatchRunnableTarget = func(socketPath, configPath, target, sender string, fresh bool) error {
-		if socketPath != "/tmp/ax.sock" {
-			return fmt.Errorf("unexpected socket path %q", socketPath)
-		}
-		if configPath != "/tmp/test-config.yaml" {
-			return fmt.Errorf("unexpected config path %q", configPath)
-		}
-		if target != "worker" {
-			return fmt.Errorf("unexpected dispatch target %q", target)
-		}
-		if sender != "tester" {
-			return fmt.Errorf("unexpected dispatch sender %q", sender)
-		}
-		if fresh {
-			return fmt.Errorf("unexpected fresh dispatch")
-		}
-		return nil
-	}
-	t.Cleanup(func() {
-		dispatchRunnableTarget = oldDispatchRunnableTarget
-	})
-
-	client, serverErr := newTaskToolTestClient(t, 2, func(step int, env *daemon.Envelope) (*daemon.Envelope, error) {
+	client, serverErr := newTaskToolTestClient(t, 1, func(step int, env *daemon.Envelope) (*daemon.Envelope, error) {
 		switch step {
 		case 0:
 			if env.Type != daemon.MsgStartTask {
@@ -91,17 +68,12 @@ func TestStartTaskHandlerCreatesAndDispatchesTaskAwareMessage(t *testing.T) {
 					Status:    "queued",
 				},
 			})
-		case 1:
-			if env.Type != daemon.MsgGetTeamState {
-				return nil, fmt.Errorf("step 1 request type = %s, want %s", env.Type, daemon.MsgGetTeamState)
-			}
-			return daemon.NewResponseEnvelope(env.ID, &daemon.TeamStateResponse{})
 		default:
 			return nil, fmt.Errorf("unexpected request step %d", step)
 		}
 	})
 
-	result, err := startTaskHandler(client, "/tmp/test-config.yaml")(context.Background(), mcp.CallToolRequest{
+	result, err := startTaskHandler(client)(context.Background(), mcp.CallToolRequest{
 		Params: mcp.CallToolParams{
 			Arguments: map[string]any{
 				"title":               "Investigate flaky task start",
@@ -140,14 +112,6 @@ func TestStartTaskHandlerReturnsWaitingTurnForSerialChild(t *testing.T) {
 	const taskID = "22222222-2222-2222-2222-222222222222"
 	const parentTaskID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 	const waitingOnTaskID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
-
-	oldDispatchRunnableTarget := dispatchRunnableTarget
-	dispatchRunnableTarget = func(socketPath, configPath, target, sender string, fresh bool) error {
-		return fmt.Errorf("dispatch should not run for waiting_turn")
-	}
-	t.Cleanup(func() {
-		dispatchRunnableTarget = oldDispatchRunnableTarget
-	})
 
 	client, serverErr := newTaskToolTestClient(t, 1, func(step int, env *daemon.Envelope) (*daemon.Envelope, error) {
 		switch step {
@@ -194,7 +158,7 @@ func TestStartTaskHandlerReturnsWaitingTurnForSerialChild(t *testing.T) {
 		}
 	})
 
-	result, err := startTaskHandler(client, "/tmp/test-config.yaml")(context.Background(), mcp.CallToolRequest{
+	result, err := startTaskHandler(client)(context.Background(), mcp.CallToolRequest{
 		Params: mcp.CallToolParams{
 			Arguments: map[string]any{
 				"title":          "Serial child",

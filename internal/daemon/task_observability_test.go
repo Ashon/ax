@@ -274,7 +274,7 @@ func TestHandleReadMessagesSchedulesClaimFollowUpAfterConsumingTaskDispatch(t *t
 	d.wakeScheduler = NewWakeScheduler(d.queue, nil)
 	d.wakeScheduler.SetQueueRefiller(d.recoverRunnableTaskMessages)
 
-	task, err := d.taskStore.CreateWithWorkflow("claim follow-up", "desc", "worker", "orch", "", "", types.TaskWorkflowParallel, "", 0, "Inspect and claim")
+	task, err := d.taskStore.CreateWithWorkflow("claim follow-up", "desc", "worker", "orch", "", "", types.TaskWorkflowParallel, "", 0, "Inspect and claim", "")
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
@@ -322,7 +322,7 @@ func TestRecoverRunnableTaskMessagesRequeuesConsumedUnclaimedTaskDispatch(t *tes
 	}
 	d.wakeScheduler = NewWakeScheduler(d.queue, nil)
 
-	task, err := d.taskStore.CreateWithWorkflow("recover", "desc", "worker", "orch", "", "", types.TaskWorkflowParallel, "", 0, "Inspect and claim")
+	task, err := d.taskStore.CreateWithWorkflow("recover", "desc", "worker", "orch", "", "", types.TaskWorkflowParallel, "", 0, "Inspect and claim", "")
 	if err != nil {
 		t.Fatalf("create task: %v", err)
 	}
@@ -393,7 +393,7 @@ func TestEnrichTaskMarksSerialChildAsWaitingTurn(t *testing.T) {
 		taskStore: NewTaskStore(stateDir),
 	}
 
-	parent, err := d.taskStore.CreateWithWorkflow("parent", "desc", "orch", "root", "", "", types.TaskWorkflowSerial, "", 0, "")
+	parent, err := d.taskStore.CreateWithWorkflow("parent", "desc", "orch", "root", "", "", types.TaskWorkflowSerial, "", 0, "", "")
 	if err != nil {
 		t.Fatalf("create parent: %v", err)
 	}

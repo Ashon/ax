@@ -9,7 +9,10 @@ import (
 	"github.com/ashon/ax/internal/tmux"
 	"github.com/ashon/ax/internal/types"
 	"github.com/ashon/ax/internal/usage"
+	"github.com/ashon/ax/internal/workspace"
 )
+
+var daemonDispatchRunnableWork = workspace.DispatchRunnableWork
 
 func requireRegisteredWorkspace(workspace string) error {
 	if workspace == "" {
@@ -266,7 +269,7 @@ func (d *Daemon) handleCreateTaskEnvelope(env *Envelope, workspace string) (*Env
 	if err != nil {
 		return nil, err
 	}
-	task, err := d.taskStore.CreateWithWorkflow(p.Title, p.Description, p.Assignee, workspace, p.ParentTaskID, startMode, workflowMode, priority, p.StaleAfterSeconds, "")
+	task, err := d.taskStore.CreateWithWorkflow(p.Title, p.Description, p.Assignee, workspace, p.ParentTaskID, startMode, workflowMode, priority, p.StaleAfterSeconds, "", d.dispatchConfigPathForWorkspace(workspace))
 	if err != nil {
 		return nil, err
 	}
@@ -295,12 +298,15 @@ func (d *Daemon) handleStartTaskEnvelope(env *Envelope, workspace string) (*Enve
 		return nil, err
 	}
 
-	task, err := d.taskStore.CreateWithWorkflow(p.Title, p.Description, p.Assignee, workspace, p.ParentTaskID, startMode, workflowMode, priority, p.StaleAfterSeconds, dispatchBody)
+	task, err := d.taskStore.CreateWithWorkflow(p.Title, p.Description, p.Assignee, workspace, p.ParentTaskID, startMode, workflowMode, priority, p.StaleAfterSeconds, dispatchBody, d.dispatchConfigPathForWorkspace(workspace))
 	if err != nil {
 		return nil, err
 	}
 
-	dispatch := d.dispatchTaskStart(*task)
+	dispatch, err := d.dispatchTaskStart(*task)
+	if err != nil {
+		return nil, err
+	}
 	d.registry.Touch(workspace)
 	d.refreshTaskSnapshots()
 	task, _ = d.taskStore.Get(task.ID)
@@ -467,6 +473,11 @@ func (d *Daemon) handleInterveneTaskEnvelope(env *Envelope, workspace string) (*
 			d.sendPushEnvelope(task.Assignee, msg, "intervention push to %q dropped (outbox full or closed)")
 		}
 		d.wakeScheduler.Schedule(task.Assignee, workspace)
+		if strings.TrimSpace(retried.DispatchConfigPath) != "" {
+			if err := daemonDispatchRunnableWork(d.socketPath, retried.DispatchConfigPath, task.Assignee, workspace, false); err != nil {
+				return nil, fmt.Errorf("retry dispatch task %s: %w", task.ID, err)
+			}
+		}
 		d.refreshTaskSnapshots()
 		refreshed, _ := d.taskStore.Get(task.ID)
 		resp.Task = *refreshed
@@ -608,14 +619,14 @@ func formatTaskDispatchMessage(taskID, message string) string {
 	return fmt.Sprintf("Task ID: %s\n\n%s", taskID, strings.TrimSpace(message))
 }
 
-func (d *Daemon) dispatchTaskStart(task types.Task) TaskDispatch {
+func (d *Daemon) dispatchTaskStart(task types.Task) (TaskDispatch, error) {
 	snapshot := d.taskSnapshotsByID()
 	task = d.enrichTaskWithSnapshot(task, snapshot)
 	if strings.TrimSpace(task.DispatchMessage) == "" {
-		return TaskDispatch{Status: "waiting_for_input"}
+		return TaskDispatch{Status: "waiting_for_input"}, nil
 	}
 	if task.Sequence != nil && task.Sequence.State == types.TaskSequenceWaitingTurn {
-		return TaskDispatch{Status: string(types.TaskSequenceWaitingTurn)}
+		return TaskDispatch{Status: string(types.TaskSequenceWaitingTurn)}, nil
 	}
 	msg := taskAwareMessage(task.CreatedBy, task.Assignee, task.DispatchMessage)
 	msg = d.queue.EnqueueMessage(msg)
@@ -625,10 +636,17 @@ func (d *Daemon) dispatchTaskStart(task types.Task) TaskDispatch {
 		d.sendPushEnvelope(task.Assignee, msg, "task start push to %q dropped (outbox full or closed)")
 	}
 	d.wakeScheduler.Schedule(task.Assignee, task.CreatedBy)
-	return TaskDispatch{
+	dispatch := TaskDispatch{
 		MessageID: msg.ID,
 		Status:    "queued",
 	}
+	if strings.TrimSpace(task.DispatchConfigPath) == "" {
+		return dispatch, nil
+	}
+	if err := daemonDispatchRunnableWork(d.socketPath, task.DispatchConfigPath, task.Assignee, task.CreatedBy, task.StartMode == types.TaskStartFresh); err != nil {
+		return dispatch, fmt.Errorf("dispatch task %s: %w", task.ID, err)
+	}
+	return dispatch, nil
 }
 
 func (d *Daemon) releaseSerialWorkflowSuccessor(task types.Task) {
@@ -650,9 +668,19 @@ func (d *Daemon) releaseSerialWorkflowSuccessor(task types.Task) {
 		if enriched.Sequence == nil || enriched.Sequence.State != types.TaskSequenceReady {
 			continue
 		}
-		d.dispatchTaskStart(enriched)
+		if _, err := d.dispatchTaskStart(enriched); err != nil && d.logger != nil {
+			d.logger.Printf("release serial successor %q failed: %v", enriched.ID, err)
+		}
 		return
 	}
+}
+
+func (d *Daemon) dispatchConfigPathForWorkspace(name string) string {
+	entry, ok := d.registry.Get(strings.TrimSpace(name))
+	if !ok || entry == nil {
+		return ""
+	}
+	return strings.TrimSpace(entry.configPath)
 }
 
 func buildTaskReminderMessage(task types.Task, note string) string {

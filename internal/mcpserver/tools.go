@@ -906,7 +906,7 @@ func createTaskHandler(client *DaemonClient) server.ToolHandlerFunc {
 	}
 }
 
-func startTaskHandler(client *DaemonClient, configPath string) server.ToolHandlerFunc {
+func startTaskHandler(client *DaemonClient) server.ToolHandlerFunc {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		title, _ := request.RequireString("title")
 		assignee, _ := request.RequireString("assignee")
@@ -925,16 +925,6 @@ func startTaskHandler(client *DaemonClient, configPath string) server.ToolHandle
 		started, err := client.StartTask(title, description, dispatchBody, assignee, parentTaskID, startMode, workflowMode, priority, staleAfterSeconds)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Failed to start task: %v", err)), nil
-		}
-		if started.Dispatch.Status == "queued" {
-			dispatchConfigPath, err := resolveToolConfigPath(client, configPath)
-			if err != nil {
-				return mcp.NewToolResultError(fmt.Sprintf("Task %q was created but dispatch target resolution failed: %v", started.Task.ID, err)), nil
-			}
-			freshStart := started.Task.StartMode == types.TaskStartFresh
-			if err := dispatchRunnableTarget(client.socketPath, dispatchConfigPath, assignee, client.workspace, freshStart); err != nil {
-				return mcp.NewToolResultError(fmt.Sprintf("Task %q was created but dispatch failed: %v", started.Task.ID, err)), nil
-			}
 		}
 
 		data, _ := json.MarshalIndent(started, "", "  ")
