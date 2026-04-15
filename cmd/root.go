@@ -15,10 +15,11 @@ var socketPath string
 var configPath string
 
 var rootCmd = &cobra.Command{
-	Use:     "ax",
-	Short:   "Multi-agent LLM workspace manager built on tmux",
-	Long:    "ax manages multiple LLM agent workspaces using tmux sessions and enables inter-agent communication via MCP.",
-	Version: version,
+	Use:              "ax",
+	Short:            "Multi-agent LLM workspace manager built on tmux",
+	Long:             "ax manages multiple LLM agent workspaces using tmux sessions and enables inter-agent communication via MCP.",
+	Version:          version,
+	TraverseChildren: true,
 }
 
 func Execute() {
