@@ -109,7 +109,7 @@ func buildOrchestratorPromptContent(node *config.ProjectNode, prefix, parentName
 		sb.WriteString("- **자기 로그나 자기 이전 판단을 \"증거\"로 재참조하지 마세요.** 같은 판단을 반복해도 새로운 정보가 되지 않습니다. 자기강화 루프를 만들지 않습니다.\n\n")
 		sb.WriteString("### 진행 우선 원칙\n")
 		sb.WriteString("- 받은 task를 `pending` 상태로 장기 정체시키는 것보다 **즉시 분석 후 하위 에이전트에 위임해 진행시키는 것**이 우선입니다.\n")
-		sb.WriteString(fmt.Sprintf("- 상위로부터 task를 받으면 지체 없이 (a) `create_task`로 하위 task를 만들고, (b) 적절한 담당 워크스페이스에 `send_message`로 위임하고, (c) 진행 결과를 수집해 `send_message(to=\"%s\")`로 요약 보고하세요. 이 3단계가 기본 행동입니다.\n", parentName))
+		sb.WriteString(fmt.Sprintf("- 상위로부터 task를 받으면 지체 없이 (a) 즉시 실행해야 할 일은 `start_task`로 하위 task를 만들며 바로 dispatch하고, (b) 아직 dispatch하지 않을 기록성 작업만 `create_task`를 사용하고, (c) 진행 결과를 수집해 `send_message(to=\"%s\")`로 요약 보고하세요. 이 3단계가 기본 행동입니다.\n", parentName))
 		sb.WriteString("- 잠금/동결은 오직 (a) 상위가 **명시적으로** \"중단/동결/stop/freeze\"를 지시했거나, (b) 자산 파괴(force push, 삭제, prod 데이터 변경 등) 가능성이 있는 경우에만 적용합니다. 그 외 상황에서 자발적으로 잠그지 마세요.\n")
 		sb.WriteString("- 명시적 긴급 중단 지시로 잠금된 task는 상위가 **명시적 재개 지시**를 보내면 바로 다시 분배합니다. 재개 후 다시 의심으로 회귀하지 않습니다.\n\n")
 		sb.WriteString("### 금지 사항 (anti-pattern)\n")
@@ -158,7 +158,7 @@ func buildOrchestratorPromptContent(node *config.ProjectNode, prefix, parentName
 	sb.WriteString("- stale로 보이면 먼저 최근 수신 메시지와 workspace status를 확인해 단순 대기인지 실제 정체인지 구분하세요. 새 정보가 없으면 noisy ping을 보내지 말고 복구 액션으로 바로 넘어가세요.\n")
 	sb.WriteString("- interactive blocking이 의심되면 `interrupt_agent` 또는 `send_keys`로 먼저 해소하세요. 예: resuming prompt, yes/no 확인창, 입력 대기.\n")
 	sb.WriteString("- blockage 해소 후에도 진전이 없으면, 기존 요청을 그대로 반복하지 말고 현재 부족한 정보/증거/우선순위를 보강한 **구체 follow-up** 또는 **재-dispatch**를 보내세요.\n")
-	sb.WriteString("- fresh-context 재시작이 필요한 작업이면 기존 task를 그대로 재활용하지 말고 `create_task(..., start_mode=\"fresh\")`로 새 task를 만들고 새 `Task ID:`로 다시 dispatch하세요.\n")
+	sb.WriteString("- fresh-context 재시작이 필요한 새 작업이면 기존 task를 그대로 재활용하지 말고 `start_task(..., start_mode=\"fresh\")`로 새 task를 만들고 바로 시작하세요. 이 도구가 새 `Task ID:` 주입과 세션 재시작/wake를 함께 처리합니다.\n")
 	if isRoot {
 		sb.WriteString("- 복구 시도 후에도 stale이 해소되지 않거나 충돌/위험이 남으면 user에게 에스컬레이션하거나 명시적으로 실패 처리하세요. 조용히 방치하지 마세요.\n\n")
 	} else {
@@ -214,8 +214,8 @@ func buildOrchestratorPromptContent(node *config.ProjectNode, prefix, parentName
 	sb.WriteString("## 작업 관리 (Task Management)\n")
 	sb.WriteString("워크스페이스에 작업을 위임할 때 task를 활용하여 진행 상황을 추적하세요.\n\n")
 	sb.WriteString("### 오케스트레이터 워크플로우\n")
-	sb.WriteString("1. 작업 위임 시 `create_task`로 task를 생성하고, `send_message`에 task ID를 포함하여 전달\n")
-	sb.WriteString("   fresh-context로 시작시켜야 하는 작업은 `create_task(..., start_mode=\"fresh\")`로 생성하고, dispatch 메시지에 반드시 `Task ID: <id>`를 그대로 포함하세요. 그러면 worker 세션이 먼저 재생성된 뒤 작업이 시작됩니다.\n")
+	sb.WriteString("1. 즉시 실행할 작업은 `start_task`로 생성하고 dispatch하세요. 이 도구가 새 `Task ID:`를 메시지에 자동 주입하고 대상 워크스페이스를 wake 합니다.\n")
+	sb.WriteString("   아직 시작시키지 않을 기록성 작업만 `create_task`를 사용하세요. fresh-context가 필요하면 `start_task(..., start_mode=\"fresh\")`를 사용하고, 메시지에는 `Task ID:`를 직접 넣지 마세요.\n")
 	sb.WriteString("2. `list_tasks`로 전체 진행 상황을 모니터링 (필터: `--assignee`, `--status`, `--created_by`)\n")
 	sb.WriteString("3. `get_task`로 특정 작업의 상세 로그 확인\n\n")
 	sb.WriteString("### 워크스페이스 에이전트에게 전달할 규칙\n")
