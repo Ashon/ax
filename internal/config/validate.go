@@ -7,10 +7,12 @@ import (
 )
 
 var ErrDuplicateChildPrefix = fmt.Errorf("duplicate ax child prefix")
+var ErrDuplicateWorkspaceDir = fmt.Errorf("duplicate ax workspace dir")
 var ErrReservedNameCollision = fmt.Errorf("reserved ax session name collision")
 
 type validationState struct {
 	childPrefixes map[string]childPrefixClaim
+	workspaceDirs map[string]workspaceDirClaim
 	workspaces    map[string]workspaceClaim
 	orchestrators map[string]orchestratorClaim
 }
@@ -26,6 +28,13 @@ type workspaceClaim struct {
 	ConfigPath string
 	Name       string
 	MergedName string
+}
+
+type workspaceDirClaim struct {
+	ConfigPath string
+	Name       string
+	MergedName string
+	Dir        string
 }
 
 type orchestratorClaim struct {
@@ -57,6 +66,7 @@ func validateConfigTree(path string) error {
 
 	state := &validationState{
 		childPrefixes: make(map[string]childPrefixClaim),
+		workspaceDirs: make(map[string]workspaceDirClaim),
 		workspaces:    make(map[string]workspaceClaim),
 		orchestrators: orchestrators,
 	}
@@ -89,9 +99,18 @@ func validateRecursive(path, prefix string, seen map[string]bool, state *validat
 	sort.Strings(workspaceNames)
 
 	for _, name := range workspaceNames {
+		ws := cfg.Workspaces[name]
 		mergedName := qualifyName(prefix, name)
 		if existing, ok := state.orchestrators[mergedName]; ok {
 			return reservedNameCollisionForWorkspace(absPath, name, mergedName, existing)
+		}
+		if existing, ok := state.workspaceDirs[ws.Dir]; ok {
+			return duplicateWorkspaceDirError(existing, workspaceDirClaim{
+				ConfigPath: absPath,
+				Name:       name,
+				MergedName: mergedName,
+				Dir:        ws.Dir,
+			})
 		}
 		if _, exists := state.workspaces[mergedName]; !exists {
 			state.workspaces[mergedName] = workspaceClaim{
@@ -99,6 +118,12 @@ func validateRecursive(path, prefix string, seen map[string]bool, state *validat
 				Name:       name,
 				MergedName: mergedName,
 			}
+		}
+		state.workspaceDirs[ws.Dir] = workspaceDirClaim{
+			ConfigPath: absPath,
+			Name:       name,
+			MergedName: mergedName,
+			Dir:        ws.Dir,
 		}
 	}
 
@@ -181,6 +206,20 @@ func duplicateChildPrefixError(first, second childPrefixClaim) error {
 		second.ChildName,
 		second.ConfigPath,
 		second.ChildDir,
+	)
+}
+
+func duplicateWorkspaceDirError(first, second workspaceDirClaim) error {
+	return fmt.Errorf(
+		"%w %q: workspace %q in %s (merged %q) conflicts with workspace %q in %s (merged %q)",
+		ErrDuplicateWorkspaceDir,
+		second.Dir,
+		first.Name,
+		first.ConfigPath,
+		first.MergedName,
+		second.Name,
+		second.ConfigPath,
+		second.MergedName,
 	)
 }
 

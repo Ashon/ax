@@ -3,3 +3,15 @@ ax
 .DS_Store
 dist/
 .mcp.json
+cmd/AGENTS.md
+cmd/CLAUDE.md
+internal/config/AGENTS.md
+internal/config/CLAUDE.md
+internal/daemon/AGENTS.md
+internal/daemon/CLAUDE.md
+internal/usage/AGENTS.md
+internal/usage/CLAUDE.md
+internal/workspace/AGENTS.md
+internal/workspace/CLAUDE.md
+.github/AGENTS.md
+.github/CLAUDE.md

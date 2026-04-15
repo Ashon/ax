@@ -103,7 +103,7 @@ children:
 	}
 }
 
-func TestLoadTreeIncludesSameChildUnderMultiplePrefixes(t *testing.T) {
+func TestLoadTreeRejectsSameChildUnderMultiplePrefixes(t *testing.T) {
 	rootDir := t.TempDir()
 	sharedDir := filepath.Join(rootDir, "shared")
 
@@ -132,45 +132,7 @@ workspaces:
     dir: .
 `)
 
-	tree, err := config.LoadTree(rootConfigPath)
-	if err != nil {
-		t.Fatalf("load tree: %v", err)
-	}
-
-	if len(tree.Children) != 2 {
-		t.Fatalf("expected 2 child nodes, got %d", len(tree.Children))
-	}
-
-	if got := tree.Children[0].Alias; got != "alpha" {
-		t.Fatalf("expected first child alias alpha, got %q", got)
-	}
-	if got := tree.Children[1].Alias; got != "beta" {
-		t.Fatalf("expected second child alias beta, got %q", got)
-	}
-	if got := tree.Children[0].Name; got != "shared" {
-		t.Fatalf("expected first child project name shared, got %q", got)
-	}
-	if got := tree.Children[1].Name; got != "shared" {
-		t.Fatalf("expected second child project name shared, got %q", got)
-	}
-	if got := tree.Children[0].Prefix; got != "alpha" {
-		t.Fatalf("expected first child prefix alpha, got %q", got)
-	}
-	if got := tree.Children[1].Prefix; got != "beta" {
-		t.Fatalf("expected second child prefix beta, got %q", got)
-	}
-	if got := tree.Children[0].Workspaces[0].MergedName; got != "alpha.worker" {
-		t.Fatalf("expected alpha worker merged name, got %q", got)
-	}
-	if got := tree.Children[1].Workspaces[0].MergedName; got != "beta.worker" {
-		t.Fatalf("expected beta worker merged name, got %q", got)
-	}
-	if got := tree.Children[0].DisplayName(); got != "alpha (shared)" {
-		t.Fatalf("expected alpha display name, got %q", got)
-	}
-	if got := tree.Children[1].DisplayName(); got != "beta (shared)" {
-		t.Fatalf("expected beta display name, got %q", got)
-	}
+	assertLoadersFailWithError(t, rootConfigPath, config.ErrDuplicateWorkspaceDir, sharedDir, "alpha.worker", "beta.worker")
 }
 
 func TestLoadTreeRejectsCyclicChildren(t *testing.T) {
@@ -227,6 +189,46 @@ children:
 `)
 
 	assertLoadersFailWithError(t, rootConfigPath, config.ErrDuplicateChildPrefix, "team", firstDir, secondDir)
+}
+
+func TestLoadRejectsDuplicateWorkspaceDirsInSameConfig(t *testing.T) {
+	rootDir := t.TempDir()
+	rootConfigPath := filepath.Join(rootDir, ".ax", "config.yaml")
+	writeConfig(t, rootConfigPath, `
+workspaces:
+  alpha:
+    dir: ./shared
+  beta:
+    dir: ./shared
+`)
+
+	assertLoadersFailWithError(t, rootConfigPath, config.ErrDuplicateWorkspaceDir, filepath.Join(rootDir, "shared"), "alpha", "beta")
+}
+
+func TestLoadRejectsDuplicateWorkspaceDirsAcrossChildConfigs(t *testing.T) {
+	rootDir := t.TempDir()
+	childDir := filepath.Join(rootDir, "child")
+	if err := os.MkdirAll(childDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	writeConfig(t, filepath.Join(childDir, ".ax", "config.yaml"), `
+workspaces:
+  worker:
+    dir: ../shared
+`)
+
+	rootConfigPath := filepath.Join(rootDir, ".ax", "config.yaml")
+	writeConfig(t, rootConfigPath, `
+workspaces:
+  main:
+    dir: ./shared
+children:
+  child:
+    dir: ./child
+`)
+
+	assertLoadersFailWithError(t, rootConfigPath, config.ErrDuplicateWorkspaceDir, filepath.Join(rootDir, "shared"), "main", "child.worker")
 }
 
 func TestLoadRejectsDuplicateNestedChildPrefixes(t *testing.T) {
