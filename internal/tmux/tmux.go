@@ -64,6 +64,21 @@ func CreateSessionWithCommandEnv(workspace, dir, command string, env map[string]
 	return setRemainOnExit(name)
 }
 
+// CreateEphemeralSession creates a tmux session that runs a command directly
+// and is destroyed automatically when the command exits. Unlike
+// CreateSessionWithArgs it does NOT set remain-on-exit, so the session
+// disappears as soon as the process terminates.
+func CreateEphemeralSession(workspace, dir string, argv []string) error {
+	name := SessionName(workspace)
+	args := []string{"new-session", "-d", "-s", name, "-c", dir}
+	args = append(args, argv...)
+	cmd := exec.Command("tmux", args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("tmux new-session: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
 func CreateSessionWithArgs(workspace, dir string, argv []string) error {
 	return CreateSessionWithArgsEnv(workspace, dir, argv, nil)
 }
