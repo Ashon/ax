@@ -35,6 +35,9 @@ func TestWriteInstructionsAppendsManagedContracts(t *testing.T) {
 		"메시지에 `Task ID:`가 있으면, 전달되었거나 `read_messages`로 읽었다는 사실만으로 task를 claim한 것으로 간주하지 마세요.",
 		"`get_task`로 task 문맥을 확인",
 		"`update_task(..., status=\"in_progress\"",
+		"## Completion Reporting Contract",
+		"`remaining owned dirty files=<none>`",
+		"이번에 끝난 unit과 남은 owned work를 구분해서 적으세요.",
 		"owner mismatch나 missing dependency가 보이면 fail fast",
 		"concise current-status re-ask에는 같은 요약을 반복하지 말고 새 delta가 있을 때만 회신",
 	} {
@@ -64,6 +67,7 @@ func TestWriteInstructionsWritesManagedContractsWithoutCustomBody(t *testing.T) 
 		"## ax workspace: ax.runtime",
 		"## Message Handling Contract",
 		"## Task Intake Contract",
+		"## Completion Reporting Contract",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("expected instructions to contain %q\n%s", want, text)
@@ -102,5 +106,8 @@ func TestWriteInstructionsReplacesManagedSectionWithoutDuplicatingContract(t *te
 	}
 	if strings.Count(text, "## Task Intake Contract") != 1 {
 		t.Fatalf("expected one task contract section, got %d\n%s", strings.Count(text, "## Task Intake Contract"), text)
+	}
+	if strings.Count(text, "## Completion Reporting Contract") != 1 {
+		t.Fatalf("expected one completion reporting section, got %d\n%s", strings.Count(text, "## Completion Reporting Contract"), text)
 	}
 }

@@ -60,12 +60,13 @@ func WriteInstructions(dir, workspace, runtime, instructions string) error {
 }
 
 func managedWorkspaceInstructions(instructions string) string {
-	sections := make([]string, 0, 3)
+	sections := make([]string, 0, 4)
 	if trimmed := strings.TrimSpace(instructions); trimmed != "" {
 		sections = append(sections, trimmed)
 	}
 	sections = append(sections, messageHandlingInstructionContract())
 	sections = append(sections, taskIntakeInstructionContract())
+	sections = append(sections, completionReportingInstructionContract())
 	return strings.Join(sections, "\n\n")
 }
 
@@ -94,6 +95,16 @@ func taskIntakeInstructionContract() string {
 		"  4. structured evidence와 함께 completion",
 		"- owner mismatch나 missing dependency가 보이면 fail fast 하세요. 다른 owner/API/file이 필요한지 구체적으로 적고 task를 오래 붙잡지 마세요.",
 		"- 같은 `Task ID:`에 대해 substantive result를 이미 보냈다면, 그 뒤 도착한 concise current-status re-ask에는 같은 요약을 반복하지 말고 새 delta가 있을 때만 회신하세요.",
+	}, "\n")
+}
+
+func completionReportingInstructionContract() string {
+	return strings.Join([]string{
+		"## Completion Reporting Contract",
+		"- `update_task(..., status=\"completed\", result=...)` 또는 completion 회신 전에는 현재 scope 기준으로 남은 owned dirty/uncommitted files가 있는지 확인하세요.",
+		"- completion result에는 반드시 다음 둘 중 하나를 포함하세요: `remaining owned dirty files=<none>` 또는 `remaining owned dirty files=<paths>; residual scope=<why work remains>`.",
+		"- commit/task slice만 끝났다면 전체 요청이 끝난 것처럼 쓰지 말고, 이번에 끝난 unit과 남은 owned work를 구분해서 적으세요.",
+		"- leftover owned work가 남아 있는데 설명 없이 `completed`나 \"done\"처럼 쓰지 마세요. 후속 unit, 범위 밖 항목, blocker 중 무엇인지 명시하세요.",
 	}, "\n")
 }
 

@@ -71,6 +71,8 @@ func TestOrchestratorPromptRequiresTrackingAssignedWorkToClosure(t *testing.T) {
 	for _, want := range []string{
 		"오케스트레이터는 자신이 assign한 일이 실제 완료 결과, 명시적 blocker 보고, 실패 중 하나의 종결 상태에 도달할 때까지 계속 추적할 책임이 있습니다.",
 		"assign한 일은 실제 완료 증거를 받거나, blocker를 상위에 명시적으로 보고하거나, 실패로 종료할 때까지 계속 소유하고 추적합니다.",
+		"`remaining owned dirty files=<none|paths>`",
+		"남은 owned dirty files가 있으면 residual scope 또는 후속 unit이 명시될 때만 부분 완료로 다루세요.",
 	} {
 		if !strings.Contains(rootPrompt, want) {
 			t.Fatalf("expected root prompt to contain %q\n%s", want, rootPrompt)
@@ -82,6 +84,8 @@ func TestOrchestratorPromptRequiresTrackingAssignedWorkToClosure(t *testing.T) {
 	for _, want := range []string{
 		"오케스트레이터는 자신이 assign한 일이 실제 완료 결과, 명시적 blocker 보고, 실패 중 하나의 종결 상태에 도달할 때까지 계속 추적할 책임이 있습니다.",
 		"assign한 일은 실제 완료 증거를 받거나, blocker를 상위에 명시적으로 보고하거나, 실패로 종료할 때까지 계속 소유하고 추적합니다.",
+		"`remaining owned dirty files=<none|paths>`",
+		"남은 owned dirty files가 있으면 residual scope 또는 후속 unit이 명시될 때만 부분 완료로 다루세요.",
 	} {
 		if !strings.Contains(subPrompt, want) {
 			t.Fatalf("expected sub prompt to contain %q\n%s", want, subPrompt)
