@@ -14,6 +14,7 @@ func registerTaskTools(srv *server.MCPServer, client *DaemonClient, configPath s
 			mcp.WithString("assignee", mcp.Required(), mcp.Description("Workspace name to assign the task to")),
 			mcp.WithString("parent_task_id", mcp.Description("Optional parent task ID for explicit umbrella/child rollup and reconciliation.")),
 			mcp.WithString("start_mode", mcp.Description("Task start mode metadata: `default` for normal session reuse, or `fresh` to recreate the worker session before the first task-aware dispatch for this task.")),
+			mcp.WithString("workflow_mode", mcp.Description("Task workflow mode: `parallel` (default) or `serial`. Serial parents release child dispatches in append order.")),
 			mcp.WithString("priority", mcp.Description("Optional task priority: `low`, `normal`, `high`, or `urgent`. Defaults to `normal`.")),
 			mcp.WithNumber("stale_after_seconds", mcp.Description("Optional staleness threshold. When >0, daemon task snapshots will mark the task stale if no progress update arrives within this many seconds while the task is still pending or in_progress.")),
 		),
@@ -22,17 +23,18 @@ func registerTaskTools(srv *server.MCPServer, client *DaemonClient, configPath s
 
 	srv.AddTool(
 		mcp.NewTool("start_task",
-			mcp.WithDescription("Create a task, dispatch the initial task-aware message to the assignee, and wake the workspace. Prefer this over create_task + send_message when work should begin immediately, especially with start_mode=`fresh`."),
+			mcp.WithDescription("Create a task and let the daemon persist or release the initial task-aware dispatch. Prefer this over create_task + send_message when work should begin immediately; serial workflow children may return `dispatch.status=\"waiting_turn\"` until prior siblings become terminal."),
 			mcp.WithString("title", mcp.Required(), mcp.Description("Short task title")),
 			mcp.WithString("message", mcp.Required(), mcp.Description("Initial dispatch message sent to the assignee. `Task ID:` is added automatically.")),
 			mcp.WithString("description", mcp.Description("Detailed task description")),
 			mcp.WithString("assignee", mcp.Required(), mcp.Description("Workspace name to assign the task to")),
 			mcp.WithString("parent_task_id", mcp.Description("Optional parent task ID for explicit umbrella/child rollup and reconciliation.")),
 			mcp.WithString("start_mode", mcp.Description("Task start mode: `default` for normal session reuse, or `fresh` to recreate the worker session before this initial dispatch is processed.")),
+			mcp.WithString("workflow_mode", mcp.Description("Task workflow mode: `parallel` (default) or `serial`. Use `serial` for parents that should release child work in order.")),
 			mcp.WithString("priority", mcp.Description("Optional task priority: `low`, `normal`, `high`, or `urgent`. Defaults to `normal`.")),
 			mcp.WithNumber("stale_after_seconds", mcp.Description("Optional staleness threshold. When >0, daemon task snapshots will mark the task stale if no progress update arrives within this many seconds while the task is still pending or in_progress.")),
 		),
-		startTaskHandler(client, configPath),
+		startTaskHandler(client),
 	)
 
 	srv.AddTool(

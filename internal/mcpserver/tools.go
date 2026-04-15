@@ -383,19 +383,8 @@ func waitForWorkspaceReply(ctx context.Context, client *DaemonClient, from strin
 var taskIDPattern = regexp.MustCompile(`(?i)task id:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`)
 
 var dispatchRunnableTarget = workspace.DispatchRunnableWork
-var wakeWorkspaceAgent = wakeAgent
-var prepareFreshWorkspaceForTask = prepareFreshWorkspace
 
-type taskDispatchResult struct {
-	MessageID    string `json:"message_id"`
-	Status       string `json:"status"`
-	FreshContext bool   `json:"fresh_context"`
-}
-
-type startTaskResult struct {
-	Task     types.Task         `json:"task"`
-	Dispatch taskDispatchResult `json:"dispatch"`
-}
+type startTaskResult = daemon.StartTaskResponse
 
 func sendMessageHandler(client *DaemonClient, configPath string) server.ToolHandlerFunc {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -412,10 +401,6 @@ func sendMessageHandler(client *DaemonClient, configPath string) server.ToolHand
 
 		return mcp.NewToolResultText(fmt.Sprintf("Message sent to %q (id: %s)", to, sendResult.MessageID)), nil
 	}
-}
-
-func wakeAgent(target, sender string, fresh bool) {
-	_ = tmux.WakeWorkspace(target, daemon.WakePrompt(sender, fresh))
 }
 
 func sendWorkspaceMessage(client *DaemonClient, configPath, target, message string) (*SendMessageResult, bool, error) {
@@ -457,23 +442,6 @@ func prepareFreshTaskStart(client *DaemonClient, target, message string) (bool, 
 		return false, nil
 	}
 	return true, nil
-}
-
-func prepareFreshWorkspace(client *DaemonClient, configPath, target string) error {
-	cfgPath, cfg, err := loadToolConfig(client, configPath)
-	if err != nil {
-		return err
-	}
-	ws, ok := cfg.Workspaces[target]
-	if !ok {
-		return fmt.Errorf("workspace %q not found in %s", target, cfgPath)
-	}
-
-	manager := workspace.NewManager(daemon.ExpandSocketPath(client.socketPath), cfgPath)
-	if err := manager.Restart(target, ws); err != nil {
-		return err
-	}
-	return nil
 }
 
 func extractTaskID(message string) (string, bool) {
@@ -711,12 +679,12 @@ func createTaskHandler(client *DaemonClient) server.ToolHandlerFunc {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		title, _ := request.RequireString("title")
 		assignee, _ := request.RequireString("assignee")
-		description, parentTaskID, staleAfterSeconds, startMode, priority, err := parseTaskCreateOptions(request)
+		description, parentTaskID, staleAfterSeconds, startMode, workflowMode, priority, err := parseTaskCreateOptions(request)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		task, err := client.CreateTask(title, description, assignee, parentTaskID, startMode, priority, staleAfterSeconds)
+		task, err := client.CreateTask(title, description, assignee, parentTaskID, startMode, workflowMode, priority, staleAfterSeconds)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Failed to create task: %v", err)), nil
 		}
@@ -726,13 +694,13 @@ func createTaskHandler(client *DaemonClient) server.ToolHandlerFunc {
 	}
 }
 
-func startTaskHandler(client *DaemonClient, configPath string) server.ToolHandlerFunc {
+func startTaskHandler(client *DaemonClient) server.ToolHandlerFunc {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		title, _ := request.RequireString("title")
 		assignee, _ := request.RequireString("assignee")
 		message, _ := request.RequireString("message")
 
-		description, parentTaskID, staleAfterSeconds, startMode, priority, err := parseTaskCreateOptions(request)
+		description, parentTaskID, staleAfterSeconds, startMode, workflowMode, priority, err := parseTaskCreateOptions(request)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -742,60 +710,38 @@ func startTaskHandler(client *DaemonClient, configPath string) server.ToolHandle
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		task, err := client.CreateTask(title, description, assignee, parentTaskID, startMode, priority, staleAfterSeconds)
+		started, err := client.StartTask(title, description, dispatchBody, assignee, parentTaskID, startMode, workflowMode, priority, staleAfterSeconds)
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Failed to create task: %v", err)), nil
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to start task: %v", err)), nil
 		}
 
-		fullMessage := formatTaskDispatchMessage(task.ID, dispatchBody)
-		sendResult, err := client.SendMessage(task.Assignee, fullMessage)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Task %s was created but initial dispatch failed: %v", task.ID, err)), nil
-		}
-		if sendResult.Suppressed {
-			return mcp.NewToolResultError(fmt.Sprintf("Task %s was created but initial dispatch was suppressed unexpectedly", task.ID)), nil
-		}
-
-		freshStart := false
-		if task.StartMode == types.TaskStartFresh {
-			if err := prepareFreshWorkspaceForTask(client, configPath, task.Assignee); err != nil {
-				return mcp.NewToolResultError(fmt.Sprintf("Task %s was created and queued, but fresh-context restart failed: %v", task.ID, err)), nil
-			}
-			freshStart = true
-		}
-
-		wakeWorkspaceAgent(task.Assignee, client.workspace, freshStart)
-
-		data, _ := json.MarshalIndent(startTaskResult{
-			Task: *task,
-			Dispatch: taskDispatchResult{
-				MessageID:    sendResult.MessageID,
-				Status:       sendResult.Status,
-				FreshContext: freshStart,
-			},
-		}, "", "  ")
+		data, _ := json.MarshalIndent(started, "", "  ")
 		return mcp.NewToolResultText(string(data)), nil
 	}
 }
 
-func parseTaskCreateOptions(request mcp.CallToolRequest) (string, string, int, types.TaskStartMode, types.TaskPriority, error) {
+func parseTaskCreateOptions(request mcp.CallToolRequest) (string, string, int, types.TaskStartMode, types.TaskWorkflowMode, types.TaskPriority, error) {
 	description := request.GetString("description", "")
 	parentTaskID := strings.TrimSpace(request.GetString("parent_task_id", ""))
 	staleAfterSeconds := int(request.GetFloat("stale_after_seconds", 0))
 	if staleAfterSeconds < 0 {
-		return "", "", 0, "", "", fmt.Errorf("Invalid stale_after_seconds: must be >= 0")
+		return "", "", 0, "", "", "", fmt.Errorf("Invalid stale_after_seconds: must be >= 0")
 	}
 
 	startMode, err := parseTaskStartMode(request.GetString("start_mode", string(types.TaskStartDefault)))
 	if err != nil {
-		return "", "", 0, "", "", err
+		return "", "", 0, "", "", "", err
+	}
+	workflowMode, err := parseTaskWorkflowMode(request.GetString("workflow_mode", string(types.TaskWorkflowParallel)))
+	if err != nil {
+		return "", "", 0, "", "", "", err
 	}
 	priority, err := parseTaskPriority(request.GetString("priority", string(types.TaskPriorityNormal)))
 	if err != nil {
-		return "", "", 0, "", "", err
+		return "", "", 0, "", "", "", err
 	}
 
-	return description, parentTaskID, staleAfterSeconds, startMode, priority, nil
+	return description, parentTaskID, staleAfterSeconds, startMode, workflowMode, priority, nil
 }
 
 func parseTaskStartMode(value string) (types.TaskStartMode, error) {
@@ -807,6 +753,18 @@ func parseTaskStartMode(value string) (types.TaskStartMode, error) {
 		return types.TaskStartFresh, nil
 	default:
 		return "", fmt.Errorf("Invalid start_mode: %q (must be default or fresh)", startMode)
+	}
+}
+
+func parseTaskWorkflowMode(value string) (types.TaskWorkflowMode, error) {
+	workflowMode := types.TaskWorkflowMode(strings.TrimSpace(value))
+	switch workflowMode {
+	case "", types.TaskWorkflowParallel:
+		return types.TaskWorkflowParallel, nil
+	case types.TaskWorkflowSerial:
+		return types.TaskWorkflowSerial, nil
+	default:
+		return "", fmt.Errorf("Invalid workflow_mode: %q (must be parallel or serial)", workflowMode)
 	}
 }
 
@@ -831,10 +789,6 @@ func normalizeStartTaskMessage(message string) (string, error) {
 		return "", fmt.Errorf("message must not include Task ID %q; start_task injects the new task ID automatically", existingTaskID)
 	}
 	return trimmed, nil
-}
-
-func formatTaskDispatchMessage(taskID, message string) string {
-	return fmt.Sprintf("Task ID: %s\n\n%s", taskID, strings.TrimSpace(message))
 }
 
 func updateTaskHandler(client *DaemonClient) server.ToolHandlerFunc {

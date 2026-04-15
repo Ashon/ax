@@ -457,13 +457,14 @@ func (c *DaemonClient) GetUsageTrends(workspaces []daemon.UsageTrendWorkspace, s
 
 // Task operations
 
-func (c *DaemonClient) CreateTask(title, description, assignee, parentTaskID string, startMode types.TaskStartMode, priority types.TaskPriority, staleAfterSeconds int) (*types.Task, error) {
+func (c *DaemonClient) CreateTask(title, description, assignee, parentTaskID string, startMode types.TaskStartMode, workflowMode types.TaskWorkflowMode, priority types.TaskPriority, staleAfterSeconds int) (*types.Task, error) {
 	resp, err := c.sendRequest(daemon.MsgCreateTask, &daemon.CreateTaskPayload{
 		Title:             title,
 		Description:       description,
 		Assignee:          assignee,
 		ParentTaskID:      parentTaskID,
 		StartMode:         string(startMode),
+		WorkflowMode:      string(workflowMode),
 		Priority:          string(priority),
 		StaleAfterSeconds: staleAfterSeconds,
 	})
@@ -475,6 +476,28 @@ func (c *DaemonClient) CreateTask(title, description, assignee, parentTaskID str
 		return nil, fmt.Errorf("decode create_task response: %w", err)
 	}
 	return &result.Task, nil
+}
+
+func (c *DaemonClient) StartTask(title, description, message, assignee, parentTaskID string, startMode types.TaskStartMode, workflowMode types.TaskWorkflowMode, priority types.TaskPriority, staleAfterSeconds int) (*daemon.StartTaskResponse, error) {
+	resp, err := c.sendRequest(daemon.MsgStartTask, &daemon.StartTaskPayload{
+		Title:             title,
+		Description:       description,
+		Message:           message,
+		Assignee:          assignee,
+		ParentTaskID:      parentTaskID,
+		StartMode:         string(startMode),
+		WorkflowMode:      string(workflowMode),
+		Priority:          string(priority),
+		StaleAfterSeconds: staleAfterSeconds,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var result daemon.StartTaskResponse
+	if err := decodeResponseData(resp, &result); err != nil {
+		return nil, fmt.Errorf("decode start_task response: %w", err)
+	}
+	return &result, nil
 }
 
 func (c *DaemonClient) UpdateTask(id string, status *types.TaskStatus, result *string, logMsg *string) (*types.Task, error) {
