@@ -17,13 +17,20 @@ import (
 // dropped so a perpetually offline (or crash-looping) workspace cannot
 // exhaust daemon memory and disk.
 const DefaultMaxQueuePerWorkspace = 1000
+const defaultQueueFlushInterval = 100 * time.Millisecond
 
 type MessageQueue struct {
-	mu       sync.Mutex
-	messages map[string][]types.Message // workspace -> pending messages
-	filePath string
-	maxSize  int
-	logger   *log.Logger
+	mu            sync.Mutex
+	persistMu     sync.Mutex
+	closeOnce     sync.Once
+	messages      map[string][]types.Message // workspace -> pending messages
+	filePath      string
+	maxSize       int
+	logger        *log.Logger
+	flushInterval time.Duration
+	stopCh        chan struct{}
+	doneCh        chan struct{}
+	dirty         bool
 }
 
 func NewMessageQueue() *MessageQueue {
@@ -34,11 +41,117 @@ func NewMessageQueue() *MessageQueue {
 }
 
 func NewPersistentMessageQueue(stateDir string) *MessageQueue {
-	return &MessageQueue{
+	return newPersistentMessageQueue(stateDir, defaultQueueFlushInterval)
+}
+
+func newPersistentMessageQueue(stateDir string, flushInterval time.Duration) *MessageQueue {
+	q := &MessageQueue{
 		messages: make(map[string][]types.Message),
 		filePath: filepath.Join(stateDir, "queue.json"),
 		maxSize:  DefaultMaxQueuePerWorkspace,
 	}
+	if flushInterval <= 0 {
+		flushInterval = defaultQueueFlushInterval
+	}
+	q.flushInterval = flushInterval
+	q.startFlusher()
+	return q
+}
+
+func (q *MessageQueue) startFlusher() {
+	if q.filePath == "" {
+		return
+	}
+	q.stopCh = make(chan struct{})
+	q.doneCh = make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(q.flushInterval)
+		defer ticker.Stop()
+		defer close(q.doneCh)
+		for {
+			select {
+			case <-ticker.C:
+				_ = q.Flush()
+			case <-q.stopCh:
+				_ = q.Flush()
+				return
+			}
+		}
+	}()
+}
+
+func (q *MessageQueue) markDirtyLocked() {
+	if q.filePath == "" {
+		return
+	}
+	q.dirty = true
+}
+
+func copyPendingMessages(src map[string][]types.Message) map[string][]types.Message {
+	clone := make(map[string][]types.Message, len(src))
+	for workspace, messages := range src {
+		if messages == nil {
+			clone[workspace] = nil
+			continue
+		}
+		copied := make([]types.Message, len(messages))
+		copy(copied, messages)
+		clone[workspace] = copied
+	}
+	return clone
+}
+
+func (q *MessageQueue) snapshotDirty() (map[string][]types.Message, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.filePath == "" || !q.dirty {
+		return nil, false
+	}
+	snapshot := copyPendingMessages(q.messages)
+	q.dirty = false
+	return snapshot, true
+}
+
+func (q *MessageQueue) persistSnapshot(snapshot map[string][]types.Message) error {
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(q.filePath, data, 0o600)
+}
+
+func (q *MessageQueue) Flush() error {
+	if q.filePath == "" {
+		return nil
+	}
+
+	q.persistMu.Lock()
+	defer q.persistMu.Unlock()
+
+	snapshot, ok := q.snapshotDirty()
+	if !ok {
+		return nil
+	}
+	if err := q.persistSnapshot(snapshot); err != nil {
+		q.mu.Lock()
+		q.dirty = true
+		q.mu.Unlock()
+		if q.logger != nil {
+			q.logger.Printf("persist queue: %v", err)
+		}
+		return err
+	}
+	return nil
+}
+
+func (q *MessageQueue) Close() {
+	if q.stopCh == nil {
+		return
+	}
+	q.closeOnce.Do(func() {
+		close(q.stopCh)
+		<-q.doneCh
+	})
 }
 
 // SetMaxSize overrides the per-workspace pending message cap. A value <= 0
@@ -76,7 +189,7 @@ func (q *MessageQueue) Enqueue(from, to, content string) types.Message {
 			q.logger.Printf("queue cap exceeded for %q, dropped %d oldest message(s)", to, dropped)
 		}
 	}
-	q.persist()
+	q.markDirtyLocked()
 	return msg
 }
 
@@ -104,8 +217,12 @@ func (q *MessageQueue) Dequeue(workspace string, limit int, from string) []types
 		result = append(result, msg)
 	}
 
+	if len(result) == 0 {
+		return nil
+	}
+
 	q.messages[workspace] = remaining
-	q.persist()
+	q.markDirtyLocked()
 	return result
 }
 
@@ -151,23 +268,6 @@ func (q *MessageQueue) Load() error {
 		messages = make(map[string][]types.Message)
 	}
 	q.messages = messages
+	q.dirty = false
 	return nil
-}
-
-func (q *MessageQueue) persist() {
-	if q.filePath == "" {
-		return
-	}
-	data, err := json.Marshal(q.messages)
-	if err != nil {
-		if q.logger != nil {
-			q.logger.Printf("marshal queue: %v", err)
-		}
-		return
-	}
-	if err := writeFileAtomic(q.filePath, data, 0o600); err != nil {
-		if q.logger != nil {
-			q.logger.Printf("persist queue: %v", err)
-		}
-	}
 }

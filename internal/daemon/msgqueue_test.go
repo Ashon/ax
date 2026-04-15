@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestMessageQueueDropsOldestWhenCapExceeded(t *testing.T) {
@@ -45,11 +46,15 @@ func TestMessageQueueZeroCapDisablesLimit(t *testing.T) {
 
 func TestPersistentMessageQueueWritesAtomicallyAndReloads(t *testing.T) {
 	dir := t.TempDir()
-	q := NewPersistentMessageQueue(dir)
+	q := newPersistentMessageQueue(dir, time.Hour)
+	defer q.Close()
 	q.SetMaxSize(0)
 
 	q.Enqueue("orchestrator", "worker", "hello")
 	q.Enqueue("orchestrator", "worker", "world")
+	if err := q.Flush(); err != nil {
+		t.Fatalf("flush queue: %v", err)
+	}
 
 	queuePath := filepath.Join(dir, "queue.json")
 	data, err := os.ReadFile(queuePath)
@@ -78,11 +83,33 @@ func TestPersistentMessageQueueWritesAtomicallyAndReloads(t *testing.T) {
 	}
 
 	// A fresh queue rooted at the same dir must rehydrate the same state.
-	q2 := NewPersistentMessageQueue(dir)
+	q2 := newPersistentMessageQueue(dir, time.Hour)
+	defer q2.Close()
 	if err := q2.Load(); err != nil {
 		t.Fatalf("reload queue: %v", err)
 	}
 	if got := q2.PendingCount("worker"); got != 2 {
 		t.Fatalf("expected 2 messages after reload, got %d", got)
+	}
+}
+
+func TestPersistentMessageQueueBatchesEnqueueUntilFlush(t *testing.T) {
+	dir := t.TempDir()
+	q := newPersistentMessageQueue(dir, time.Hour)
+	defer q.Close()
+
+	q.Enqueue("orchestrator", "worker", "hello")
+	q.Enqueue("orchestrator", "worker", "world")
+
+	queuePath := filepath.Join(dir, "queue.json")
+	if _, err := os.Stat(queuePath); !os.IsNotExist(err) {
+		t.Fatalf("expected no persisted queue file before flush, got err=%v", err)
+	}
+
+	if err := q.Flush(); err != nil {
+		t.Fatalf("flush queue: %v", err)
+	}
+	if _, err := os.Stat(queuePath); err != nil {
+		t.Fatalf("expected queue file after flush: %v", err)
 	}
 }
