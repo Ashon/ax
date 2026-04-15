@@ -5,10 +5,14 @@ dist/
 .mcp.json
 cmd/AGENTS.md
 cmd/CLAUDE.md
+internal/agent/AGENTS.md
+internal/agent/CLAUDE.md
 internal/config/AGENTS.md
 internal/config/CLAUDE.md
 internal/daemon/AGENTS.md
 internal/daemon/CLAUDE.md
+internal/mcpserver/AGENTS.md
+internal/mcpserver/CLAUDE.md
 internal/usage/AGENTS.md
 internal/usage/CLAUDE.md
 internal/workspace/AGENTS.md

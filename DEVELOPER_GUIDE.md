@@ -32,7 +32,7 @@ tmux 기반 멀티 에이전트 LLM 워크스페이스 매니저
 - task 생성/진행/완료 상태 추적과 stale 신호 계산
 - MCP 표준 도구 인터페이스로 에이전트 간 통신
 - 계층적 프로젝트 트리와 서브 오케스트레이터 지원
-- BubbleTea 기반 모니터링 TUI (watch)
+- BubbleTea 기반 모니터링 TUI (top, legacy alias: watch)
 
 ---
 
@@ -41,7 +41,7 @@ tmux 기반 멀티 에이전트 LLM 워크스페이스 매니저
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                         사용자                               │
-│                ax claude / ax codex / ax watch               │
+│                 ax claude / ax codex / ax top                │
 └──────────────┬──────────────────────────────┬───────────────┘
                │                              │
                ▼                              ▼
@@ -97,7 +97,7 @@ ax/
 │   ├── daemon.go                    #   데몬 start/stop/status
 │   ├── workspace.go                 #   워크스페이스 create/destroy/list/attach
 │   ├── shell.go, shell_tui.go       #   오케스트레이터 대화 TUI
-│   ├── watch.go                     #   워크스페이스 모니터링 TUI
+│   ├── watch.go                     #   top/watch 워크스페이스 모니터링 TUI
 │   ├── status.go                    #   프로젝트 상태 표시
 │   ├── send.go                      #   메시지 전송 + 에이전트 웨이크
 │   ├── orchestrators.go             #   오케스트레이터 세션 보장
@@ -220,7 +220,7 @@ cd /path/to/your/project
 ./ax init       # 인터랙티브 설정 (.ax/config.yaml 생성)
 ./ax up         # 데몬 + 워크스페이스 + 서브 오케스트레이터 기동
 ./ax claude     # (또는 ./ax codex) 루트 오케스트레이터 CLI 실행
-./ax watch      # 워크스페이스 모니터링
+./ax top        # 워크스페이스 모니터링
 ./ax down       # 종료
 ```
 
@@ -366,9 +366,9 @@ type Child struct {
 | `ax up` | 데몬 시작 → 워크스페이스 생성 → 서브 오케스트레이터 기동 + 루트 오케스트레이터 산출물 갱신 |
 | `ax down` | 모든 워크스페이스 / 서브 오케스트레이터 종료 → 데몬 정지 |
 | `ax status` | 데몬/워크스페이스 상태, 프로젝트 트리 표시 |
-| `ax claude` | 루트 오케스트레이터 프롬프트+MCP 설정을 그대로 가지고 Claude CLI를 포그라운드로 실행 |
-| `ax codex` | 루트 오케스트레이터 프롬프트+MCP 설정을 그대로 가지고 Codex CLI를 포그라운드로 실행 |
-| `ax watch` | 워크스페이스 실시간 모니터링 TUI |
+| `ax claude [claude args...]` | 루트 오케스트레이터 프롬프트+MCP 설정을 그대로 가지고 Claude CLI를 포그라운드로 실행. 추가 인자는 그대로 전달 |
+| `ax codex [codex args...]` | 루트 오케스트레이터 프롬프트+MCP 설정을 그대로 가지고 Codex CLI를 포그라운드로 실행. 추가 인자는 그대로 전달 |
+| `ax top` | 워크스페이스 실시간 모니터링 TUI (`watch` alias 지원) |
 | `ax send <workspace> <message>` | 메시지 전송 + 에이전트 웨이크 |
 | `ax workspace create <name>` | 워크스페이스 수동 생성 |
 | `ax workspace destroy <name>` | 워크스페이스 삭제 |
@@ -383,10 +383,10 @@ type Child struct {
 
 ### TUI 메모
 
-- `ax watch`는 config 트리와 현재 tmux 세션을 결합해 사이드바를 그린다. 상태 마커는 `offline`=`○`, `idle`=`●`, `running`=스피너이며, 하단 스트림은 `messages` / `tasks` / `tokens` / `off`를 순환한다.
-- `ax watch`의 task pane은 `tasks.json`을 직접 읽어 active/all/completed/failed 필터와 stale/divergence/queued 배지를 표시한다.
+- `ax top`은 config 트리와 현재 tmux 세션을 결합해 사이드바를 그린다. 상태 마커는 `offline`=`○`, `idle`=`●`, `running`=스피너이며, 하단 스트림은 `messages` / `tasks` / `tokens` / `off`를 순환한다.
+- `ax top`의 task pane은 `tasks.json`을 직접 읽어 active/all/completed/failed 필터와 stale/divergence/queued 배지를 표시한다.
 - `ax shell`은 기본적으로 오케스트레이터 세션을 메인 pane에 보여주고, `Ctrl+A`로 control mode에 들어가 `v`(선택 워크스페이스 보기), `o`(오케스트레이터 복귀), `t`(stream 전환), `x`(interrupt) 같은 조작을 한다.
-- `ax shell`도 `watch`와 동일한 messages/tasks/tokens 스트림과 workspace status/task 관측 정보를 재사용한다.
+- `ax shell`도 `top`과 동일한 messages/tasks/tokens 스트림과 workspace status/task 관측 정보를 재사용한다.
 
 ---
 
@@ -525,7 +525,7 @@ type Child struct {
 - `TaskStore` (`internal/daemon/taskstore.go`)는 daemon 상태 디렉터리의 `tasks.json`에 task를 저장한다. `Create`/`Update`/`Refresh`는 변경 사항을 즉시 persist하고, `Get`/`List`/`Snapshot`은 방어적 복사본을 반환한다.
 - `TaskStore.Update`는 assignee/creator 권한, monotonic status transition, assignee 전용 `result` 쓰기, 중복 no-op 로그 억제를 함께 검증한다.
 - `WakeScheduler` (`internal/daemon/wakescheduler.go`)는 workspace별 pending wake를 추적한다. `send_message`가 메시지를 enqueue하면 scheduler entry가 등록되고, `read_messages`로 inbox가 비워지면 cancel된다.
-- `WakeScheduler.State`는 watch/diagnostics에서 볼 수 있는 현재 wake 재시도 상태(`sender`, `attempts`, `next_retry`)를 노출한다.
+- `WakeScheduler.State`는 top/diagnostics에서 볼 수 있는 현재 wake 재시도 상태(`sender`, `attempts`, `next_retry`)를 노출한다.
 
 ---
 
@@ -537,8 +537,8 @@ type Child struct {
 type Runtime interface {
     Name() string
     InstructionFile() string
-    Launch(dir, workspace, socketPath, axBin, configPath string) error
-    UserCommand(dir, workspace, socketPath, axBin, configPath string) (string, error)
+    Launch(dir, workspace, socketPath, axBin, configPath string, extraArgs []string) error
+    UserCommand(dir, workspace, socketPath, axBin, configPath string, extraArgs []string) (string, error)
 }
 ```
 
