@@ -26,29 +26,14 @@ type tokenTotals struct {
 	CostAgents      int
 }
 
-func loadWatchTokenTrends(sessions []tmux.SessionInfo) (map[string]usage.WorkspaceTrend, bool) {
+func loadWatchTokenTrends(_ []tmux.SessionInfo) (map[string]usage.WorkspaceTrend, bool) {
 	sp := daemon.ExpandSocketPath(socketPath)
 	if !isDaemonRunning(sp) {
 		return map[string]usage.WorkspaceTrend{}, true
 	}
 
 	dirByWorkspace := loadWatchWorkspaceDirs()
-	requests := make([]daemon.UsageTrendWorkspace, 0, len(sessions))
-	seen := make(map[string]struct{}, len(sessions))
-	for _, session := range sessions {
-		if _, ok := seen[session.Workspace]; ok {
-			continue
-		}
-		seen[session.Workspace] = struct{}{}
-		cwd := strings.TrimSpace(dirByWorkspace[session.Workspace])
-		if cwd == "" {
-			continue
-		}
-		requests = append(requests, daemon.UsageTrendWorkspace{
-			Workspace: session.Workspace,
-			Cwd:       cwd,
-		})
-	}
+	requests := watchTrendRequests(dirByWorkspace)
 	if len(requests) == 0 {
 		return map[string]usage.WorkspaceTrend{}, true
 	}
@@ -68,6 +53,25 @@ func loadWatchTokenTrends(sessions []tmux.SessionInfo) (map[string]usage.Workspa
 		result[trend.Workspace] = trend
 	}
 	return result, true
+}
+
+func watchTrendRequests(dirByWorkspace map[string]string) []daemon.UsageTrendWorkspace {
+	workspaces := make([]string, 0, len(dirByWorkspace))
+	for workspace, cwd := range dirByWorkspace {
+		if strings.TrimSpace(cwd) == "" {
+			continue
+		}
+		workspaces = append(workspaces, workspace)
+	}
+	sort.Strings(workspaces)
+	requests := make([]daemon.UsageTrendWorkspace, 0, len(workspaces))
+	for _, workspace := range workspaces {
+		requests = append(requests, daemon.UsageTrendWorkspace{
+			Workspace: workspace,
+			Cwd:       strings.TrimSpace(dirByWorkspace[workspace]),
+		})
+	}
+	return requests
 }
 
 func refreshWatchTokenTrends(current map[string]usage.WorkspaceTrend, last time.Time, sessions []tmux.SessionInfo, now time.Time, force bool) (map[string]usage.WorkspaceTrend, time.Time) {
@@ -379,6 +383,7 @@ func liveTokenLines(innerW int, entries []agentTokens, summary tokenTotals, tren
 	lines = append(lines, tokenDimClr.Render(header))
 
 	maxCost := 0.0
+	totalMCP := int64(0)
 	for _, e := range entries {
 		if c := parseCostValue(e.Cost); c > maxCost {
 			maxCost = c
@@ -394,6 +399,7 @@ func liveTokenLines(innerW int, entries []agentTokens, summary tokenTotals, tren
 		if trend, ok := trendData[e.Workspace]; ok {
 			latestMCP = trend.LatestMCPProxy.Total
 		}
+		totalMCP += latestMCP
 
 		sty := tokenNormalClr
 		if maxCost > 0 && cost >= maxCost*0.8 {
@@ -435,10 +441,6 @@ func liveTokenLines(innerW int, entries []agentTokens, summary tokenTotals, tren
 	if summary.TotalUp > 0 {
 		totalIn = "↑" + formatTokenCount(summary.TotalUp)
 	}
-	var totalMCP int64
-	for _, trend := range trendData {
-		totalMCP += trend.LatestMCPProxy.Total
-	}
 	totalLine := fmt.Sprintf(" %-20s %9s %9s %9s %9s",
 		fmt.Sprintf("TOTAL (%d)", summary.ReportingAgents),
 		totalIn,
@@ -454,10 +456,10 @@ func liveTokenLines(innerW int, entries []agentTokens, summary tokenTotals, tren
 	return lines
 }
 
-func trendTokenLines(innerW int, sessions []tmux.SessionInfo, trendData map[string]usage.WorkspaceTrend) []string {
-	lines := []string{tokenDimClr.Render(" history 24h (MCP~ proxy) ")}
-	seen := make(map[string]struct{}, len(sessions))
-	workspaceOrder := make([]string, 0, len(sessions))
+func trendTokenLines(innerW int, sessions []tmux.SessionInfo, trendData map[string]usage.WorkspaceTrend, workspaceInfos map[string]types.WorkspaceInfo) []string {
+	lines := []string{tokenDimClr.Render(" history 24h (MCP~ proxy; offline retained) ")}
+	seen := make(map[string]struct{}, len(sessions)+len(trendData))
+	workspaceOrder := make([]string, 0, len(sessions)+len(trendData))
 	for _, session := range sessions {
 		if _, ok := seen[session.Workspace]; ok {
 			continue
@@ -465,9 +467,17 @@ func trendTokenLines(innerW int, sessions []tmux.SessionInfo, trendData map[stri
 		seen[session.Workspace] = struct{}{}
 		workspaceOrder = append(workspaceOrder, session.Workspace)
 	}
+	for workspace := range trendData {
+		if _, ok := seen[workspace]; ok {
+			continue
+		}
+		seen[workspace] = struct{}{}
+		workspaceOrder = append(workspaceOrder, workspace)
+	}
 
 	type trendRow struct {
 		workspace string
+		state     string
 		last      int64
 		total     int64
 		mcp       int64
@@ -487,6 +497,7 @@ func trendTokenLines(innerW int, sessions []tmux.SessionInfo, trendData map[stri
 		}
 		rows = append(rows, trendRow{
 			workspace: workspace,
+			state:     truncateStr(workspaceAgentStatus(workspaceInfos, workspace), 8),
 			last:      trend.LatestTokens.Total(),
 			total:     trend.Total.Total(),
 			mcp:       trend.MCPProxy.Total,
@@ -508,15 +519,16 @@ func trendTokenLines(innerW int, sessions []tmux.SessionInfo, trendData map[stri
 		return append(lines, tokenDimClr.Render("  (no history data yet)"))
 	}
 
-	header := fmt.Sprintf(" %-15s %8s %8s %8s %6s %-8s", "WORKSPACE", "LAST", "24H", "MCP~", "SHARE", "TREND")
+	header := fmt.Sprintf(" %-15s %8s %8s %8s %8s %6s %-8s", "WORKSPACE", "STATE", "LAST", "24H", "MCP~", "SHARE", "TREND")
 	lines = append(lines, tokenDimClr.Render(header))
 	for _, row := range rows {
 		ws := row.workspace
 		if len(ws) > 15 {
 			ws = ws[:14] + "…"
 		}
-		line := fmt.Sprintf(" %-15s %8s %8s %8s %6s %-8s",
+		line := fmt.Sprintf(" %-15s %8s %8s %8s %8s %6s %-8s",
 			ws,
+			row.state,
 			formatTokenCount(float64(row.last)),
 			formatTokenCount(float64(row.total)),
 			formatMCPProxyMetric(row.mcp),
@@ -635,7 +647,7 @@ func (m watchModel) renderTokens(totalW, totalH int) string {
 	entries := tokenEntriesFromMap(m.tokenData)
 	summary := summarizeTokenEntries(entries, len(m.sessions))
 	liveLines := liveTokenLines(innerW, entries, summary, m.trendData)
-	trendLines := trendTokenLines(innerW, m.sessions, m.trendData)
+	trendLines := trendTokenLines(innerW, m.sessions, m.trendData, m.workspaceInfos)
 	tokenLines := composeTokenLines(innerH, liveLines, trendLines)
 
 	var bodyLines []string

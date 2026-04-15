@@ -12,6 +12,9 @@ type UsageBucket struct {
 }
 
 // AgentTrend is the per-agent breakout within a workspace trend.
+// Available reports whether transcript history was attributed for this agent
+// in the requested window; callers should use workspace/session state
+// separately for live online/offline status.
 type AgentTrend struct {
 	Agent                string          `json:"agent"`
 	Available            bool            `json:"available"`
@@ -27,6 +30,9 @@ type AgentTrend struct {
 }
 
 // WorkspaceTrend is the daemon-facing historical usage view for one workspace.
+// Available reports whether transcript history was attributable for the
+// requested workspace binding. It is intentionally separate from the daemon
+// registry's live online/offline presence.
 type WorkspaceTrend struct {
 	Workspace         string          `json:"workspace"`
 	Cwd               string          `json:"cwd,omitempty"`

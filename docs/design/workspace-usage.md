@@ -247,6 +247,15 @@ ax.orchestrator  opus-4-6       0       0       0       0        0       0
    without `Dir`, so we can't resolve a project hash. `Available=false`.
    Daemon `Register` already stores `Dir` so most real workspaces have it.
 
+### 6.1 Historical availability vs live presence
+
+For history/trend responses, `WorkspaceTrend.Available` and
+`AgentTrend.Available` mean "transcript history was attributable for the
+requested binding/window", not "the workspace is currently online in the
+daemon registry". Callers that care about live presence must join against
+`list_workspaces`/session state separately. This lets tokens/history views
+show offline workspaces or agents when they still have recorded usage.
+
 ## 7. Tests
 
 Package: `internal/usage/usage_test.go`.

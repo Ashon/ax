@@ -3,6 +3,7 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -932,5 +933,89 @@ func TestRenderTokensReusesUnusedLiveHeightForHistoryRows(t *testing.T) {
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected %q in tokens view %q", want, view)
 		}
+	}
+}
+
+func TestWatchTrendRequestsIncludeConfiguredOfflineWorkspaces(t *testing.T) {
+	requests := watchTrendRequests(map[string]string{
+		"ax.cli":       "/tmp/ax-cli",
+		"ax.offline":   "/tmp/ax-offline",
+		"blank":        "   ",
+		"orchestrator": "/tmp/orchestrator",
+	})
+
+	if len(requests) != 3 {
+		t.Fatalf("requests=%d, want 3: %+v", len(requests), requests)
+	}
+	got := []string{requests[0].Workspace, requests[1].Workspace, requests[2].Workspace}
+	want := []string{"ax.cli", "ax.offline", "orchestrator"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("workspaces=%v, want %v", got, want)
+	}
+}
+
+func TestTrendTokenLinesIncludeOfflineHistoricalWorkspaces(t *testing.T) {
+	lines := trendTokenLines(100,
+		[]tmux.SessionInfo{{Name: "ax-ax_cli", Workspace: "ax.cli"}},
+		map[string]usage.WorkspaceTrend{
+			"ax.cli": {
+				Workspace:    "ax.cli",
+				Available:    true,
+				LatestTokens: usage.Tokens{Input: 50},
+				Total:        usage.Tokens{Input: 100},
+				MCPProxy:     usage.MCPProxyMetrics{Total: 10},
+				Buckets: []usage.UsageBucket{
+					{Totals: usage.Tokens{Input: 50}},
+				},
+			},
+			"ax.offline": {
+				Workspace:    "ax.offline",
+				Available:    true,
+				LatestTokens: usage.Tokens{Input: 250},
+				Total:        usage.Tokens{Input: 500},
+				MCPProxy:     usage.MCPProxyMetrics{Total: 40},
+				Buckets: []usage.UsageBucket{
+					{Totals: usage.Tokens{Input: 250}},
+				},
+			},
+		},
+		map[string]types.WorkspaceInfo{
+			"ax.cli": {Name: "ax.cli", Status: types.StatusOnline},
+		},
+	)
+
+	view := xansi.Strip(strings.Join(lines, "\n"))
+	for _, want := range []string{"offline retained", "STATE", "ax.offline", "offline", "ax.cli", "online"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected %q in trend lines %q", want, view)
+		}
+	}
+}
+
+func TestLiveTokenLinesTotalMCPUsesReportingEntriesOnly(t *testing.T) {
+	entries := tokenEntriesFromMap(map[string]agentTokens{
+		"ax.cli": {Workspace: "ax.cli", Up: "200", Down: "100"},
+	})
+	summary := summarizeTokenEntries(entries, 2)
+	lines := liveTokenLines(100, entries, summary, map[string]usage.WorkspaceTrend{
+		"ax.cli": {
+			Workspace:      "ax.cli",
+			LatestMCPProxy: usage.MCPProxyMetrics{Total: 10},
+		},
+		"ax.offline": {
+			Workspace:      "ax.offline",
+			LatestMCPProxy: usage.MCPProxyMetrics{Total: 1000},
+		},
+	})
+
+	view := xansi.Strip(strings.Join(lines, "\n"))
+	if !strings.Contains(view, "TOTAL (1)") {
+		t.Fatalf("expected total row in live lines %q", view)
+	}
+	if !strings.Contains(view, "~10") {
+		t.Fatalf("expected live total MCP to use reporting entries only in %q", view)
+	}
+	if strings.Contains(view, "~1.0k") {
+		t.Fatalf("did not expect offline-only MCP total in live lines %q", view)
 	}
 }
