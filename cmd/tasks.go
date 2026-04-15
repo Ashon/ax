@@ -19,11 +19,21 @@ var (
 	taskOnlyStale     bool
 	taskLogLimit      int
 	taskActivityLimit int
+
+	taskCancelReason          string
+	taskCancelExpectedVersion int64
+	taskRemoveReason          string
+	taskRemoveExpectedVersion int64
+	taskInterveneAction       string
+	taskInterveneNote         string
+	taskInterveneExpectedVer  int64
+	taskRetryNote             string
+	taskRetryExpectedVersion  int64
 )
 
 var tasksCmd = &cobra.Command{
 	Use:   "tasks",
-	Short: "Inspect task status and recent progress",
+	Short: "Inspect and control task status",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		client, err := newCLIClient()
 		if err != nil {
@@ -102,12 +112,22 @@ var tasksShowCmd = &cobra.Command{
 		fmt.Printf("Task: %s\n", task.Title)
 		fmt.Printf("ID: %s\n", task.ID)
 		fmt.Printf("Status: %s\n", taskStatusLabel(*task))
+		fmt.Printf("Version: %d\n", task.Version)
 		fmt.Printf("Assignee: %s\n", task.Assignee)
 		fmt.Printf("Created By: %s\n", task.CreatedBy)
 		fmt.Printf("Priority: %s\n", taskPriorityLabel(task.Priority))
 		fmt.Printf("Updated: %s ago (%s)\n", formatTaskAge(*task), task.UpdatedAt.Format("2006-01-02 15:04:05"))
 		fmt.Printf("Created: %s\n", task.CreatedAt.Format("2006-01-02 15:04:05"))
 		fmt.Printf("Start Mode: %s\n", task.StartMode)
+		if task.RemovedAt != nil {
+			fmt.Printf("Removed: %s\n", task.RemovedAt.Format("2006-01-02 15:04:05"))
+			if task.RemovedBy != "" {
+				fmt.Printf("Removed By: %s\n", task.RemovedBy)
+			}
+			if task.RemoveReason != "" {
+				fmt.Printf("Remove Reason: %s\n", task.RemoveReason)
+			}
+		}
 		if task.StaleAfterSeconds > 0 {
 			fmt.Printf("Stale After: %ds\n", task.StaleAfterSeconds)
 		}
@@ -136,6 +156,15 @@ var tasksShowCmd = &cobra.Command{
 			if task.StaleInfo.LastMessageAt != nil {
 				fmt.Printf("- last_message: %s\n", task.StaleInfo.LastMessageAt.Format("2006-01-02 15:04:05"))
 			}
+			if task.StaleInfo.WakePending {
+				fmt.Printf("- wake_pending: true\n")
+				if task.StaleInfo.WakeAttempts > 0 {
+					fmt.Printf("- wake_attempts: %d\n", task.StaleInfo.WakeAttempts)
+				}
+				if task.StaleInfo.NextWakeRetryAt != nil {
+					fmt.Printf("- next_wake_retry: %s\n", task.StaleInfo.NextWakeRetryAt.Format("2006-01-02 15:04:05"))
+				}
+			}
 		}
 
 		fmt.Printf("\nOperator Hint:\n%s\n", taskOperatorHint(*task))
@@ -161,6 +190,111 @@ var tasksShowCmd = &cobra.Command{
 				fmt.Printf("- %s %s -> %s: %s\n", msg.Timestamp.Format("15:04:05"), msg.From, msg.To, truncateStr(content, 120))
 			}
 		}
+		return nil
+	},
+}
+
+var tasksCancelCmd = &cobra.Command{
+	Use:   "cancel <task-id>",
+	Short: "Cancel an active task",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		client, err := newCLIClient()
+		if err != nil {
+			return err
+		}
+		defer client.Close()
+
+		task, err := client.CancelTask(args[0], strings.TrimSpace(taskCancelReason), optionalTaskVersion(taskCancelExpectedVersion))
+		if err != nil {
+			return err
+		}
+		printTaskMutationResult("Cancelled", task)
+		return nil
+	},
+}
+
+var tasksRemoveCmd = &cobra.Command{
+	Use:   "remove <task-id>",
+	Short: "Archive a terminal task so it disappears from list results",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		client, err := newCLIClient()
+		if err != nil {
+			return err
+		}
+		defer client.Close()
+
+		task, err := client.RemoveTask(args[0], strings.TrimSpace(taskRemoveReason), optionalTaskVersion(taskRemoveExpectedVersion))
+		if err != nil {
+			return err
+		}
+		printTaskMutationResult("Removed", task)
+		return nil
+	},
+}
+
+var tasksRecoverCmd = &cobra.Command{
+	Use:   "recover <task-id>",
+	Short: "Preview safe next steps for a task without mutating it",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		client, err := newCLIClient()
+		if err != nil {
+			return err
+		}
+		defer client.Close()
+
+		task, err := client.GetTask(args[0])
+		if err != nil {
+			return err
+		}
+		fmt.Println(strings.Join(taskRecoveryPreviewLines(*task), "\n"))
+		return nil
+	},
+}
+
+var tasksInterveneCmd = &cobra.Command{
+	Use:   "intervene <task-id>",
+	Short: "Apply a bounded recovery action to a task",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		client, err := newCLIClient()
+		if err != nil {
+			return err
+		}
+		defer client.Close()
+
+		action := strings.TrimSpace(taskInterveneAction)
+		if action != "wake" && action != "interrupt" && action != "retry" {
+			return fmt.Errorf("invalid --action %q (must be wake, interrupt, or retry)", action)
+		}
+
+		resp, err := client.InterveneTask(args[0], action, strings.TrimSpace(taskInterveneNote), optionalTaskVersion(taskInterveneExpectedVer))
+		if err != nil {
+			return err
+		}
+		printTaskInterventionResult(resp)
+		return nil
+	},
+}
+
+var tasksRetryCmd = &cobra.Command{
+	Use:   "retry <task-id>",
+	Short: "Queue a standardized follow-up message on the same task ID",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		client, err := newCLIClient()
+		if err != nil {
+			return err
+		}
+		defer client.Close()
+
+		resp, err := client.InterveneTask(args[0], "retry", strings.TrimSpace(taskRetryNote), optionalTaskVersion(taskRetryExpectedVersion))
+		if err != nil {
+			return err
+		}
+		printTaskInterventionResult(resp)
 		return nil
 	},
 }
@@ -268,23 +402,72 @@ func parseTaskStatusFlag(raw string) (*types.TaskStatus, error) {
 	}
 	status := types.TaskStatus(raw)
 	switch status {
-	case types.TaskPending, types.TaskInProgress, types.TaskCompleted, types.TaskFailed:
+	case types.TaskPending, types.TaskInProgress, types.TaskCompleted, types.TaskFailed, types.TaskCancelled:
 		return &status, nil
 	default:
 		return nil, fmt.Errorf("invalid --status %q", raw)
 	}
 }
 
+func optionalTaskVersion(version int64) *int64 {
+	if version <= 0 {
+		return nil
+	}
+	v := version
+	return &v
+}
+
+func printTaskMutationResult(action string, task *types.Task) {
+	fmt.Printf("%s task %s\n", action, task.ID)
+	fmt.Printf("Status: %s\n", taskStatusLabel(*task))
+	fmt.Printf("Version: %d\n", task.Version)
+	fmt.Printf("Assignee: %s\n", task.Assignee)
+	if task.Result != "" {
+		fmt.Printf("Result: %s\n", task.Result)
+	}
+	if task.RemovedAt != nil {
+		fmt.Printf("Removed: %s\n", task.RemovedAt.Format("2006-01-02 15:04:05"))
+		if task.RemovedBy != "" {
+			fmt.Printf("Removed By: %s\n", task.RemovedBy)
+		}
+		if task.RemoveReason != "" {
+			fmt.Printf("Remove Reason: %s\n", task.RemoveReason)
+		}
+	}
+}
+
+func printTaskInterventionResult(resp *daemon.InterveneTaskResponse) {
+	fmt.Printf("Intervened task %s\n", resp.Task.ID)
+	fmt.Printf("Action: %s\n", resp.Action)
+	fmt.Printf("Status: %s\n", resp.Status)
+	fmt.Printf("Task Status: %s\n", taskStatusLabel(resp.Task))
+	fmt.Printf("Version: %d\n", resp.Task.Version)
+	if resp.MessageID != "" {
+		fmt.Printf("Message ID: %s\n", resp.MessageID)
+	}
+	if resp.Action == "retry" {
+		fmt.Println("Retry semantics: queued a standardized follow-up message on the same task ID.")
+	}
+}
+
 func init() {
 	tasksCmd.Flags().StringVar(&taskAssignee, "assignee", "", "filter by assignee workspace")
 	tasksCmd.Flags().StringVar(&taskCreatedBy, "created-by", "", "filter by creator workspace")
-	tasksCmd.Flags().StringVar(&taskStatus, "status", "", "filter by status: pending|in_progress|completed|failed")
+	tasksCmd.Flags().StringVar(&taskStatus, "status", "", "filter by status: pending|in_progress|completed|failed|cancelled")
 	tasksCmd.Flags().BoolVar(&taskOnlyStale, "stale", false, "show only stale tasks")
 
 	tasksShowCmd.Flags().IntVar(&taskLogLimit, "logs", 8, "number of recent logs to show")
 	tasksActivityCmd.Flags().IntVar(&taskActivityLimit, "limit", 20, "number of activity entries to show")
+	tasksCancelCmd.Flags().StringVar(&taskCancelReason, "reason", "", "optional cancellation reason")
+	tasksCancelCmd.Flags().Int64Var(&taskCancelExpectedVersion, "expected-version", 0, "optional optimistic concurrency guard")
+	tasksRemoveCmd.Flags().StringVar(&taskRemoveReason, "reason", "", "optional archive reason")
+	tasksRemoveCmd.Flags().Int64Var(&taskRemoveExpectedVersion, "expected-version", 0, "optional optimistic concurrency guard")
+	tasksInterveneCmd.Flags().StringVar(&taskInterveneAction, "action", "", "bounded action: wake, interrupt, or retry")
+	tasksInterveneCmd.Flags().StringVar(&taskInterveneNote, "note", "", "optional note for retry follow-up messages")
+	tasksInterveneCmd.Flags().Int64Var(&taskInterveneExpectedVer, "expected-version", 0, "optional optimistic concurrency guard")
+	tasksRetryCmd.Flags().StringVar(&taskRetryNote, "note", "", "optional note for the queued follow-up message")
+	tasksRetryCmd.Flags().Int64Var(&taskRetryExpectedVersion, "expected-version", 0, "optional optimistic concurrency guard")
 
-	tasksCmd.AddCommand(tasksShowCmd)
-	tasksCmd.AddCommand(tasksActivityCmd)
+	tasksCmd.AddCommand(tasksShowCmd, tasksActivityCmd, tasksCancelCmd, tasksRemoveCmd, tasksRecoverCmd, tasksInterveneCmd, tasksRetryCmd)
 	rootCmd.AddCommand(tasksCmd)
 }

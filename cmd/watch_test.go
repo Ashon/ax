@@ -586,6 +586,46 @@ func TestFooterTokenSummaryShowsStandaloneTotalsWithoutFakeCost(t *testing.T) {
 	}
 }
 
+func TestTokenEntriesFromMapSortsCostTiesAndNoCostDeterministically(t *testing.T) {
+	want := "ax.beta,ax.gamma,ax.epsilon,ax.alpha,ax.delta"
+
+	for i := 0; i < 128; i++ {
+		entries := tokenEntriesFromMap(map[string]agentTokens{
+			"ax.alpha": {
+				Workspace: "ax.alpha",
+				Up:        "120",
+			},
+			"ax.beta": {
+				Workspace: "ax.beta",
+				Cost:      "$1.20",
+				Down:      "80",
+			},
+			"ax.gamma": {
+				Workspace: "ax.gamma",
+				Cost:      "$1.20",
+				Total:     "300",
+			},
+			"ax.delta": {
+				Workspace: "ax.delta",
+				Total:     "40",
+			},
+			"ax.epsilon": {
+				Workspace: "ax.epsilon",
+				Cost:      "$0.50",
+				Up:        "20",
+			},
+		})
+
+		gotNames := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			gotNames = append(gotNames, entry.Workspace)
+		}
+		if got := strings.Join(gotNames, ","); got != want {
+			t.Fatalf("iteration %d order = %q, want %q", i, got, want)
+		}
+	}
+}
+
 func TestRenderTasksShowsAttentionBadgesInList(t *testing.T) {
 	now := time.Now()
 	m := watchModel{
@@ -717,19 +757,25 @@ func TestRenderTokensCombinesLiveUsageAndHistoryTrend(t *testing.T) {
 				WindowEnd:     now,
 				BucketMinutes: 180,
 				Total:         usage.Tokens{Input: 2000, Output: 1000, CacheRead: 500},
+				MCPProxy:      usage.MCPProxyMetrics{Total: 480, PromptTokens: 180, ToolUseTokens: 300},
 				LatestTokens:  usage.Tokens{Input: 120, Output: 40},
+				LatestMCPProxy: usage.MCPProxyMetrics{
+					Total:         60,
+					PromptTokens:  20,
+					ToolUseTokens: 40,
+				},
 				Buckets: []usage.UsageBucket{
-					{Totals: usage.Tokens{Input: 10}},
-					{Totals: usage.Tokens{Input: 20}},
-					{Totals: usage.Tokens{Input: 30}},
-					{Totals: usage.Tokens{Input: 40}},
+					{Totals: usage.Tokens{Input: 10}, MCPProxy: usage.MCPProxyMetrics{Total: 10}},
+					{Totals: usage.Tokens{Input: 20}, MCPProxy: usage.MCPProxyMetrics{Total: 40}},
+					{Totals: usage.Tokens{Input: 30}, MCPProxy: usage.MCPProxyMetrics{Total: 120}},
+					{Totals: usage.Tokens{Input: 40}, MCPProxy: usage.MCPProxyMetrics{Total: 310}},
 				},
 			},
 		},
 	}
 
 	view := xansi.Strip(m.renderTokens(100, 12))
-	for _, want := range []string{"live usage", "history 24h", "ax.cli", "↑1.2k", "24H", "TREND"} {
+	for _, want := range []string{"live usage", "history 24h", "ax.cli", "↑1.2k", "24H", "TREND", "MCP~", "~480", "~60"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected %q in tokens view %q", want, view)
 		}
@@ -761,6 +807,45 @@ func TestRenderTokensKeepsLiveUsageVisibleWhenHistoryUnavailable(t *testing.T) {
 
 	view := xansi.Strip(m.renderTokens(100, 10))
 	for _, want := range []string{"live usage", "↑512", "history 24h", "unavailable"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected %q in tokens view %q", want, view)
+		}
+	}
+}
+
+func TestRenderTokensReusesUnusedLiveHeightForHistoryRows(t *testing.T) {
+	sessions := make([]tmux.SessionInfo, 0, 8)
+	trends := make(map[string]usage.WorkspaceTrend, 8)
+	for i := 0; i < 7; i++ {
+		workspace := "ax.workspace." + string(rune('a'+i))
+		sessions = append(sessions, tmux.SessionInfo{Name: "ax-" + workspace, Workspace: workspace})
+		trends[workspace] = usage.WorkspaceTrend{
+			Workspace: workspace,
+			Available: true,
+			Total:     usage.Tokens{Input: int64((7 - i) * 1000)},
+			Buckets: []usage.UsageBucket{
+				{Totals: usage.Tokens{Input: int64((7 - i) * 100)}},
+			},
+		}
+	}
+	sessions = append(sessions, tmux.SessionInfo{Name: "ax-ax.workspace.unavailable", Workspace: "ax.workspace.unavailable"})
+	trends["ax.workspace.unavailable"] = usage.WorkspaceTrend{
+		Workspace: "ax.workspace.unavailable",
+		Error:     "no transcript",
+	}
+
+	m := watchModel{
+		sessions:  sessions,
+		tokenData: map[string]agentTokens{},
+		trendData: trends,
+	}
+
+	view := xansi.Strip(m.renderTokens(100, 14))
+	for _, want := range []string{
+		"ax.workspace.a",
+		"ax.workspace.g",
+		"1 workspace(s) unavailable",
+	} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected %q in tokens view %q", want, view)
 		}

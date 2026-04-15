@@ -82,7 +82,8 @@ func refreshWatchTokenTrends(current map[string]usage.WorkspaceTrend, last time.
 }
 
 // tokenEntriesFromMap keeps only rows with parsed token data and sorts the
-// detailed tokens pane by descending cost so the most expensive agents surface first.
+// detailed tokens pane by descending cost, then by workspace name for a
+// deterministic order when multiple rows share the same cost.
 func tokenEntriesFromMap(tokenData map[string]agentTokens) []agentTokens {
 	entries := make([]agentTokens, 0, len(tokenData))
 	for _, t := range tokenData {
@@ -91,7 +92,12 @@ func tokenEntriesFromMap(tokenData map[string]agentTokens) []agentTokens {
 		}
 	}
 	sort.Slice(entries, func(i, j int) bool {
-		return parseCostValue(entries[i].Cost) > parseCostValue(entries[j].Cost)
+		costI := parseCostValue(entries[i].Cost)
+		costJ := parseCostValue(entries[j].Cost)
+		if costI == costJ {
+			return entries[i].Workspace < entries[j].Workspace
+		}
+		return costI > costJ
 	})
 	return entries
 }
@@ -348,13 +354,31 @@ func formatTokenCount(v float64) string {
 	return fmt.Sprintf("%.0f", v)
 }
 
-func liveTokenLines(innerW int, entries []agentTokens, summary tokenTotals) []string {
-	lines := []string{tokenDimClr.Render(" live usage ")}
+func formatMCPProxyMetric(total int64) string {
+	if total <= 0 {
+		return "-"
+	}
+	return "~" + formatTokenCount(float64(total))
+}
+
+func formatPercent(numerator, denominator int64) string {
+	if numerator <= 0 || denominator <= 0 {
+		return "-"
+	}
+	percent := (float64(numerator) / float64(denominator)) * 100
+	if percent >= 10 {
+		return fmt.Sprintf("%.0f%%", percent)
+	}
+	return fmt.Sprintf("%.1f%%", percent)
+}
+
+func liveTokenLines(innerW int, entries []agentTokens, summary tokenTotals, trendData map[string]usage.WorkspaceTrend) []string {
+	lines := []string{tokenDimClr.Render(" live usage (MCP~ latest) ")}
 	if len(entries) == 0 {
 		return append(lines, tokenDimClr.Render("  (no token data)"))
 	}
 
-	header := fmt.Sprintf(" %-24s %10s %10s %10s", "WORKSPACE", "INPUT", "OUTPUT", "COST")
+	header := fmt.Sprintf(" %-20s %9s %9s %9s %9s", "WORKSPACE", "INPUT", "OUTPUT", "COST", "MCP~")
 	lines = append(lines, tokenDimClr.Render(header))
 
 	maxCost := 0.0
@@ -369,6 +393,10 @@ func liveTokenLines(innerW int, entries []agentTokens, summary tokenTotals) []st
 		down := parseTokenValue(e.Down)
 		total := parseTokenValue(e.Total)
 		cost := parseCostValue(e.Cost)
+		latestMCP := int64(0)
+		if trend, ok := trendData[e.Workspace]; ok {
+			latestMCP = trend.LatestMCPProxy.Total
+		}
 
 		sty := tokenNormalClr
 		if maxCost > 0 && cost >= maxCost*0.8 {
@@ -389,12 +417,13 @@ func liveTokenLines(innerW int, entries []agentTokens, summary tokenTotals) []st
 		if costStr == "" {
 			costStr = "-"
 		}
+		mcpStr := formatMCPProxyMetric(latestMCP)
 
 		ws := e.Workspace
-		if len(ws) > 24 {
-			ws = ws[:23] + "…"
+		if len(ws) > 20 {
+			ws = ws[:19] + "…"
 		}
-		line := fmt.Sprintf(" %-24s %10s %10s %10s", ws, upStr, downStr, costStr)
+		line := fmt.Sprintf(" %-20s %9s %9s %9s %9s", ws, upStr, downStr, costStr, mcpStr)
 		lines = append(lines, sty.Render(line))
 	}
 
@@ -409,8 +438,12 @@ func liveTokenLines(innerW int, entries []agentTokens, summary tokenTotals) []st
 	if summary.TotalUp > 0 {
 		totalIn = "↑" + formatTokenCount(summary.TotalUp)
 	}
-	totalLine := fmt.Sprintf(" %-24s %10s %10s %10s",
-		fmt.Sprintf("TOTAL (%d agents)", summary.ReportingAgents),
+	var totalMCP int64
+	for _, trend := range trendData {
+		totalMCP += trend.LatestMCPProxy.Total
+	}
+	totalLine := fmt.Sprintf(" %-20s %9s %9s %9s %9s",
+		fmt.Sprintf("TOTAL (%d)", summary.ReportingAgents),
 		totalIn,
 		totalOut,
 		func() string {
@@ -418,13 +451,14 @@ func liveTokenLines(innerW int, entries []agentTokens, summary tokenTotals) []st
 				return "-"
 			}
 			return fmt.Sprintf("$%.2f", summary.TotalCost)
-		}())
+		}(),
+		formatMCPProxyMetric(totalMCP))
 	lines = append(lines, tokenSumClr.Render(totalLine))
 	return lines
 }
 
 func trendTokenLines(innerW int, sessions []tmux.SessionInfo, trendData map[string]usage.WorkspaceTrend) []string {
-	lines := []string{tokenDimClr.Render(" history 24h ")}
+	lines := []string{tokenDimClr.Render(" history 24h (MCP~ proxy) ")}
 	seen := make(map[string]struct{}, len(sessions))
 	workspaceOrder := make([]string, 0, len(sessions))
 	for _, session := range sessions {
@@ -439,6 +473,7 @@ func trendTokenLines(innerW int, sessions []tmux.SessionInfo, trendData map[stri
 		workspace string
 		last      int64
 		total     int64
+		mcp       int64
 		spark     string
 	}
 	rows := make([]trendRow, 0, len(workspaceOrder))
@@ -457,6 +492,7 @@ func trendTokenLines(innerW int, sessions []tmux.SessionInfo, trendData map[stri
 			workspace: workspace,
 			last:      trend.LatestTokens.Total(),
 			total:     trend.Total.Total(),
+			mcp:       trend.MCPProxy.Total,
 			spark:     renderTokenSparkline(bucketTotals),
 		})
 	}
@@ -475,17 +511,19 @@ func trendTokenLines(innerW int, sessions []tmux.SessionInfo, trendData map[stri
 		return append(lines, tokenDimClr.Render("  (no history data yet)"))
 	}
 
-	header := fmt.Sprintf(" %-18s %10s %10s %-8s", "WORKSPACE", "LAST", "24H", "TREND")
+	header := fmt.Sprintf(" %-15s %8s %8s %8s %6s %-8s", "WORKSPACE", "LAST", "24H", "MCP~", "SHARE", "TREND")
 	lines = append(lines, tokenDimClr.Render(header))
 	for _, row := range rows {
 		ws := row.workspace
-		if len(ws) > 18 {
-			ws = ws[:17] + "…"
+		if len(ws) > 15 {
+			ws = ws[:14] + "…"
 		}
-		line := fmt.Sprintf(" %-18s %10s %10s %-8s",
+		line := fmt.Sprintf(" %-15s %8s %8s %8s %6s %-8s",
 			ws,
 			formatTokenCount(float64(row.last)),
 			formatTokenCount(float64(row.total)),
+			formatMCPProxyMetric(row.mcp),
+			formatPercent(row.mcp, row.total),
 			row.spark,
 		)
 		lines = append(lines, tokenNormalClr.Render(line))
@@ -548,6 +586,43 @@ func splitTokenSectionBudget(innerH int, wantTrend bool) (int, int) {
 	return liveH, trendH
 }
 
+func composeTokenLines(innerH int, liveLines, trendLines []string) []string {
+	if innerH <= 0 {
+		return nil
+	}
+	if len(trendLines) == 0 {
+		return append([]string(nil), liveLines[:min(len(liveLines), innerH)]...)
+	}
+
+	total := len(liveLines) + len(trendLines)
+	if total <= innerH {
+		lines := make([]string, 0, total)
+		lines = append(lines, liveLines...)
+		lines = append(lines, trendLines...)
+		return lines
+	}
+
+	liveBudget, trendBudget := splitTokenSectionBudget(innerH, true)
+	liveTake := min(len(liveLines), liveBudget)
+	trendTake := min(len(trendLines), trendBudget)
+	remaining := innerH - liveTake - trendTake
+
+	if remaining > 0 {
+		extraLive := min(remaining, len(liveLines)-liveTake)
+		liveTake += extraLive
+		remaining -= extraLive
+	}
+	if remaining > 0 {
+		extraTrend := min(remaining, len(trendLines)-trendTake)
+		trendTake += extraTrend
+	}
+
+	lines := make([]string, 0, liveTake+trendTake)
+	lines = append(lines, liveLines[:liveTake]...)
+	lines = append(lines, trendLines[:trendTake]...)
+	return lines
+}
+
 // renderTokens renders the optional detailed usage pane. Rows that only have a
 // Claude done-line total use the output column to show Σ total tokens.
 func (m watchModel) renderTokens(totalW, totalH int) string {
@@ -567,15 +642,9 @@ func (m watchModel) renderTokens(totalW, totalH int) string {
 
 	entries := tokenEntriesFromMap(m.tokenData)
 	summary := summarizeTokenEntries(entries, len(m.sessions))
-	liveLines := liveTokenLines(innerW, entries, summary)
+	liveLines := liveTokenLines(innerW, entries, summary, m.trendData)
 	trendLines := trendTokenLines(innerW, m.sessions, m.trendData)
-	liveBudget, trendBudget := splitTokenSectionBudget(innerH, len(trendLines) > 0)
-
-	var tokenLines []string
-	tokenLines = append(tokenLines, liveLines[:min(len(liveLines), liveBudget)]...)
-	if trendBudget > 0 {
-		tokenLines = append(tokenLines, trendLines[:min(len(trendLines), trendBudget)]...)
-	}
+	tokenLines := composeTokenLines(innerH, liveLines, trendLines)
 
 	var bodyLines []string
 	for i := 0; i < innerH; i++ {
@@ -683,10 +752,12 @@ func taskSortOrder(s types.TaskStatus) int {
 		return 1
 	case types.TaskFailed:
 		return 2
-	case types.TaskCompleted:
+	case types.TaskCancelled:
 		return 3
-	default:
+	case types.TaskCompleted:
 		return 4
+	default:
+		return 5
 	}
 }
 
@@ -699,6 +770,8 @@ func taskStatusStyle(s types.TaskStatus) lipgloss.Style {
 	case types.TaskCompleted:
 		return taskDoneClr
 	case types.TaskFailed:
+		return taskFailClr
+	case types.TaskCancelled:
 		return taskFailClr
 	default:
 		return taskPendingClr
@@ -860,6 +933,7 @@ func renderTaskDetailLines(task types.Task, history []daemon.HistoryEntry, width
 	lines = append(lines,
 		headerStyle.Render(truncateStr(task.Title, width)),
 		fmt.Sprintf("status: %s", taskStatusLabel(task)),
+		fmt.Sprintf("version: %d", task.Version),
 		fmt.Sprintf("assignee: %s", task.Assignee),
 		fmt.Sprintf("created_by: %s", task.CreatedBy),
 		fmt.Sprintf("priority: %s", taskPriorityLabel(task.Priority)),
@@ -867,6 +941,12 @@ func renderTaskDetailLines(task types.Task, history []daemon.HistoryEntry, width
 		fmt.Sprintf("start_mode: %s", task.StartMode),
 		fmt.Sprintf("stale: %s", stale),
 	)
+	if task.RemovedAt != nil {
+		lines = append(lines, fmt.Sprintf("removed: %s", task.RemovedAt.Format("2006-01-02 15:04:05")))
+		if task.RemovedBy != "" {
+			lines = append(lines, "removed_by: "+truncateStr(task.RemovedBy, width-12))
+		}
+	}
 	if task.StaleAfterSeconds > 0 {
 		lines = append(lines, fmt.Sprintf("stale_after: %ds", task.StaleAfterSeconds))
 	}
@@ -884,6 +964,9 @@ func renderTaskDetailLines(task types.Task, history []daemon.HistoryEntry, width
 		}
 		if task.StaleInfo.PendingMessages > 0 {
 			lines = append(lines, fmt.Sprintf("  pending_messages: %d", task.StaleInfo.PendingMessages))
+		}
+		if task.StaleInfo.WakePending {
+			lines = append(lines, fmt.Sprintf("  wake_attempts: %d", task.StaleInfo.WakeAttempts))
 		}
 		if task.StaleInfo.StateDivergence {
 			lines = append(lines, "  divergence: "+truncateStr(task.StaleInfo.StateDivergenceNote, max(0, width-14)))

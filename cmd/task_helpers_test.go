@@ -83,6 +83,7 @@ func TestFormatTaskSummaryIncludesAttentionHints(t *testing.T) {
 		Total:          4,
 		Pending:        1,
 		InProgress:     2,
+		Cancelled:      1,
 		Stale:          1,
 		Diverged:       1,
 		QueuedMessages: 3,
@@ -97,6 +98,7 @@ func TestFormatTaskSummaryIncludesAttentionHints(t *testing.T) {
 		"total=4",
 		"pending=1",
 		"in_progress=2",
+		"cancelled=1",
 		"stale=1",
 		"diverged=1",
 		"queued_msgs=3",
@@ -105,6 +107,58 @@ func TestFormatTaskSummaryIncludesAttentionHints(t *testing.T) {
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("expected %q in summary %q", want, text)
+		}
+	}
+}
+
+func TestTaskRecoveryPreviewLinesForActiveTask(t *testing.T) {
+	task := types.Task{
+		ID:        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+		Title:     "Recover worker",
+		Status:    types.TaskInProgress,
+		Version:   7,
+		Assignee:  "ax.worker",
+		CreatedBy: "ax.orchestrator",
+		UpdatedAt: time.Now().Add(-5 * time.Minute),
+		StaleInfo: &types.TaskStaleInfo{
+			Reason:            "no task progress update",
+			RecommendedAction: "inspect the assignee workspace",
+			PendingMessages:   2,
+		},
+	}
+
+	text := strings.Join(taskRecoveryPreviewLines(task), "\n")
+	for _, want := range []string{
+		"recover is preview-only",
+		"ax tasks intervene aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa --action wake --expected-version 7",
+		"ax tasks retry aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa --expected-version 7",
+		"same task ID",
+		"ax tasks cancel aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa --expected-version 7",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected %q in recovery preview %q", want, text)
+		}
+	}
+}
+
+func TestTaskRecoveryPreviewLinesForTerminalTask(t *testing.T) {
+	task := types.Task{
+		ID:        "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+		Title:     "Finished task",
+		Status:    types.TaskCancelled,
+		Version:   3,
+		Assignee:  "ax.worker",
+		CreatedBy: "ax.orchestrator",
+		UpdatedAt: time.Now(),
+	}
+
+	text := strings.Join(taskRecoveryPreviewLines(task), "\n")
+	for _, want := range []string{
+		"task is terminal; intervene/retry is unavailable",
+		"ax tasks remove bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb --expected-version 3",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected %q in recovery preview %q", want, text)
 		}
 	}
 }

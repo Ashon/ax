@@ -32,6 +32,7 @@ type taskSummary struct {
 	InProgress      int
 	Completed       int
 	Failed          int
+	Cancelled       int
 	Stale           int
 	Diverged        int
 	QueuedMessages  int
@@ -89,7 +90,7 @@ func filterTasks(tasks []types.Task, filter taskFilterMode) []types.Task {
 				continue
 			}
 		case taskFilterDone:
-			if task.Status != types.TaskCompleted && task.Status != types.TaskFailed {
+			if task.Status != types.TaskCompleted && task.Status != types.TaskFailed && task.Status != types.TaskCancelled {
 				continue
 			}
 		case taskFilterAll:
@@ -235,7 +236,7 @@ func formatAge(d time.Duration) string {
 
 func taskStatusLabel(task types.Task) string {
 	label := string(task.Status)
-	if taskIsStale(task) && task.Status != types.TaskCompleted && task.Status != types.TaskFailed {
+	if taskIsStale(task) && task.Status != types.TaskCompleted && task.Status != types.TaskFailed && task.Status != types.TaskCancelled {
 		label += " stale"
 	}
 	return label
@@ -290,7 +291,8 @@ func relatedTaskMessages(task types.Task, history []daemon.HistoryEntry, limit i
 	var related []daemon.HistoryEntry
 	for i := len(history) - 1; i >= 0; i-- {
 		entry := history[i]
-		if strings.Contains(entry.Content, task.ID) ||
+		if entry.TaskID == task.ID ||
+			strings.Contains(entry.Content, task.ID) ||
 			entry.From == task.Assignee ||
 			entry.To == task.Assignee ||
 			entry.From == task.CreatedBy ||
@@ -334,12 +336,33 @@ func buildTaskActivity(task types.Task, history []daemon.HistoryEntry, limit int
 			Summary:   "failed task",
 			Detail:    task.Result,
 		})
+	} else if task.Status == types.TaskCancelled && task.Result != "" {
+		entries = append(entries, taskActivityEntry{
+			Timestamp: task.UpdatedAt,
+			Kind:      taskActivityLifecycle,
+			Actor:     task.Assignee,
+			Summary:   "cancelled task",
+			Detail:    task.Result,
+		})
 	} else if task.Status == types.TaskInProgress {
 		entries = append(entries, taskActivityEntry{
 			Timestamp: task.UpdatedAt,
 			Kind:      taskActivityLifecycle,
 			Actor:     task.Assignee,
 			Summary:   "task in progress",
+		})
+	}
+	if task.RemovedAt != nil {
+		removedBy := task.RemovedBy
+		if removedBy == "" {
+			removedBy = task.CreatedBy
+		}
+		entries = append(entries, taskActivityEntry{
+			Timestamp: *task.RemovedAt,
+			Kind:      taskActivityLifecycle,
+			Actor:     removedBy,
+			Summary:   "removed task",
+			Detail:    task.RemoveReason,
 		})
 	}
 
@@ -398,6 +421,8 @@ func summarizeTasks(tasks []types.Task) taskSummary {
 			summary.Completed++
 		case types.TaskFailed:
 			summary.Failed++
+		case types.TaskCancelled:
+			summary.Cancelled++
 		}
 
 		if task.Priority == types.TaskPriorityUrgent || task.Priority == types.TaskPriorityHigh {
@@ -462,6 +487,9 @@ func formatTaskSummary(summary taskSummary) string {
 		fmt.Sprintf("diverged=%d", summary.Diverged),
 		fmt.Sprintf("queued_msgs=%d", summary.QueuedMessages),
 	}
+	if summary.Cancelled > 0 {
+		parts = append(parts, fmt.Sprintf("cancelled=%d", summary.Cancelled))
+	}
 	if summary.UrgentOrHigh > 0 {
 		parts = append(parts, fmt.Sprintf("high_pri=%d", summary.UrgentOrHigh))
 	}
@@ -469,4 +497,75 @@ func formatTaskSummary(summary taskSummary) string {
 		parts = append(parts, "attention="+strings.Join(summary.TopAttentionIDs, ","))
 	}
 	return strings.Join(parts, "  ")
+}
+
+func taskExpectedVersionArg(task types.Task) string {
+	if task.Version <= 0 {
+		return ""
+	}
+	return fmt.Sprintf(" --expected-version %d", task.Version)
+}
+
+func taskRecoveryPreviewLines(task types.Task) []string {
+	lines := []string{
+		fmt.Sprintf("Task: %s", task.Title),
+		fmt.Sprintf("ID: %s", task.ID),
+		fmt.Sprintf("Status: %s", taskStatusLabel(task)),
+		fmt.Sprintf("Version: %d", task.Version),
+		fmt.Sprintf("Assignee: %s", task.Assignee),
+		fmt.Sprintf("Created By: %s", task.CreatedBy),
+		fmt.Sprintf("Updated: %s ago", formatTaskAge(task)),
+	}
+	if task.RemovedAt != nil {
+		lines = append(lines, fmt.Sprintf("Removed: %s by %s", task.RemovedAt.Format("2006-01-02 15:04:05"), truncateStr(task.RemovedBy, 24)))
+		if task.RemoveReason != "" {
+			lines = append(lines, "Remove Reason: "+task.RemoveReason)
+		}
+		lines = append(lines, "", "Semantics:", "- recover is preview-only and this task is already archived/removed from list results")
+		return lines
+	}
+	if task.StaleInfo != nil {
+		lines = append(lines, "", "Signals:")
+		if task.StaleInfo.Reason != "" {
+			lines = append(lines, "- reason: "+task.StaleInfo.Reason)
+		}
+		if task.StaleInfo.RecommendedAction != "" {
+			lines = append(lines, "- daemon hint: "+task.StaleInfo.RecommendedAction)
+		}
+		if task.StaleInfo.PendingMessages > 0 {
+			lines = append(lines, fmt.Sprintf("- pending_messages: %d", task.StaleInfo.PendingMessages))
+		}
+		if task.StaleInfo.WakePending {
+			wake := fmt.Sprintf("- wake_retry: attempt %d pending", task.StaleInfo.WakeAttempts)
+			if task.StaleInfo.NextWakeRetryAt != nil {
+				wake += " until " + task.StaleInfo.NextWakeRetryAt.Format("2006-01-02 15:04:05")
+			}
+			lines = append(lines, wake)
+		}
+		if task.StaleInfo.StateDivergence {
+			lines = append(lines, "- divergence: "+task.StaleInfo.StateDivergenceNote)
+		}
+	}
+
+	lines = append(lines, "", "Semantics:", "- recover is preview-only; use intervene/retry/cancel/remove to mutate the task")
+	versionArg := taskExpectedVersionArg(task)
+	if task.Status == types.TaskPending || task.Status == types.TaskInProgress {
+		lines = append(lines,
+			"",
+			"Next steps:",
+			fmt.Sprintf("- ax tasks intervene %s --action wake%s", task.ID, versionArg),
+			fmt.Sprintf("- ax tasks intervene %s --action interrupt%s", task.ID, versionArg),
+			fmt.Sprintf("- ax tasks retry %s%s", task.ID, versionArg),
+			"  retry queues a standardized follow-up message on the same task ID",
+			fmt.Sprintf("- ax tasks cancel %s%s", task.ID, versionArg),
+		)
+		return lines
+	}
+
+	lines = append(lines, "", "Next steps:")
+	lines = append(lines, "- task is terminal; intervene/retry is unavailable")
+	if task.Status == types.TaskCompleted || task.Status == types.TaskFailed || task.Status == types.TaskCancelled {
+		lines = append(lines, fmt.Sprintf("- ax tasks remove %s%s", task.ID, versionArg))
+	}
+	return lines
 }

@@ -15,8 +15,9 @@ import (
 )
 
 var watchCmd = &cobra.Command{
-	Use:   "watch",
-	Short: "Monitor workspace sessions with interactive TUI",
+	Use:     "top",
+	Aliases: []string{"watch"},
+	Short:   "Monitor workspace sessions with top-style TUI",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		initialStream, streamOnly, err := resolveWatchInitialView(watchShowAgents, watchShowTasks, watchShowMessages, watchShowTokens)
 		if err != nil {
@@ -171,7 +172,7 @@ func resolveWatchInitialView(agents, tasks, messages, tokens bool) (streamView, 
 	}
 
 	if selectionCount > 1 {
-		return streamMessages, false, fmt.Errorf("watch view flags are mutually exclusive; use only one of --agents, --tasks, --messages, or --tokens")
+		return streamMessages, false, fmt.Errorf("top view flags are mutually exclusive; use only one of --agents, --tasks, --messages, or --tokens")
 	}
 	return selected, streamOnly, nil
 }
@@ -414,9 +415,9 @@ func capturePane(sessionName string) string {
 }
 
 func init() {
-	watchCmd.Flags().BoolVar(&watchShowAgents, "agents", false, "open the agents-only watch view (stream pane hidden)")
-	watchCmd.Flags().BoolVar(&watchShowTasks, "tasks", false, "open the tasks watch view")
-	watchCmd.Flags().BoolVar(&watchShowMessages, "messages", false, "open the messages watch view")
-	watchCmd.Flags().BoolVar(&watchShowTokens, "tokens", false, "open the tokens watch view")
+	watchCmd.Flags().BoolVar(&watchShowAgents, "agents", false, "open the agents-only top view (stream pane hidden)")
+	watchCmd.Flags().BoolVar(&watchShowTasks, "tasks", false, "open the tasks top view")
+	watchCmd.Flags().BoolVar(&watchShowMessages, "messages", false, "open the messages top view")
+	watchCmd.Flags().BoolVar(&watchShowTokens, "tokens", false, "open the tokens top view")
 	rootCmd.AddCommand(watchCmd)
 }
