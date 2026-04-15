@@ -422,6 +422,9 @@ type Child struct {
 | `update_task` | Client → Daemon | task 상태/결과/로그 갱신 |
 | `get_task` | Client → Daemon | 단일 task 조회 |
 | `list_tasks` | Client → Daemon | task 목록 조회 |
+| `cancel_task` | Client → Daemon | active task 취소 |
+| `remove_task` | Client → Daemon | terminal task 보관/숨김 |
+| `intervene_task` | Client → Daemon | stuck task 복구 액션 적용 |
 | `push_message` | Daemon → Client | 새 메시지 푸시 알림 |
 | `response` | Daemon → Client | 요청 성공 응답 |
 | `error` | Daemon → Client | 요청 실패 응답 |
@@ -429,8 +432,10 @@ type Child struct {
 ### Task 관련 동작
 
 - `create_task`는 `title`, `description`, `assignee`, `start_mode`, `priority`, `stale_after_seconds`를 받아 `pending` 상태 task를 만들고 `tasks.json`에 persist한다.
+- MCP `start_task`는 위 `create_task`를 호출한 뒤 새 `Task ID:`를 dispatch 메시지에 자동 주입하고, 메시지를 enqueue한 다음 대상 워크스페이스를 wake 한다. `start_mode="fresh"`이면 wake 전에 세션 재시작까지 포함한다.
 - `update_task`는 assignee 또는 creator가 로그를 남길 수 있고, 상태 변경과 `result` 설정은 assignee가 담당한다. 상태 전이는 `pending → in_progress → completed|failed` 단방향이다.
 - `get_task`와 `list_tasks` 응답은 단순 저장본이 아니라 daemon이 계산한 `stale_info`를 포함한다. 여기에는 pending message 수, 마지막 관련 메시지 시각, wake 재시도 상태, task/message divergence 정보가 들어간다.
+- `cancel_task`, `remove_task`, `intervene_task`는 각각 취소, 아카이브, bounded recovery(`wake`/`interrupt`/`retry`)를 daemon control path로 수행한다.
 
 ### 연결 생명주기
 
@@ -458,7 +463,7 @@ type Child struct {
 
 ## MCP 도구
 
-에이전트가 사용할 수 있는 MCP 도구 목록이다. `internal/mcpserver/tools.go`에서 등록되며 현재 17개이다.
+에이전트가 사용할 수 있는 MCP 도구 목록이다. `internal/mcpserver/tools.go`에서 등록되며 현재 25개이다.
 
 ### 통신 도구
 
@@ -494,10 +499,14 @@ type Child struct {
 
 | 도구 | 파라미터 | 설명 |
 |------|----------|------|
-| `create_task` | `title` (필수), `description`, `assignee` (필수), `start_mode`, `priority`, `stale_after_seconds` | 새 task 생성 |
+| `create_task` | `title` (필수), `description`, `assignee` (필수), `start_mode`, `priority`, `stale_after_seconds` | 새 task 생성만 수행. 즉시 실행은 `start_task`를 우선 사용 |
+| `start_task` | `title` (필수), `message` (필수), `description`, `assignee` (필수), `start_mode`, `priority`, `stale_after_seconds` | task 생성 + `Task ID:` 자동 주입 dispatch + wake |
 | `update_task` | `id` (필수), `status`, `result`, `log` | task 상태/결과 갱신 또는 progress log 추가 |
 | `get_task` | `id` (필수) | 단일 task 상세 조회 |
 | `list_tasks` | `assignee`, `created_by`, `status` | 조건별 task 목록 조회 |
+| `cancel_task` | `id` (필수), `reason`, `expected_version` | active task 취소 |
+| `remove_task` | `id` (필수), `reason`, `expected_version` | terminal task 보관/숨김 |
+| `intervene_task` | `id` (필수), `action` (필수), `note`, `expected_version` | stuck task에 `wake`/`interrupt`/`retry` 적용 |
 
 ### 공유 저장소 도구
 

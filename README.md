@@ -290,9 +290,10 @@ ax daemon status                 # 상태 확인
 - 메시징: `send_message`, `read_messages`, `broadcast_message`, `request`
 - 상태/공유값: `set_status`, `set_shared_value`, `get_shared_value`, `list_shared_values`
 - tmux 제어: `interrupt_agent`, `send_keys`
-- 작업 관리: `create_task`, `update_task`, `get_task`, `list_tasks`
+- 작업 관리: `create_task`, `start_task`, `update_task`, `get_task`, `list_tasks`, `cancel_task`, `remove_task`, `intervene_task`
 
 메시지 전송 시 대상 에이전트가 자동으로 wake 됩니다 (tmux 키 입력 주입).
+즉시 실행이 필요한 위임은 `create_task` 후 별도 `send_message`를 조합하기보다 `start_task`를 우선 사용합니다.
 
 ## 개발
 
