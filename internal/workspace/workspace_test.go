@@ -112,6 +112,7 @@ func restoreWorkspaceSessionStubs(t *testing.T) {
 	oldCreateSessionWithArgsEnv := workspaceCreateSessionWithArgsEnv
 	oldCreateSessionWithArgs := workspaceCreateSessionWithArgs
 	oldDestroySession := workspaceDestroySession
+	oldWakeSession := workspaceWakeSession
 
 	t.Cleanup(func() {
 		workspaceSessionExists = oldSessionExists
@@ -120,5 +121,6 @@ func restoreWorkspaceSessionStubs(t *testing.T) {
 		workspaceCreateSessionWithArgsEnv = oldCreateSessionWithArgsEnv
 		workspaceCreateSessionWithArgs = oldCreateSessionWithArgs
 		workspaceDestroySession = oldDestroySession
+		workspaceWakeSession = oldWakeSession
 	})
 }
