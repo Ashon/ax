@@ -43,7 +43,7 @@ func registerMessageTools(srv *server.MCPServer, client *DaemonClient, configPat
 			mcp.WithString("message", mcp.Required(), mcp.Description("Task or question to send")),
 			mcp.WithNumber("timeout", mcp.Description("Max seconds to wait for reply (default: 120)")),
 		),
-		requestHandler(client),
+		requestHandler(client, configPath),
 	)
 
 	srv.AddTool(

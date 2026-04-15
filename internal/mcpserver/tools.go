@@ -25,7 +25,7 @@ func registerTools(srv *server.MCPServer, client *DaemonClient, configPath strin
 	registerWorkspaceTools(srv, client)
 	registerSharedTools(srv, client)
 	registerUsageTools(srv, client, configPath)
-	registerTaskTools(srv, client)
+	registerTaskTools(srv, client, configPath)
 
 	srv.AddTool(teamStateToolDefinition(), getTeamStateHandler(client, configPath))
 	srv.AddTool(teamDryRunToolDefinition(), dryRunTeamReconfigureHandler(client, configPath))
@@ -368,12 +368,26 @@ func waitForWorkspaceReply(ctx context.Context, client *DaemonClient, from strin
 
 var taskIDPattern = regexp.MustCompile(`(?i)task id:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`)
 
+var wakeWorkspaceAgent = wakeAgent
+var prepareFreshWorkspaceForTask = prepareFreshWorkspace
+
+type taskDispatchResult struct {
+	MessageID    string `json:"message_id"`
+	Status       string `json:"status"`
+	FreshContext bool   `json:"fresh_context"`
+}
+
+type startTaskResult struct {
+	Task     types.Task         `json:"task"`
+	Dispatch taskDispatchResult `json:"dispatch"`
+}
+
 func sendMessageHandler(client *DaemonClient, configPath string) server.ToolHandlerFunc {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		to, _ := request.RequireString("to")
 		message, _ := request.RequireString("message")
 
-		sendResult, err := client.SendMessage(to, message)
+		sendResult, _, err := sendWorkspaceMessage(client, configPath, to, message)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Failed to send message: %v", err)), nil
 		}
@@ -381,20 +395,30 @@ func sendMessageHandler(client *DaemonClient, configPath string) server.ToolHand
 			return mcp.NewToolResultText(fmt.Sprintf("Message to %q suppressed as a duplicate no-op/status update.", to)), nil
 		}
 
-		freshStart, err := prepareFreshTaskStart(client, configPath, to, message)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Failed to prepare fresh-context start: %v", err)), nil
-		}
-
-		// Wake the target agent via tmux
-		wakeAgent(to, client.workspace, freshStart)
-
 		return mcp.NewToolResultText(fmt.Sprintf("Message sent to %q (id: %s)", to, sendResult.MessageID)), nil
 	}
 }
 
 func wakeAgent(target, sender string, fresh bool) {
 	_ = tmux.WakeWorkspace(target, daemon.WakePrompt(sender, fresh))
+}
+
+func sendWorkspaceMessage(client *DaemonClient, configPath, target, message string) (*SendMessageResult, bool, error) {
+	sendResult, err := client.SendMessage(target, message)
+	if err != nil {
+		return nil, false, err
+	}
+	if sendResult.Suppressed {
+		return sendResult, false, nil
+	}
+
+	freshStart, err := prepareFreshTaskStart(client, configPath, target, message)
+	if err != nil {
+		return nil, false, err
+	}
+
+	wakeWorkspaceAgent(target, client.workspace, freshStart)
+	return sendResult, freshStart, nil
 }
 
 func prepareFreshTaskStart(client *DaemonClient, configPath, target, message string) (bool, error) {
@@ -411,26 +435,27 @@ func prepareFreshTaskStart(client *DaemonClient, configPath, target, message str
 		return false, nil
 	}
 
-	cfgPath, cfg, err := loadToolConfig(client, configPath)
-	if err != nil {
-		return false, err
-	}
-	ws, ok := cfg.Workspaces[target]
-	if !ok {
-		return false, fmt.Errorf("workspace %q not found in %s", target, cfgPath)
-	}
-
-	if tmux.SessionExists(target) {
-		if err := tmux.DestroySession(target); err != nil {
-			return false, err
-		}
-	}
-
-	manager := workspace.NewManager(daemon.ExpandSocketPath(client.socketPath), cfgPath)
-	if err := manager.Create(target, ws); err != nil {
+	if err := prepareFreshWorkspaceForTask(client, configPath, target); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+func prepareFreshWorkspace(client *DaemonClient, configPath, target string) error {
+	cfgPath, cfg, err := loadToolConfig(client, configPath)
+	if err != nil {
+		return err
+	}
+	ws, ok := cfg.Workspaces[target]
+	if !ok {
+		return fmt.Errorf("workspace %q not found in %s", target, cfgPath)
+	}
+
+	manager := workspace.NewManager(daemon.ExpandSocketPath(client.socketPath), cfgPath)
+	if err := manager.Restart(target, ws); err != nil {
+		return err
+	}
+	return nil
 }
 
 func extractTaskID(message string) (string, bool) {
@@ -576,7 +601,7 @@ func listSharedValuesHandler(client *DaemonClient) server.ToolHandlerFunc {
 	}
 }
 
-func requestHandler(client *DaemonClient) server.ToolHandlerFunc {
+func requestHandler(client *DaemonClient, configPath string) server.ToolHandlerFunc {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		to, _ := request.RequireString("to")
 		message, _ := request.RequireString("message")
@@ -586,16 +611,13 @@ func requestHandler(client *DaemonClient) server.ToolHandlerFunc {
 		fullMessage := message + "\n\n[ax/request] 이 메시지는 동기 요청입니다. `" + client.workspace + "`가 당신의 응답을 기다리고 있습니다. 작업이 끝나면 즉시 `send_message(to=\"" + client.workspace + "\")`로 결과를 회신하세요. 하위 워크스페이스에 위임할 때는 `request`가 아닌 `send_message`를 병렬로 사용한 뒤 `read_messages`로 수집하세요."
 
 		// Send message via daemon
-		sendResult, err := client.SendMessage(to, fullMessage)
+		sendResult, _, err := sendWorkspaceMessage(client, configPath, to, fullMessage)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Failed to send: %v", err)), nil
 		}
 		if sendResult.Suppressed {
 			return mcp.NewToolResultError(fmt.Sprintf("Request to %q was suppressed as a duplicate no-op/status update", to)), nil
 		}
-
-		// Wake the target agent via tmux
-		wakeAgent(to, client.workspace, false)
 
 		// Poll for reply
 		deadline := time.Now().Add(time.Duration(timeout) * time.Second)
@@ -664,30 +686,13 @@ func interruptAgentHandler(client *DaemonClient) server.ToolHandlerFunc {
 func createTaskHandler(client *DaemonClient) server.ToolHandlerFunc {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		title, _ := request.RequireString("title")
-		description := request.GetString("description", "")
 		assignee, _ := request.RequireString("assignee")
-		staleAfterSeconds := int(request.GetFloat("stale_after_seconds", 0))
-		if staleAfterSeconds < 0 {
-			return mcp.NewToolResultError("Invalid stale_after_seconds: must be >= 0"), nil
-		}
-		startMode := types.TaskStartMode(request.GetString("start_mode", string(types.TaskStartDefault)))
-		switch startMode {
-		case "", types.TaskStartDefault:
-			startMode = types.TaskStartDefault
-		case types.TaskStartFresh:
-		default:
-			return mcp.NewToolResultError(fmt.Sprintf("Invalid start_mode: %q (must be default or fresh)", startMode)), nil
-		}
-		priority := types.TaskPriority(request.GetString("priority", string(types.TaskPriorityNormal)))
-		switch priority {
-		case "", types.TaskPriorityNormal:
-			priority = types.TaskPriorityNormal
-		case types.TaskPriorityLow, types.TaskPriorityHigh, types.TaskPriorityUrgent:
-		default:
-			return mcp.NewToolResultError(fmt.Sprintf("Invalid priority: %q (must be low, normal, high, or urgent)", priority)), nil
+		description, parentTaskID, staleAfterSeconds, startMode, priority, err := parseTaskCreateOptions(request)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		task, err := client.CreateTask(title, description, assignee, startMode, priority, staleAfterSeconds)
+		task, err := client.CreateTask(title, description, assignee, parentTaskID, startMode, priority, staleAfterSeconds)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Failed to create task: %v", err)), nil
 		}
@@ -695,6 +700,117 @@ func createTaskHandler(client *DaemonClient) server.ToolHandlerFunc {
 		data, _ := json.MarshalIndent(task, "", "  ")
 		return mcp.NewToolResultText(string(data)), nil
 	}
+}
+
+func startTaskHandler(client *DaemonClient, configPath string) server.ToolHandlerFunc {
+	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		title, _ := request.RequireString("title")
+		assignee, _ := request.RequireString("assignee")
+		message, _ := request.RequireString("message")
+
+		description, parentTaskID, staleAfterSeconds, startMode, priority, err := parseTaskCreateOptions(request)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		dispatchBody, err := normalizeStartTaskMessage(message)
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		task, err := client.CreateTask(title, description, assignee, parentTaskID, startMode, priority, staleAfterSeconds)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to create task: %v", err)), nil
+		}
+
+		fullMessage := formatTaskDispatchMessage(task.ID, dispatchBody)
+		sendResult, err := client.SendMessage(task.Assignee, fullMessage)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Task %s was created but initial dispatch failed: %v", task.ID, err)), nil
+		}
+		if sendResult.Suppressed {
+			return mcp.NewToolResultError(fmt.Sprintf("Task %s was created but initial dispatch was suppressed unexpectedly", task.ID)), nil
+		}
+
+		freshStart := false
+		if task.StartMode == types.TaskStartFresh {
+			if err := prepareFreshWorkspaceForTask(client, configPath, task.Assignee); err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("Task %s was created and queued, but fresh-context restart failed: %v", task.ID, err)), nil
+			}
+			freshStart = true
+		}
+
+		wakeWorkspaceAgent(task.Assignee, client.workspace, freshStart)
+
+		data, _ := json.MarshalIndent(startTaskResult{
+			Task: *task,
+			Dispatch: taskDispatchResult{
+				MessageID:    sendResult.MessageID,
+				Status:       sendResult.Status,
+				FreshContext: freshStart,
+			},
+		}, "", "  ")
+		return mcp.NewToolResultText(string(data)), nil
+	}
+}
+
+func parseTaskCreateOptions(request mcp.CallToolRequest) (string, string, int, types.TaskStartMode, types.TaskPriority, error) {
+	description := request.GetString("description", "")
+	parentTaskID := strings.TrimSpace(request.GetString("parent_task_id", ""))
+	staleAfterSeconds := int(request.GetFloat("stale_after_seconds", 0))
+	if staleAfterSeconds < 0 {
+		return "", "", 0, "", "", fmt.Errorf("Invalid stale_after_seconds: must be >= 0")
+	}
+
+	startMode, err := parseTaskStartMode(request.GetString("start_mode", string(types.TaskStartDefault)))
+	if err != nil {
+		return "", "", 0, "", "", err
+	}
+	priority, err := parseTaskPriority(request.GetString("priority", string(types.TaskPriorityNormal)))
+	if err != nil {
+		return "", "", 0, "", "", err
+	}
+
+	return description, parentTaskID, staleAfterSeconds, startMode, priority, nil
+}
+
+func parseTaskStartMode(value string) (types.TaskStartMode, error) {
+	startMode := types.TaskStartMode(strings.TrimSpace(value))
+	switch startMode {
+	case "", types.TaskStartDefault:
+		return types.TaskStartDefault, nil
+	case types.TaskStartFresh:
+		return types.TaskStartFresh, nil
+	default:
+		return "", fmt.Errorf("Invalid start_mode: %q (must be default or fresh)", startMode)
+	}
+}
+
+func parseTaskPriority(value string) (types.TaskPriority, error) {
+	priority := types.TaskPriority(strings.TrimSpace(value))
+	switch priority {
+	case "", types.TaskPriorityNormal:
+		return types.TaskPriorityNormal, nil
+	case types.TaskPriorityLow, types.TaskPriorityHigh, types.TaskPriorityUrgent:
+		return priority, nil
+	default:
+		return "", fmt.Errorf("Invalid priority: %q (must be low, normal, high, or urgent)", priority)
+	}
+}
+
+func normalizeStartTaskMessage(message string) (string, error) {
+	trimmed := strings.TrimSpace(message)
+	if trimmed == "" {
+		return "", fmt.Errorf("message is required")
+	}
+	if existingTaskID, ok := extractTaskID(trimmed); ok {
+		return "", fmt.Errorf("message must not include Task ID %q; start_task injects the new task ID automatically", existingTaskID)
+	}
+	return trimmed, nil
+}
+
+func formatTaskDispatchMessage(taskID, message string) string {
+	return fmt.Sprintf("Task ID: %s\n\n%s", taskID, strings.TrimSpace(message))
 }
 
 func updateTaskHandler(client *DaemonClient) server.ToolHandlerFunc {
@@ -758,7 +874,7 @@ func listTasksHandler(client *DaemonClient) server.ToolHandlerFunc {
 		if statusStr != "" {
 			s := types.TaskStatus(statusStr)
 			switch s {
-			case types.TaskPending, types.TaskInProgress, types.TaskCompleted, types.TaskFailed:
+			case types.TaskPending, types.TaskInProgress, types.TaskCompleted, types.TaskFailed, types.TaskCancelled:
 				status = &s
 			default:
 				return mcp.NewToolResultError(fmt.Sprintf("Invalid status filter: %q", statusStr)), nil
@@ -778,6 +894,64 @@ func listTasksHandler(client *DaemonClient) server.ToolHandlerFunc {
 			"count": len(tasks),
 			"tasks": tasks,
 		}, "", "  ")
+		return mcp.NewToolResultText(string(data)), nil
+	}
+}
+
+func cancelTaskHandler(client *DaemonClient) server.ToolHandlerFunc {
+	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		id, _ := request.RequireString("id")
+		reason := request.GetString("reason", "")
+		var expectedVersion *int64
+		if request.GetFloat("expected_version", 0) > 0 {
+			v := int64(request.GetFloat("expected_version", 0))
+			expectedVersion = &v
+		}
+
+		task, err := client.CancelTask(id, reason, expectedVersion)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to cancel task: %v", err)), nil
+		}
+		data, _ := json.MarshalIndent(task, "", "  ")
+		return mcp.NewToolResultText(string(data)), nil
+	}
+}
+
+func removeTaskHandler(client *DaemonClient) server.ToolHandlerFunc {
+	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		id, _ := request.RequireString("id")
+		reason := request.GetString("reason", "")
+		var expectedVersion *int64
+		if request.GetFloat("expected_version", 0) > 0 {
+			v := int64(request.GetFloat("expected_version", 0))
+			expectedVersion = &v
+		}
+
+		task, err := client.RemoveTask(id, reason, expectedVersion)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to remove task: %v", err)), nil
+		}
+		data, _ := json.MarshalIndent(task, "", "  ")
+		return mcp.NewToolResultText(string(data)), nil
+	}
+}
+
+func interveneTaskHandler(client *DaemonClient) server.ToolHandlerFunc {
+	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		id, _ := request.RequireString("id")
+		action, _ := request.RequireString("action")
+		note := request.GetString("note", "")
+		var expectedVersion *int64
+		if request.GetFloat("expected_version", 0) > 0 {
+			v := int64(request.GetFloat("expected_version", 0))
+			expectedVersion = &v
+		}
+
+		resp, err := client.InterveneTask(id, action, note, expectedVersion)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to intervene task: %v", err)), nil
+		}
+		data, _ := json.MarshalIndent(resp, "", "  ")
 		return mcp.NewToolResultText(string(data)), nil
 	}
 }

@@ -457,11 +457,12 @@ func (c *DaemonClient) GetUsageTrends(workspaces []daemon.UsageTrendWorkspace, s
 
 // Task operations
 
-func (c *DaemonClient) CreateTask(title, description, assignee string, startMode types.TaskStartMode, priority types.TaskPriority, staleAfterSeconds int) (*types.Task, error) {
+func (c *DaemonClient) CreateTask(title, description, assignee, parentTaskID string, startMode types.TaskStartMode, priority types.TaskPriority, staleAfterSeconds int) (*types.Task, error) {
 	resp, err := c.sendRequest(daemon.MsgCreateTask, &daemon.CreateTaskPayload{
 		Title:             title,
 		Description:       description,
 		Assignee:          assignee,
+		ParentTaskID:      parentTaskID,
 		StartMode:         string(startMode),
 		Priority:          string(priority),
 		StaleAfterSeconds: staleAfterSeconds,
@@ -521,6 +522,55 @@ func (c *DaemonClient) ListTasks(assignee, createdBy string, status *types.TaskS
 		return nil, fmt.Errorf("decode list_tasks response: %w", err)
 	}
 	return result.Tasks, nil
+}
+
+func (c *DaemonClient) CancelTask(id, reason string, expectedVersion *int64) (*types.Task, error) {
+	resp, err := c.sendRequest(daemon.MsgCancelTask, &daemon.CancelTaskPayload{
+		ID:              id,
+		Reason:          reason,
+		ExpectedVersion: expectedVersion,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var result daemon.TaskResponse
+	if err := decodeResponseData(resp, &result); err != nil {
+		return nil, fmt.Errorf("decode cancel_task response: %w", err)
+	}
+	return &result.Task, nil
+}
+
+func (c *DaemonClient) RemoveTask(id, reason string, expectedVersion *int64) (*types.Task, error) {
+	resp, err := c.sendRequest(daemon.MsgRemoveTask, &daemon.RemoveTaskPayload{
+		ID:              id,
+		Reason:          reason,
+		ExpectedVersion: expectedVersion,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var result daemon.TaskResponse
+	if err := decodeResponseData(resp, &result); err != nil {
+		return nil, fmt.Errorf("decode remove_task response: %w", err)
+	}
+	return &result.Task, nil
+}
+
+func (c *DaemonClient) InterveneTask(id, action, note string, expectedVersion *int64) (*daemon.InterveneTaskResponse, error) {
+	resp, err := c.sendRequest(daemon.MsgInterveneTask, &daemon.InterveneTaskPayload{
+		ID:              id,
+		Action:          action,
+		Note:            note,
+		ExpectedVersion: expectedVersion,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var result daemon.InterveneTaskResponse
+	if err := decodeResponseData(resp, &result); err != nil {
+		return nil, fmt.Errorf("decode intervene_task response: %w", err)
+	}
+	return &result, nil
 }
 
 func (c *DaemonClient) GetTeamState(configPath string) (*types.TeamReconfigureState, error) {
