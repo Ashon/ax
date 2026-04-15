@@ -34,10 +34,10 @@ var downCmd = &cobra.Command{
 			return err
 		}
 
-		// Stop sub-orchestrator sessions. The root orchestrator is no
-		// longer a managed tmux session — it runs in the user's
-		// terminal via `ax claude` / `ax codex` — so there is nothing
-		// to destroy for it here.
+		// Stop orchestrator sessions. The root orchestrator runs as an
+		// ephemeral tmux session when launched via `ax claude` / `ax codex`.
+		// destroyOrchestrators checks SessionExists for every node
+		// (including root) and kills any that are still alive.
 		if tree, err := config.LoadTree(cfgPath); err == nil {
 			fmt.Println("\nStopping orchestrators:")
 			destroyOrchestrators(tree)

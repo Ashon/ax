@@ -110,15 +110,26 @@ workspaces:
 
 	oldConfigPath := configPath
 	oldSocketPath := socketPath
+	oldSessionExists := orchSessionExists
+	oldCreateEphemeral := orchCreateEphemeral
+	oldAttachSession := orchAttachSession
 	t.Cleanup(func() {
 		configPath = oldConfigPath
 		socketPath = oldSocketPath
+		orchSessionExists = oldSessionExists
+		orchCreateEphemeral = oldCreateEphemeral
+		orchAttachSession = oldAttachSession
 	})
 
 	configPath = rootConfigPath
 	socketPath = socket
 
-	if err := runRootOrchestrator(agent.RuntimeClaude); err != nil {
+	// Stub tmux calls so the test doesn't need a real tmux server.
+	orchSessionExists = func(string) bool { return false }
+	orchCreateEphemeral = func(string, string, []string) error { return nil }
+	orchAttachSession = func(string) error { return nil }
+
+	if err := runRootOrchestrator(agent.RuntimeClaude, nil); err != nil {
 		t.Fatalf("run root orchestrator: %v", err)
 	}
 

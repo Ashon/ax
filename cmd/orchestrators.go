@@ -16,9 +16,8 @@ import (
 // orchestrator artifacts (prompt + MCP config) exist. Sub-orchestrators
 // (every non-root node) also get a long-running tmux session, since they
 // need to be always-on for cross-project delegation. The root orchestrator
-// no longer runs as a managed tmux session — it is started on demand by
-// `ax claude` / `ax codex`, which run the coding-agent CLI in the user's
-// foreground terminal using the artifacts written here.
+// is started on demand by `ax claude` / `ax codex` as an ephemeral tmux
+// session using the artifacts written here.
 func ensureOrchestrators(tree *config.ProjectNode, socketPath, cfgPath string) error {
 	if tree == nil {
 		return nil
