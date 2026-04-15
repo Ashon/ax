@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ashon/ax/internal/daemonutil"
 	"github.com/ashon/ax/internal/types"
 )
 
@@ -24,11 +25,7 @@ const duplicateSuppressionWindow = 15 * time.Second
 var duplicateNoOpPattern = regexp.MustCompile(`(?i)\b(ack|acked|acknowledged|received|noted|thanks?|thank you|roger|copy that|working on it|on it|looking into it|in progress|still working|status|no update|no-op|noop|same update|same status)\b`)
 
 func ExpandSocketPath(path string) string {
-	if len(path) > 0 && path[0] == '~' {
-		home, _ := os.UserHomeDir()
-		path = filepath.Join(home, path[1:])
-	}
-	return path
+	return daemonutil.ExpandSocketPath(path)
 }
 
 type Daemon struct {
@@ -213,6 +210,9 @@ func (d *Daemon) handleEnvelope(conn net.Conn, env *Envelope, workspace *string)
 
 	case MsgSetStatus:
 		return d.handleSetStatusEnvelope(env, *workspace)
+
+	case MsgControlLifecycle:
+		return d.handleControlLifecycleEnvelope(env, *workspace)
 
 	case MsgSetShared:
 		return d.handleSetSharedEnvelope(env)

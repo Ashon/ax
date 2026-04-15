@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/ashon/ax/internal/agent"
-	"github.com/ashon/ax/internal/daemon"
+	"github.com/ashon/ax/internal/daemonutil"
 )
 
 const MCPConfigFile = ".mcp.json"
@@ -88,7 +88,7 @@ func EnsureCodexConfig(dir, workspace, socketPath, configPath string) error {
 	if err != nil {
 		return fmt.Errorf("resolve ax binary: %w", err)
 	}
-	if _, err := agent.PrepareCodexHome(workspace, dir, daemon.ExpandSocketPath(socketPath), axBin, configPath); err != nil {
+	if _, err := agent.PrepareCodexHome(workspace, dir, daemonutil.ExpandSocketPath(socketPath), axBin, configPath); err != nil {
 		return fmt.Errorf("prepare codex home: %w", err)
 	}
 	return nil

@@ -7,7 +7,7 @@ import (
 
 	"github.com/ashon/ax/internal/agent"
 	"github.com/ashon/ax/internal/config"
-	"github.com/ashon/ax/internal/daemon"
+	"github.com/ashon/ax/internal/daemonutil"
 	"github.com/ashon/ax/internal/tmux"
 )
 
@@ -57,7 +57,7 @@ func TestReconcileDesiredStateCreatesAndCleansGeneratedArtifacts(t *testing.T) {
 	}
 
 	previous := newReconcileState()
-	previous.SocketPath = daemon.ExpandSocketPath(socketPath)
+	previous.SocketPath = daemonutil.ExpandSocketPath(socketPath)
 	previous.ConfigPath = cleanPath(configPath)
 	previous.Workspaces["old"] = workspaceState{
 		Name:             "old",
@@ -79,7 +79,7 @@ func TestReconcileDesiredStateCreatesAndCleansGeneratedArtifacts(t *testing.T) {
 
 	newWorkspaceDir := filepath.Join(home, "project", "new")
 	desired := &DesiredState{
-		SocketPath: daemon.ExpandSocketPath(socketPath),
+		SocketPath: daemonutil.ExpandSocketPath(socketPath),
 		ConfigPath: cleanPath(configPath),
 		Workspaces: map[string]DesiredWorkspace{
 			"new": {
@@ -135,7 +135,7 @@ func TestReconcileDesiredStateBlocksBusyWorkspaceRestart(t *testing.T) {
 	reconciler := NewReconciler(socketPath, configPath)
 
 	previous := newReconcileState()
-	previous.SocketPath = daemon.ExpandSocketPath(socketPath)
+	previous.SocketPath = daemonutil.ExpandSocketPath(socketPath)
 	previous.ConfigPath = cleanPath(configPath)
 	previous.Workspaces["alpha"] = workspaceState{
 		Name:             "alpha",
@@ -166,7 +166,7 @@ func TestReconcileDesiredStateBlocksBusyWorkspaceRestart(t *testing.T) {
 	tmuxSessionIdle = func(string) bool { return false }
 
 	desired := &DesiredState{
-		SocketPath: daemon.ExpandSocketPath(socketPath),
+		SocketPath: daemonutil.ExpandSocketPath(socketPath),
 		ConfigPath: cleanPath(configPath),
 		Workspaces: map[string]DesiredWorkspace{
 			"alpha": {

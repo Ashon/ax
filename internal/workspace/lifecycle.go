@@ -4,71 +4,68 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ashon/ax/internal/daemon"
+	"github.com/ashon/ax/internal/daemonutil"
+	"github.com/ashon/ax/internal/types"
 )
 
-type LifecycleAction string
+type LifecycleAction = types.LifecycleAction
 
 const (
-	LifecycleActionStart   LifecycleAction = "start"
-	LifecycleActionStop    LifecycleAction = "stop"
-	LifecycleActionRestart LifecycleAction = "restart"
+	LifecycleActionStart   = types.LifecycleActionStart
+	LifecycleActionStop    = types.LifecycleActionStop
+	LifecycleActionRestart = types.LifecycleActionRestart
 )
 
-type LifecycleTargetKind string
+type LifecycleTargetKind = types.LifecycleTargetKind
 
 const (
-	LifecycleTargetWorkspace    LifecycleTargetKind = "workspace"
-	LifecycleTargetOrchestrator LifecycleTargetKind = "orchestrator"
+	LifecycleTargetWorkspace    = types.LifecycleTargetWorkspace
+	LifecycleTargetOrchestrator = types.LifecycleTargetOrchestrator
 )
 
-type LifecycleTarget struct {
-	Name           string
-	Kind           LifecycleTargetKind
-	ManagedSession bool
-}
+type LifecycleTarget = types.LifecycleTarget
 
 type resolvedLifecycleTarget struct {
-	target       LifecycleTarget
+	target       types.LifecycleTarget
 	workspace    DesiredWorkspace
 	orchestrator DesiredOrchestrator
 }
 
 // StartNamedTarget starts a configured workspace or managed child orchestrator
 // by exact name. Unmanaged targets such as the root orchestrator are rejected.
-func StartNamedTarget(socketPath, configPath, target string) (LifecycleTarget, error) {
-	return controlNamedTarget(socketPath, configPath, target, LifecycleActionStart)
+func StartNamedTarget(socketPath, configPath, target string) (types.LifecycleTarget, error) {
+	return controlNamedTarget(socketPath, configPath, target, types.LifecycleActionStart)
 }
 
 // StopNamedTarget stops a running workspace or managed child orchestrator by
 // exact name without deleting its generated artifacts.
-func StopNamedTarget(socketPath, configPath, target string) (LifecycleTarget, error) {
-	return controlNamedTarget(socketPath, configPath, target, LifecycleActionStop)
+func StopNamedTarget(socketPath, configPath, target string) (types.LifecycleTarget, error) {
+	return controlNamedTarget(socketPath, configPath, target, types.LifecycleActionStop)
 }
 
 // RestartNamedTarget recycles a configured workspace or managed child
 // orchestrator by exact name. Restart performs a real cleanup/recreate cycle.
-func RestartNamedTarget(socketPath, configPath, target string) (LifecycleTarget, error) {
-	return controlNamedTarget(socketPath, configPath, target, LifecycleActionRestart)
+func RestartNamedTarget(socketPath, configPath, target string) (types.LifecycleTarget, error) {
+	return controlNamedTarget(socketPath, configPath, target, types.LifecycleActionRestart)
 }
 
-func controlNamedTarget(socketPath, configPath, targetName string, action LifecycleAction) (LifecycleTarget, error) {
+func controlNamedTarget(socketPath, configPath, targetName string, action types.LifecycleAction) (types.LifecycleTarget, error) {
 	target, err := resolveLifecycleTarget(socketPath, configPath, targetName)
 	if err != nil {
-		return LifecycleTarget{}, err
+		return types.LifecycleTarget{}, err
 	}
 
 	switch target.target.Kind {
-	case LifecycleTargetWorkspace:
+	case types.LifecycleTargetWorkspace:
 		if err := controlWorkspaceTarget(socketPath, configPath, target, action); err != nil {
-			return LifecycleTarget{}, err
+			return types.LifecycleTarget{}, err
 		}
-	case LifecycleTargetOrchestrator:
+	case types.LifecycleTargetOrchestrator:
 		if err := controlOrchestratorTarget(socketPath, configPath, target, action); err != nil {
-			return LifecycleTarget{}, err
+			return types.LifecycleTarget{}, err
 		}
 	default:
-		return LifecycleTarget{}, fmt.Errorf("unsupported target kind %q", target.target.Kind)
+		return types.LifecycleTarget{}, fmt.Errorf("unsupported target kind %q", target.target.Kind)
 	}
 
 	return target.target, nil
@@ -93,18 +90,18 @@ func resolveLifecycleTarget(socketPath, configPath, targetName string) (resolved
 		return resolvedLifecycleTarget{}, fmt.Errorf("target %q is ambiguous in %s because it matches both a workspace and an orchestrator", targetName, cleanPath(configPath))
 	case hasWorkspace:
 		return resolvedLifecycleTarget{
-			target: LifecycleTarget{
+			target: types.LifecycleTarget{
 				Name:           workspaceEntry.Name,
-				Kind:           LifecycleTargetWorkspace,
+				Kind:           types.LifecycleTargetWorkspace,
 				ManagedSession: true,
 			},
 			workspace: workspaceEntry,
 		}, nil
 	case hasOrchestrator:
 		return resolvedLifecycleTarget{
-			target: LifecycleTarget{
+			target: types.LifecycleTarget{
 				Name:           orchestratorEntry.Name,
-				Kind:           LifecycleTargetOrchestrator,
+				Kind:           types.LifecycleTargetOrchestrator,
 				ManagedSession: orchestratorEntry.ManagedSession,
 			},
 			orchestrator: orchestratorEntry,
@@ -114,48 +111,48 @@ func resolveLifecycleTarget(socketPath, configPath, targetName string) (resolved
 	}
 }
 
-func controlWorkspaceTarget(socketPath, configPath string, target resolvedLifecycleTarget, action LifecycleAction) error {
+func controlWorkspaceTarget(socketPath, configPath string, target resolvedLifecycleTarget, action types.LifecycleAction) error {
 	manager := NewManager(socketPath, configPath)
 
 	switch action {
-	case LifecycleActionStart:
+	case types.LifecycleActionStart:
 		if workspaceSessionExists(target.target.Name) {
 			return alreadyRunningError(target.target)
 		}
 		return manager.Create(target.target.Name, target.workspace.Workspace)
-	case LifecycleActionStop:
+	case types.LifecycleActionStop:
 		return stopSessionTarget(target.target)
-	case LifecycleActionRestart:
+	case types.LifecycleActionRestart:
 		return manager.Restart(target.target.Name, target.workspace.Workspace)
 	default:
 		return fmt.Errorf("unsupported lifecycle action %q", action)
 	}
 }
 
-func controlOrchestratorTarget(socketPath, configPath string, target resolvedLifecycleTarget, action LifecycleAction) error {
+func controlOrchestratorTarget(socketPath, configPath string, target resolvedLifecycleTarget, action types.LifecycleAction) error {
 	if !target.target.ManagedSession {
 		return unsupportedManagedSessionError(target.target, action)
 	}
 
 	switch action {
-	case LifecycleActionStart:
+	case types.LifecycleActionStart:
 		if workspaceSessionExists(target.target.Name) {
 			return alreadyRunningError(target.target)
 		}
-		return EnsureOrchestrator(target.orchestrator.Node, target.orchestrator.ParentName, daemon.ExpandSocketPath(socketPath), configPath, true)
-	case LifecycleActionStop:
+		return EnsureOrchestrator(target.orchestrator.Node, target.orchestrator.ParentName, daemonutil.ExpandSocketPath(socketPath), configPath, true)
+	case types.LifecycleActionStop:
 		return stopSessionTarget(target.target)
-	case LifecycleActionRestart:
+	case types.LifecycleActionRestart:
 		if err := CleanupOrchestratorState(target.target.Name, target.orchestrator.ArtifactDir); err != nil {
 			return err
 		}
-		return EnsureOrchestrator(target.orchestrator.Node, target.orchestrator.ParentName, daemon.ExpandSocketPath(socketPath), configPath, true)
+		return EnsureOrchestrator(target.orchestrator.Node, target.orchestrator.ParentName, daemonutil.ExpandSocketPath(socketPath), configPath, true)
 	default:
 		return fmt.Errorf("unsupported lifecycle action %q", action)
 	}
 }
 
-func stopSessionTarget(target LifecycleTarget) error {
+func stopSessionTarget(target types.LifecycleTarget) error {
 	if !workspaceSessionExists(target.Name) {
 		return notRunningError(target)
 	}
@@ -165,14 +162,14 @@ func stopSessionTarget(target LifecycleTarget) error {
 	return nil
 }
 
-func alreadyRunningError(target LifecycleTarget) error {
+func alreadyRunningError(target types.LifecycleTarget) error {
 	return fmt.Errorf("%s %q is already running", target.Kind, target.Name)
 }
 
-func notRunningError(target LifecycleTarget) error {
+func notRunningError(target types.LifecycleTarget) error {
 	return fmt.Errorf("%s %q is not running", target.Kind, target.Name)
 }
 
-func unsupportedManagedSessionError(target LifecycleTarget, action LifecycleAction) error {
+func unsupportedManagedSessionError(target types.LifecycleTarget, action types.LifecycleAction) error {
 	return fmt.Errorf("%s %q does not support targeted %s because it is not a managed session", target.Kind, target.Name, action)
 }

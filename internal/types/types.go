@@ -28,6 +28,27 @@ type Message struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+type LifecycleAction string
+
+const (
+	LifecycleActionStart   LifecycleAction = "start"
+	LifecycleActionStop    LifecycleAction = "stop"
+	LifecycleActionRestart LifecycleAction = "restart"
+)
+
+type LifecycleTargetKind string
+
+const (
+	LifecycleTargetWorkspace    LifecycleTargetKind = "workspace"
+	LifecycleTargetOrchestrator LifecycleTargetKind = "orchestrator"
+)
+
+type LifecycleTarget struct {
+	Name           string              `json:"name"`
+	Kind           LifecycleTargetKind `json:"kind"`
+	ManagedSession bool                `json:"managed_session"`
+}
+
 const ExperimentalMCPTeamReconfigureFlagKey = "experimental_mcp_team_reconfigure"
 
 type TeamEntryKind string
