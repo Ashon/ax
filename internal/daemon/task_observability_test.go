@@ -298,3 +298,46 @@ func TestEnrichTaskSurfacesParentReconciliationNeed(t *testing.T) {
 		t.Fatal("expected reconciliation action guidance")
 	}
 }
+
+func TestEnrichTaskMarksSerialChildAsWaitingTurn(t *testing.T) {
+	stateDir := t.TempDir()
+	d := &Daemon{
+		queue:     NewMessageQueue(),
+		history:   NewHistory(stateDir, 50),
+		registry:  NewRegistry(),
+		taskStore: NewTaskStore(stateDir),
+	}
+
+	parent, err := d.taskStore.CreateWithWorkflow("parent", "desc", "orch", "root", "", "", types.TaskWorkflowSerial, "", 0, "")
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	first, err := d.taskStore.Create("first", "desc", "worker", "orch", parent.ID, "", "", 0)
+	if err != nil {
+		t.Fatalf("create first child: %v", err)
+	}
+	second, err := d.taskStore.Create("second", "desc", "worker", "orch", parent.ID, "", "", 0)
+	if err != nil {
+		t.Fatalf("create second child: %v", err)
+	}
+
+	enriched := d.enrichTask(*second)
+	if enriched.Sequence == nil {
+		t.Fatal("expected sequence info for serial child")
+	}
+	if enriched.Sequence.State != types.TaskSequenceWaitingTurn {
+		t.Fatalf("sequence state = %q, want %q", enriched.Sequence.State, types.TaskSequenceWaitingTurn)
+	}
+	if enriched.Sequence.WaitingOnTaskID != first.ID {
+		t.Fatalf("waiting_on_task_id = %q, want %q", enriched.Sequence.WaitingOnTaskID, first.ID)
+	}
+	if enriched.StaleInfo == nil {
+		t.Fatal("expected stale_info to be populated")
+	}
+	if enriched.StaleInfo.ClaimState != string(types.TaskSequenceWaitingTurn) {
+		t.Fatalf("claim_state = %q, want %q", enriched.StaleInfo.ClaimState, types.TaskSequenceWaitingTurn)
+	}
+	if enriched.StaleInfo.Runnable {
+		t.Fatalf("waiting-turn task should not be runnable: %+v", enriched.StaleInfo)
+	}
+}

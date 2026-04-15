@@ -252,24 +252,11 @@ func (d *Daemon) handleCreateTaskEnvelope(env *Envelope, workspace string) (*Env
 		return nil, err
 	}
 
-	startMode := types.TaskStartMode(p.StartMode)
-	switch startMode {
-	case "", types.TaskStartDefault:
-		startMode = types.TaskStartDefault
-	case types.TaskStartFresh:
-	default:
-		return nil, fmt.Errorf("invalid task start mode %q", p.StartMode)
+	startMode, workflowMode, priority, err := parseTaskLifecycleOptions(p.StartMode, p.WorkflowMode, p.Priority)
+	if err != nil {
+		return nil, err
 	}
-	priority := types.TaskPriority(p.Priority)
-	switch priority {
-	case "", types.TaskPriorityNormal:
-		priority = types.TaskPriorityNormal
-	case types.TaskPriorityLow, types.TaskPriorityHigh, types.TaskPriorityUrgent:
-	default:
-		return nil, fmt.Errorf("invalid task priority %q", p.Priority)
-	}
-
-	task, err := d.taskStore.Create(p.Title, p.Description, p.Assignee, workspace, p.ParentTaskID, startMode, priority, p.StaleAfterSeconds)
+	task, err := d.taskStore.CreateWithWorkflow(p.Title, p.Description, p.Assignee, workspace, p.ParentTaskID, startMode, workflowMode, priority, p.StaleAfterSeconds, "")
 	if err != nil {
 		return nil, err
 	}
@@ -277,6 +264,39 @@ func (d *Daemon) handleCreateTaskEnvelope(env *Envelope, workspace string) (*Env
 	task, _ = d.taskStore.Get(task.ID)
 	d.logger.Printf("task created: %s (assignee=%s, by=%s)", task.ID, task.Assignee, workspace)
 	return NewResponseEnvelope(env.ID, &TaskResponse{Task: *task})
+}
+
+func (d *Daemon) handleStartTaskEnvelope(env *Envelope, workspace string) (*Envelope, error) {
+	var p StartTaskPayload
+	if err := env.DecodePayload(&p); err != nil {
+		return nil, fmt.Errorf("decode start_task: %w", err)
+	}
+	if err := requireRegisteredWorkspace(workspace); err != nil {
+		return nil, err
+	}
+
+	startMode, workflowMode, priority, err := parseTaskLifecycleOptions(p.StartMode, p.WorkflowMode, p.Priority)
+	if err != nil {
+		return nil, err
+	}
+	dispatchBody, err := normalizeTaskDispatchBody(p.Message)
+	if err != nil {
+		return nil, err
+	}
+
+	task, err := d.taskStore.CreateWithWorkflow(p.Title, p.Description, p.Assignee, workspace, p.ParentTaskID, startMode, workflowMode, priority, p.StaleAfterSeconds, dispatchBody)
+	if err != nil {
+		return nil, err
+	}
+
+	dispatch := d.dispatchTaskStart(*task)
+	d.refreshTaskSnapshots()
+	task, _ = d.taskStore.Get(task.ID)
+	d.logger.Printf("task started: %s (assignee=%s, by=%s, dispatch=%s)", task.ID, task.Assignee, workspace, dispatch.Status)
+	return NewResponseEnvelope(env.ID, &StartTaskResponse{
+		Task:     *task,
+		Dispatch: dispatch,
+	})
 }
 
 func (d *Daemon) handleUpdateTaskEnvelope(env *Envelope, workspace string) (*Envelope, error) {
@@ -292,6 +312,7 @@ func (d *Daemon) handleUpdateTaskEnvelope(env *Envelope, workspace string) (*Env
 	if err != nil {
 		return nil, err
 	}
+	d.releaseSerialWorkflowSuccessor(*task)
 	d.refreshTaskSnapshots()
 	task, _ = d.taskStore.Get(task.ID)
 	d.logger.Printf("task updated: %s (status=%s)", task.ID, task.Status)
@@ -308,7 +329,8 @@ func (d *Daemon) handleGetTaskEnvelope(env *Envelope) (*Envelope, error) {
 	if !found {
 		return nil, fmt.Errorf("task %q not found", p.ID)
 	}
-	enriched := d.enrichTask(*task)
+	snapshot := d.taskSnapshotsByID()
+	enriched := d.enrichTaskWithSnapshot(*task, snapshot)
 	return NewResponseEnvelope(env.ID, &TaskResponse{Task: enriched})
 }
 
@@ -319,8 +341,9 @@ func (d *Daemon) handleListTasksEnvelope(env *Envelope) (*Envelope, error) {
 	}
 
 	tasks := d.taskStore.List(p.Assignee, p.CreatedBy, p.Status)
+	snapshot := d.taskSnapshotsByID()
 	for i := range tasks {
-		tasks[i] = d.enrichTask(tasks[i])
+		tasks[i] = d.enrichTaskWithSnapshot(tasks[i], snapshot)
 	}
 	return NewResponseEnvelope(env.ID, &ListTasksResponse{Tasks: tasks})
 }
@@ -342,10 +365,11 @@ func (d *Daemon) handleCancelTaskEnvelope(env *Envelope, workspace string) (*Env
 	if d.queue.PendingCount(task.Assignee) == 0 {
 		d.wakeScheduler.Cancel(task.Assignee)
 	}
+	d.releaseSerialWorkflowSuccessor(*task)
 	d.refreshTaskSnapshots()
 	task, _ = d.taskStore.Get(task.ID)
 	d.logger.Printf("task cancelled: %s (dropped_messages=%d)", task.ID, dropped)
-	return NewResponseEnvelope(env.ID, &TaskResponse{Task: d.enrichTask(*task)})
+	return NewResponseEnvelope(env.ID, &TaskResponse{Task: *task})
 }
 
 func (d *Daemon) handleRemoveTaskEnvelope(env *Envelope, workspace string) (*Envelope, error) {
@@ -368,7 +392,7 @@ func (d *Daemon) handleRemoveTaskEnvelope(env *Envelope, workspace string) (*Env
 	d.refreshTaskSnapshots()
 	task, _ = d.taskStore.Get(task.ID)
 	d.logger.Printf("task removed: %s", task.ID)
-	return NewResponseEnvelope(env.ID, &TaskResponse{Task: d.enrichTask(*task)})
+	return NewResponseEnvelope(env.ID, &TaskResponse{Task: *task})
 }
 
 func (d *Daemon) handleInterveneTaskEnvelope(env *Envelope, workspace string) (*Envelope, error) {
@@ -392,7 +416,7 @@ func (d *Daemon) handleInterveneTaskEnvelope(env *Envelope, workspace string) (*
 	}
 
 	resp := InterveneTaskResponse{
-		Task:   d.enrichTask(*task),
+		Task:   *task,
 		Action: p.Action,
 		Status: "noop",
 	}
@@ -430,7 +454,7 @@ func (d *Daemon) handleInterveneTaskEnvelope(env *Envelope, workspace string) (*
 		d.wakeScheduler.Schedule(task.Assignee, workspace)
 		d.refreshTaskSnapshots()
 		refreshed, _ := d.taskStore.Get(task.ID)
-		resp.Task = d.enrichTask(*refreshed)
+		resp.Task = *refreshed
 		resp.Status = "queued"
 		resp.MessageID = msg.ID
 	default:
@@ -448,7 +472,7 @@ func (d *Daemon) rehydrateRunnableTaskMessages(workspace string, push bool) int 
 		if d.queue.HasTaskMessage(workspace, task.ID) {
 			continue
 		}
-		msg := taskAwareMessage(task.CreatedBy, task.Assignee, buildTaskReminderMessage(task, ""))
+		msg := taskAwareMessage(task.CreatedBy, task.Assignee, taskDispatchContent(task, ""))
 		msg = d.queue.EnqueueMessage(msg)
 		d.taskStore.RecordDispatch(msg.TaskID, msg.To, msg.CreatedAt)
 		d.history.AppendMessage(msg)
@@ -459,6 +483,13 @@ func (d *Daemon) rehydrateRunnableTaskMessages(workspace string, push bool) int 
 		rehydrated++
 	}
 	return rehydrated
+}
+
+func taskDispatchContent(task types.Task, note string) string {
+	if note == "" && strings.TrimSpace(task.DispatchMessage) != "" {
+		return task.DispatchMessage
+	}
+	return buildTaskReminderMessage(task, note)
 }
 
 func (d *Daemon) handleGetTeamStateEnvelope(env *Envelope) (*Envelope, error) {
@@ -480,6 +511,99 @@ func taskAwareMessage(from, to, content string) types.Message {
 		To:      to,
 		Content: content,
 		TaskID:  extractTaskID(content),
+	}
+}
+
+func parseTaskLifecycleOptions(startModeValue, workflowModeValue, priorityValue string) (types.TaskStartMode, types.TaskWorkflowMode, types.TaskPriority, error) {
+	startMode := types.TaskStartMode(strings.TrimSpace(startModeValue))
+	switch startMode {
+	case "", types.TaskStartDefault:
+		startMode = types.TaskStartDefault
+	case types.TaskStartFresh:
+	default:
+		return "", "", "", fmt.Errorf("invalid task start mode %q", startModeValue)
+	}
+
+	workflowMode := types.TaskWorkflowMode(strings.TrimSpace(workflowModeValue))
+	switch workflowMode {
+	case "", types.TaskWorkflowParallel:
+		workflowMode = types.TaskWorkflowParallel
+	case types.TaskWorkflowSerial:
+	default:
+		return "", "", "", fmt.Errorf("invalid task workflow mode %q", workflowModeValue)
+	}
+
+	priority := types.TaskPriority(strings.TrimSpace(priorityValue))
+	switch priority {
+	case "", types.TaskPriorityNormal:
+		priority = types.TaskPriorityNormal
+	case types.TaskPriorityLow, types.TaskPriorityHigh, types.TaskPriorityUrgent:
+	default:
+		return "", "", "", fmt.Errorf("invalid task priority %q", priorityValue)
+	}
+
+	return startMode, workflowMode, priority, nil
+}
+
+func normalizeTaskDispatchBody(message string) (string, error) {
+	trimmed := strings.TrimSpace(message)
+	if trimmed == "" {
+		return "", fmt.Errorf("message is required")
+	}
+	if existingTaskID := extractTaskID(trimmed); existingTaskID != "" {
+		return "", fmt.Errorf("message must not include Task ID %q; start_task injects the new task ID automatically", existingTaskID)
+	}
+	return trimmed, nil
+}
+
+func formatTaskDispatchMessage(taskID, message string) string {
+	return fmt.Sprintf("Task ID: %s\n\n%s", taskID, strings.TrimSpace(message))
+}
+
+func (d *Daemon) dispatchTaskStart(task types.Task) TaskDispatch {
+	snapshot := d.taskSnapshotsByID()
+	task = d.enrichTaskWithSnapshot(task, snapshot)
+	if strings.TrimSpace(task.DispatchMessage) == "" {
+		return TaskDispatch{Status: "waiting_for_input"}
+	}
+	if task.Sequence != nil && task.Sequence.State == types.TaskSequenceWaitingTurn {
+		return TaskDispatch{Status: string(types.TaskSequenceWaitingTurn)}
+	}
+	msg := taskAwareMessage(task.CreatedBy, task.Assignee, task.DispatchMessage)
+	msg = d.queue.EnqueueMessage(msg)
+	d.taskStore.RecordDispatch(msg.TaskID, msg.To, msg.CreatedAt)
+	d.history.AppendMessage(msg)
+	if d.canDeliverMessage(task.Assignee, msg) {
+		d.sendPushEnvelope(task.Assignee, msg, "task start push to %q dropped (outbox full or closed)")
+	}
+	d.wakeScheduler.Schedule(task.Assignee, task.CreatedBy)
+	return TaskDispatch{
+		MessageID: msg.ID,
+		Status:    "queued",
+	}
+}
+
+func (d *Daemon) releaseSerialWorkflowSuccessor(task types.Task) {
+	if !isTerminalTaskStatus(task.Status) || strings.TrimSpace(task.ParentTaskID) == "" {
+		return
+	}
+	parent, ok := d.taskStore.Get(task.ParentTaskID)
+	if !ok || parent.WorkflowMode != types.TaskWorkflowSerial {
+		return
+	}
+
+	for _, childID := range parent.ChildTaskIDs {
+		child, ok := d.taskStore.Get(childID)
+		if !ok || child.RemovedAt != nil || child.LastDispatchAt != nil || child.ClaimedAt != nil || strings.TrimSpace(child.DispatchMessage) == "" {
+			continue
+		}
+		snapshot := d.taskSnapshotsByID()
+		enriched := d.enrichTaskWithSnapshot(*child, snapshot)
+		if enriched.Sequence == nil || enriched.Sequence.State != types.TaskSequenceReady {
+			continue
+		}
+		d.dispatchTaskStart(enriched)
+		return
 	}
 }
 

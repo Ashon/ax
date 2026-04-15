@@ -23,6 +23,7 @@ const (
 	MsgListShared     MessageType = "list_shared"
 	MsgUsageTrends    MessageType = "usage_trends"
 	MsgCreateTask     MessageType = "create_task"
+	MsgStartTask      MessageType = "start_task"
 	MsgUpdateTask     MessageType = "update_task"
 	MsgGetTask        MessageType = "get_task"
 	MsgListTasks      MessageType = "list_tasks"
@@ -100,6 +101,19 @@ type CreateTaskPayload struct {
 	Assignee          string `json:"assignee"`
 	ParentTaskID      string `json:"parent_task_id,omitempty"`
 	StartMode         string `json:"start_mode,omitempty"`
+	WorkflowMode      string `json:"workflow_mode,omitempty"`
+	Priority          string `json:"priority,omitempty"`
+	StaleAfterSeconds int    `json:"stale_after_seconds,omitempty"`
+}
+
+type StartTaskPayload struct {
+	Title             string `json:"title"`
+	Description       string `json:"description,omitempty"`
+	Message           string `json:"message"`
+	Assignee          string `json:"assignee"`
+	ParentTaskID      string `json:"parent_task_id,omitempty"`
+	StartMode         string `json:"start_mode,omitempty"`
+	WorkflowMode      string `json:"workflow_mode,omitempty"`
 	Priority          string `json:"priority,omitempty"`
 	StaleAfterSeconds int    `json:"stale_after_seconds,omitempty"`
 }
@@ -195,6 +209,16 @@ type UsageTrendsResponse struct {
 
 type TaskResponse struct {
 	Task types.Task `json:"task"`
+}
+
+type TaskDispatch struct {
+	MessageID string `json:"message_id,omitempty"`
+	Status    string `json:"status"`
+}
+
+type StartTaskResponse struct {
+	Task     types.Task   `json:"task"`
+	Dispatch TaskDispatch `json:"dispatch"`
 }
 
 type ListTasksResponse struct {

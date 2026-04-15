@@ -157,6 +157,13 @@ const (
 	TaskStartFresh   TaskStartMode = "fresh"
 )
 
+type TaskWorkflowMode string
+
+const (
+	TaskWorkflowParallel TaskWorkflowMode = "parallel"
+	TaskWorkflowSerial   TaskWorkflowMode = "serial"
+)
+
 type TaskPriority string
 
 const (
@@ -166,36 +173,48 @@ const (
 	TaskPriorityUrgent TaskPriority = "urgent"
 )
 
+type TaskSequenceState string
+
+const (
+	TaskSequenceWaitingTurn   TaskSequenceState = "waiting_turn"
+	TaskSequenceReady         TaskSequenceState = "ready"
+	TaskSequenceReleased      TaskSequenceState = "released"
+	TaskSequenceNotApplicable TaskSequenceState = "not_applicable"
+)
+
 type Task struct {
-	ID                string         `json:"id"`
-	Title             string         `json:"title"`
-	Description       string         `json:"description,omitempty"`
-	Assignee          string         `json:"assignee"`
-	CreatedBy         string         `json:"created_by"`
-	ParentTaskID      string         `json:"parent_task_id,omitempty"`
-	ChildTaskIDs      []string       `json:"child_task_ids,omitempty"`
-	Version           int64          `json:"version"`
-	Status            TaskStatus     `json:"status"`
-	StartMode         TaskStartMode  `json:"start_mode"`
-	Priority          TaskPriority   `json:"priority,omitempty"`
-	StaleAfterSeconds int            `json:"stale_after_seconds,omitempty"`
-	DispatchCount     int            `json:"dispatch_count,omitempty"`
-	AttemptCount      int            `json:"attempt_count,omitempty"`
-	LastDispatchAt    *time.Time     `json:"last_dispatch_at,omitempty"`
-	LastAttemptAt     *time.Time     `json:"last_attempt_at,omitempty"`
-	NextRetryAt       *time.Time     `json:"next_retry_at,omitempty"`
-	ClaimedAt         *time.Time     `json:"claimed_at,omitempty"`
-	ClaimedBy         string         `json:"claimed_by,omitempty"`
-	ClaimSource       string         `json:"claim_source,omitempty"`
-	Result            string         `json:"result,omitempty"`
-	Logs              []TaskLog      `json:"logs,omitempty"`
-	Rollup            *TaskRollup    `json:"rollup,omitempty"`
-	StaleInfo         *TaskStaleInfo `json:"stale_info,omitempty"`
-	RemovedAt         *time.Time     `json:"removed_at,omitempty"`
-	RemovedBy         string         `json:"removed_by,omitempty"`
-	RemoveReason      string         `json:"remove_reason,omitempty"`
-	CreatedAt         time.Time      `json:"created_at"`
-	UpdatedAt         time.Time      `json:"updated_at"`
+	ID                string            `json:"id"`
+	Title             string            `json:"title"`
+	Description       string            `json:"description,omitempty"`
+	Assignee          string            `json:"assignee"`
+	CreatedBy         string            `json:"created_by"`
+	ParentTaskID      string            `json:"parent_task_id,omitempty"`
+	ChildTaskIDs      []string          `json:"child_task_ids,omitempty"`
+	Version           int64             `json:"version"`
+	Status            TaskStatus        `json:"status"`
+	StartMode         TaskStartMode     `json:"start_mode"`
+	WorkflowMode      TaskWorkflowMode  `json:"workflow_mode,omitempty"`
+	Priority          TaskPriority      `json:"priority,omitempty"`
+	StaleAfterSeconds int               `json:"stale_after_seconds,omitempty"`
+	DispatchMessage   string            `json:"dispatch_message,omitempty"`
+	DispatchCount     int               `json:"dispatch_count,omitempty"`
+	AttemptCount      int               `json:"attempt_count,omitempty"`
+	LastDispatchAt    *time.Time        `json:"last_dispatch_at,omitempty"`
+	LastAttemptAt     *time.Time        `json:"last_attempt_at,omitempty"`
+	NextRetryAt       *time.Time        `json:"next_retry_at,omitempty"`
+	ClaimedAt         *time.Time        `json:"claimed_at,omitempty"`
+	ClaimedBy         string            `json:"claimed_by,omitempty"`
+	ClaimSource       string            `json:"claim_source,omitempty"`
+	Result            string            `json:"result,omitempty"`
+	Logs              []TaskLog         `json:"logs,omitempty"`
+	Rollup            *TaskRollup       `json:"rollup,omitempty"`
+	Sequence          *TaskSequenceInfo `json:"sequence,omitempty"`
+	StaleInfo         *TaskStaleInfo    `json:"stale_info,omitempty"`
+	RemovedAt         *time.Time        `json:"removed_at,omitempty"`
+	RemovedBy         string            `json:"removed_by,omitempty"`
+	RemoveReason      string            `json:"remove_reason,omitempty"`
+	CreatedAt         time.Time         `json:"created_at"`
+	UpdatedAt         time.Time         `json:"updated_at"`
 }
 
 type TaskLog struct {
@@ -218,6 +237,13 @@ type TaskRollup struct {
 	AllChildrenTerminal       bool       `json:"all_children_terminal,omitempty"`
 	NeedsParentReconciliation bool       `json:"needs_parent_reconciliation,omitempty"`
 	Summary                   string     `json:"summary,omitempty"`
+}
+
+type TaskSequenceInfo struct {
+	Mode            TaskWorkflowMode  `json:"mode,omitempty"`
+	State           TaskSequenceState `json:"state,omitempty"`
+	Position        int               `json:"position,omitempty"`
+	WaitingOnTaskID string            `json:"waiting_on_task_id,omitempty"`
 }
 
 type TaskStaleInfo struct {

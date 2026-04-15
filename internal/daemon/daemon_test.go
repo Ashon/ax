@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ashon/ax/internal/daemon"
+	"github.com/ashon/ax/internal/types"
 )
 
 func startTestDaemon(t *testing.T) (string, context.CancelFunc) {
@@ -131,6 +132,32 @@ func createTaskWithStartMode(t *testing.T, conn net.Conn, scanner *bufio.Scanner
 		t.Fatalf("unmarshal create task response: %v", err)
 	}
 	return taskResp.Task.ID
+}
+
+func startTaskWithParent(t *testing.T, conn net.Conn, scanner *bufio.Scanner, title, assignee, message, parentTaskID, workflowMode string) daemon.StartTaskResponse {
+	t.Helper()
+
+	startTaskEnv, _ := daemon.NewEnvelope("start-task", daemon.MsgStartTask, &daemon.StartTaskPayload{
+		Title:        title,
+		Assignee:     assignee,
+		Message:      message,
+		ParentTaskID: parentTaskID,
+		WorkflowMode: workflowMode,
+	})
+	startTaskResp := sendAndRead(t, conn, scanner, startTaskEnv)
+	if startTaskResp.Type != daemon.MsgResponse {
+		t.Fatalf("expected start_task response, got %s", startTaskResp.Type)
+	}
+
+	var payload daemon.ResponsePayload
+	if err := startTaskResp.DecodePayload(&payload); err != nil {
+		t.Fatalf("decode start task payload: %v", err)
+	}
+	var taskResp daemon.StartTaskResponse
+	if err := json.Unmarshal(payload.Data, &taskResp); err != nil {
+		t.Fatalf("unmarshal start task response: %v", err)
+	}
+	return taskResp
 }
 
 func TestDaemonRegisterAndList(t *testing.T) {
@@ -554,6 +581,164 @@ func TestDaemonFreshTaskDispatchWaitsForNewerWorkerRegistration(t *testing.T) {
 	}
 	if len(readMessages.Messages) != 1 || readMessages.Messages[0].TaskID != taskID {
 		t.Fatalf("expected queued fresh task after re-register, got %+v", readMessages.Messages)
+	}
+}
+
+func TestDaemonStartTaskQueuesInitialDispatch(t *testing.T) {
+	socketPath, cancel := startTestDaemon(t)
+	defer cancel()
+
+	connOrch, scannerOrch := connectAndRegister(t, socketPath, "orchestrator")
+	defer connOrch.Close()
+
+	connWorker, scannerWorker := connectAndRegister(t, socketPath, "worker")
+	defer connWorker.Close()
+
+	started := startTaskWithParent(t, connOrch, scannerOrch, "Daemon-backed start", "worker", "Inspect the queued daemon start path", "", "")
+	if started.Task.ID == "" {
+		t.Fatal("expected start_task to create a task ID")
+	}
+	if started.Dispatch.Status != "queued" {
+		t.Fatalf("dispatch status = %q, want queued", started.Dispatch.Status)
+	}
+	if started.Dispatch.MessageID == "" {
+		t.Fatal("expected queued dispatch message ID")
+	}
+	wantMessage := "Task ID: " + started.Task.ID + "\n\nInspect the queued daemon start path"
+	if started.Task.DispatchMessage != wantMessage {
+		t.Fatalf("dispatch message = %q, want %q", started.Task.DispatchMessage, wantMessage)
+	}
+
+	if !scannerWorker.Scan() {
+		t.Fatal("expected push notification for start_task")
+	}
+	var pushEnv daemon.Envelope
+	if err := json.Unmarshal(scannerWorker.Bytes(), &pushEnv); err != nil {
+		t.Fatalf("unmarshal push: %v", err)
+	}
+	if pushEnv.Type != daemon.MsgPushMessage {
+		t.Fatalf("expected push_message, got %s", pushEnv.Type)
+	}
+
+	readEnv, _ := daemon.NewEnvelope("read-start-task", daemon.MsgReadMessages, &daemon.ReadMessagesPayload{Limit: 10})
+	readResp := sendAndRead(t, connWorker, scannerWorker, readEnv)
+	if readResp.Type != daemon.MsgResponse {
+		t.Fatalf("expected read_messages response, got %s", readResp.Type)
+	}
+	var readPayload daemon.ResponsePayload
+	if err := readResp.DecodePayload(&readPayload); err != nil {
+		t.Fatalf("decode read payload: %v", err)
+	}
+	var readMessages daemon.ReadMessagesResponse
+	if err := json.Unmarshal(readPayload.Data, &readMessages); err != nil {
+		t.Fatalf("unmarshal read response: %v", err)
+	}
+	if len(readMessages.Messages) != 1 {
+		t.Fatalf("expected one queued start_task message, got %+v", readMessages.Messages)
+	}
+	if readMessages.Messages[0].TaskID != started.Task.ID || readMessages.Messages[0].Content != wantMessage {
+		t.Fatalf("unexpected start_task delivery: %+v", readMessages.Messages[0])
+	}
+}
+
+func TestDaemonSerialWorkflowReleasesNextChildAfterTerminalSibling(t *testing.T) {
+	socketPath, cancel := startTestDaemon(t)
+	defer cancel()
+
+	connOrch, scannerOrch := connectAndRegister(t, socketPath, "orchestrator")
+	defer connOrch.Close()
+
+	connWorker, scannerWorker := connectAndRegister(t, socketPath, "worker")
+	defer connWorker.Close()
+
+	parentEnv, _ := daemon.NewEnvelope("create-parent", daemon.MsgCreateTask, &daemon.CreateTaskPayload{
+		Title:        "Serial parent",
+		Assignee:     "orchestrator",
+		WorkflowMode: string(types.TaskWorkflowSerial),
+	})
+	parentResp := sendAndRead(t, connOrch, scannerOrch, parentEnv)
+	if parentResp.Type != daemon.MsgResponse {
+		t.Fatalf("expected create_task response, got %s", parentResp.Type)
+	}
+	var parentPayload daemon.ResponsePayload
+	if err := parentResp.DecodePayload(&parentPayload); err != nil {
+		t.Fatalf("decode parent payload: %v", err)
+	}
+	var parentTask daemon.TaskResponse
+	if err := json.Unmarshal(parentPayload.Data, &parentTask); err != nil {
+		t.Fatalf("unmarshal parent task: %v", err)
+	}
+
+	first := startTaskWithParent(t, connOrch, scannerOrch, "First child", "worker", "First serial child", parentTask.Task.ID, "")
+	if first.Dispatch.Status != "queued" {
+		t.Fatalf("first child dispatch status = %q, want queued", first.Dispatch.Status)
+	}
+	if !scannerWorker.Scan() {
+		t.Fatal("expected first child push")
+	}
+
+	second := startTaskWithParent(t, connOrch, scannerOrch, "Second child", "worker", "Second serial child", parentTask.Task.ID, "")
+	if second.Dispatch.Status != "waiting_turn" {
+		t.Fatalf("second child dispatch status = %q, want waiting_turn", second.Dispatch.Status)
+	}
+	if second.Task.Sequence == nil || second.Task.Sequence.State != "waiting_turn" || second.Task.Sequence.WaitingOnTaskID != first.Task.ID {
+		t.Fatalf("unexpected second child sequence info: %+v", second.Task.Sequence)
+	}
+	if second.Task.LastDispatchAt != nil {
+		t.Fatalf("expected second child dispatch to stay deferred, got %+v", second.Task.LastDispatchAt)
+	}
+
+	readEnv, _ := daemon.NewEnvelope("read-serial-empty", daemon.MsgReadMessages, &daemon.ReadMessagesPayload{Limit: 10})
+	readResp := sendAndRead(t, connWorker, scannerWorker, readEnv)
+	if readResp.Type != daemon.MsgResponse {
+		t.Fatalf("expected read_messages response, got %s", readResp.Type)
+	}
+	var readPayload daemon.ResponsePayload
+	if err := readResp.DecodePayload(&readPayload); err != nil {
+		t.Fatalf("decode empty read payload: %v", err)
+	}
+	var readMessages daemon.ReadMessagesResponse
+	if err := json.Unmarshal(readPayload.Data, &readMessages); err != nil {
+		t.Fatalf("unmarshal empty read response: %v", err)
+	}
+	if len(readMessages.Messages) != 1 || readMessages.Messages[0].TaskID != first.Task.ID {
+		t.Fatalf("expected only first child to be queued before release, got %+v", readMessages.Messages)
+	}
+
+	cancelEnv, _ := daemon.NewEnvelope("cancel-first-child", daemon.MsgCancelTask, &daemon.CancelTaskPayload{
+		ID:     first.Task.ID,
+		Reason: "release next serial child",
+	})
+	cancelResp := sendAndRead(t, connOrch, scannerOrch, cancelEnv)
+	if cancelResp.Type != daemon.MsgResponse {
+		t.Fatalf("expected cancel_task response, got %s", cancelResp.Type)
+	}
+
+	if !scannerWorker.Scan() {
+		t.Fatal("expected second child push after terminal first child")
+	}
+	var pushEnv daemon.Envelope
+	if err := json.Unmarshal(scannerWorker.Bytes(), &pushEnv); err != nil {
+		t.Fatalf("unmarshal second child push: %v", err)
+	}
+	if pushEnv.Type != daemon.MsgPushMessage {
+		t.Fatalf("expected push_message for second child, got %s", pushEnv.Type)
+	}
+
+	readEnv2, _ := daemon.NewEnvelope("read-serial-second", daemon.MsgReadMessages, &daemon.ReadMessagesPayload{Limit: 10})
+	readResp2 := sendAndRead(t, connWorker, scannerWorker, readEnv2)
+	if readResp2.Type != daemon.MsgResponse {
+		t.Fatalf("expected read_messages response after release, got %s", readResp2.Type)
+	}
+	var readPayload2 daemon.ResponsePayload
+	if err := readResp2.DecodePayload(&readPayload2); err != nil {
+		t.Fatalf("decode released read payload: %v", err)
+	}
+	if err := json.Unmarshal(readPayload2.Data, &readMessages); err != nil {
+		t.Fatalf("unmarshal released read response: %v", err)
+	}
+	if len(readMessages.Messages) != 1 || readMessages.Messages[0].TaskID != second.Task.ID {
+		t.Fatalf("expected released second child only, got %+v", readMessages.Messages)
 	}
 }
 

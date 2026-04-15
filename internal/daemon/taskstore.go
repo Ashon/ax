@@ -77,11 +77,20 @@ func TasksFilePath(socketPath string) string {
 // Create inserts a new pending task, applying default start mode and priority
 // when omitted, and persists the updated store before returning the live task.
 func (s *TaskStore) Create(title, description, assignee, createdBy, parentTaskID string, startMode types.TaskStartMode, priority types.TaskPriority, staleAfterSeconds int) (*types.Task, error) {
+	return s.CreateWithWorkflow(title, description, assignee, createdBy, parentTaskID, startMode, types.TaskWorkflowParallel, priority, staleAfterSeconds, "")
+}
+
+// CreateWithWorkflow is the daemon's internal constructor used when richer
+// dispatch and sequencing metadata must be persisted with the task record.
+func (s *TaskStore) CreateWithWorkflow(title, description, assignee, createdBy, parentTaskID string, startMode types.TaskStartMode, workflowMode types.TaskWorkflowMode, priority types.TaskPriority, staleAfterSeconds int, dispatchBody string) (*types.Task, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if startMode == "" {
 		startMode = types.TaskStartDefault
+	}
+	if workflowMode == "" {
+		workflowMode = types.TaskWorkflowParallel
 	}
 	if priority == "" {
 		priority = types.TaskPriorityNormal
@@ -98,10 +107,14 @@ func (s *TaskStore) Create(title, description, assignee, createdBy, parentTaskID
 		Version:           1,
 		Status:            types.TaskPending,
 		StartMode:         startMode,
+		WorkflowMode:      workflowMode,
 		Priority:          priority,
 		StaleAfterSeconds: staleAfterSeconds,
 		CreatedAt:         now,
 		UpdatedAt:         now,
+	}
+	if trimmed := strings.TrimSpace(dispatchBody); trimmed != "" {
+		task.DispatchMessage = formatTaskDispatchMessage(task.ID, trimmed)
 	}
 	s.tasks[task.ID] = task
 	if task.ParentTaskID != "" {
@@ -401,12 +414,16 @@ func (s *TaskStore) Snapshot() []types.Task {
 
 // Refresh rewrites every stored task through transform and persists the updated
 // snapshots. Daemon observability fields are refreshed through this hook.
-func (s *TaskStore) Refresh(transform func(types.Task) types.Task) {
+func (s *TaskStore) Refresh(transform func(types.Task, map[string]types.Task) types.Task) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	snapshots := make(map[string]types.Task, len(s.tasks))
 	for id, task := range s.tasks {
-		s.tasks[id] = taskFromSnapshot(transform(snapshotTask(task)))
+		snapshots[id] = snapshotTask(task)
+	}
+	for id, task := range snapshots {
+		s.tasks[id] = taskFromSnapshot(transform(task, snapshots))
 	}
 	s.persist()
 }
@@ -417,6 +434,7 @@ func snapshotTask(task *types.Task) types.Task {
 	cp.Logs = make([]types.TaskLog, len(task.Logs))
 	copy(cp.Logs, task.Logs)
 	cp.Rollup = copyTaskRollup(task.Rollup)
+	cp.Sequence = copyTaskSequence(task.Sequence)
 	return cp
 }
 
@@ -426,6 +444,7 @@ func taskFromSnapshot(task types.Task) *types.Task {
 	cp.Logs = make([]types.TaskLog, len(task.Logs))
 	copy(cp.Logs, task.Logs)
 	cp.Rollup = copyTaskRollup(task.Rollup)
+	cp.Sequence = copyTaskSequence(task.Sequence)
 	return &cp
 }
 
@@ -691,6 +710,7 @@ func copyTask(task *types.Task) *types.Task {
 	cp.Logs = make([]types.TaskLog, len(task.Logs))
 	copy(cp.Logs, task.Logs)
 	cp.Rollup = copyTaskRollup(task.Rollup)
+	cp.Sequence = copyTaskSequence(task.Sequence)
 	return &cp
 }
 
@@ -703,5 +723,13 @@ func copyTaskRollup(rollup *types.TaskRollup) *types.TaskRollup {
 		ts := *rollup.LastChildUpdateAt
 		cp.LastChildUpdateAt = &ts
 	}
+	return &cp
+}
+
+func copyTaskSequence(sequence *types.TaskSequenceInfo) *types.TaskSequenceInfo {
+	if sequence == nil {
+		return nil
+	}
+	cp := *sequence
 	return &cp
 }

@@ -227,6 +227,9 @@ func (d *Daemon) handleEnvelope(conn net.Conn, env *Envelope, workspace *string)
 	case MsgCreateTask:
 		return d.handleCreateTaskEnvelope(env, *workspace)
 
+	case MsgStartTask:
+		return d.handleStartTaskEnvelope(env, *workspace)
+
 	case MsgUpdateTask:
 		return d.handleUpdateTaskEnvelope(env, *workspace)
 
@@ -345,6 +348,9 @@ func (d *Daemon) taskRunnableReason(task types.Task, pendingCount int, now time.
 	if task.Status != types.TaskPending {
 		return ""
 	}
+	if task.Sequence != nil && task.Sequence.State == types.TaskSequenceWaitingTurn {
+		return ""
+	}
 	if task.LastDispatchAt == nil || task.ClaimedAt != nil {
 		return ""
 	}
@@ -372,15 +378,86 @@ func countTaskMessages(messages []types.Message, taskID string) int {
 }
 
 func (d *Daemon) refreshTaskSnapshots() {
-	d.taskStore.Refresh(d.enrichTask)
+	d.taskStore.Refresh(d.enrichTaskWithSnapshot)
+}
+
+func (d *Daemon) taskSnapshotsByID() map[string]types.Task {
+	tasks := d.taskStore.Snapshot()
+	snapshot := make(map[string]types.Task, len(tasks))
+	for _, task := range tasks {
+		snapshot[task.ID] = task
+	}
+	return snapshot
 }
 
 func (d *Daemon) enrichTask(task types.Task) types.Task {
+	return d.enrichTaskWithSnapshot(task, d.taskSnapshotsByID())
+}
+
+func (d *Daemon) enrichTaskWithSnapshot(task types.Task, snapshot map[string]types.Task) types.Task {
+	if task.WorkflowMode == "" {
+		task.WorkflowMode = types.TaskWorkflowParallel
+	}
+	task.Sequence = d.computeTaskSequenceInfo(task, snapshot)
 	task.StaleInfo = d.computeTaskStaleInfo(task)
 	if task.Priority == "" {
 		task.Priority = types.TaskPriorityNormal
 	}
 	return task
+}
+
+func (d *Daemon) computeTaskSequenceInfo(task types.Task, snapshot map[string]types.Task) *types.TaskSequenceInfo {
+	parentID := strings.TrimSpace(task.ParentTaskID)
+	if parentID == "" {
+		return nil
+	}
+	parent, ok := snapshot[parentID]
+	if !ok {
+		return nil
+	}
+	mode := parent.WorkflowMode
+	if mode == "" {
+		mode = types.TaskWorkflowParallel
+	}
+	if mode != types.TaskWorkflowSerial {
+		return nil
+	}
+
+	position := 0
+	for idx, childID := range parent.ChildTaskIDs {
+		if childID == task.ID {
+			position = idx + 1
+			break
+		}
+	}
+	if position == 0 {
+		return nil
+	}
+
+	info := &types.TaskSequenceInfo{
+		Mode:     mode,
+		State:    types.TaskSequenceReady,
+		Position: position,
+	}
+	if task.LastDispatchAt != nil || task.ClaimedAt != nil || task.Status == types.TaskInProgress || task.Status == types.TaskBlocked || isTerminalTaskStatus(task.Status) {
+		info.State = types.TaskSequenceReleased
+		return info
+	}
+
+	for _, childID := range parent.ChildTaskIDs[:position-1] {
+		sibling, ok := snapshot[childID]
+		if !ok || sibling.RemovedAt != nil {
+			continue
+		}
+		if isTerminalTaskStatus(sibling.Status) {
+			continue
+		}
+		info.State = types.TaskSequenceWaitingTurn
+		info.WaitingOnTaskID = sibling.ID
+		return info
+	}
+
+	return info
 }
 
 func (d *Daemon) computeTaskStaleInfo(task types.Task) *types.TaskStaleInfo {
@@ -412,7 +489,12 @@ func (d *Daemon) computeTaskStaleInfo(task types.Task) *types.TaskStaleInfo {
 		PendingMessages: pendingCount,
 		LastMessageAt:   lastMessageAt,
 	}
-	if task.ClaimedAt != nil {
+	if task.Sequence != nil && task.Sequence.State == types.TaskSequenceWaitingTurn {
+		info.ClaimState = string(types.TaskSequenceWaitingTurn)
+		info.ClaimStateNote = fmt.Sprintf("serial workflow is holding dispatch until prior child task %s becomes terminal", task.Sequence.WaitingOnTaskID)
+		info.Reason = info.ClaimStateNote
+		info.RecommendedAction = "finish, fail, or cancel the earlier child task before expecting this task to dispatch"
+	} else if task.ClaimedAt != nil {
 		info.ClaimState = "claimed"
 		info.ClaimStateNote = fmt.Sprintf("first task-flow action recorded by %s via %s", task.ClaimedBy, task.ClaimSource)
 	} else if task.LastDispatchAt != nil {
@@ -472,6 +554,9 @@ func (d *Daemon) computeTaskStaleInfo(task types.Task) *types.TaskStaleInfo {
 			info.RecommendedAction = "recover, redispatch, or reroute the task unless the assignee promptly emits an in-task update"
 		}
 	case task.Status == types.TaskPending && task.ClaimedAt == nil && task.LastDispatchAt == nil:
+		if task.Sequence != nil && task.Sequence.State == types.TaskSequenceWaitingTurn {
+			break
+		}
 		if info.Reason == "" {
 			info.Reason = "task is pending and undispatched"
 		}
