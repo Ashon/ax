@@ -29,7 +29,7 @@ func registerMessageTools(srv *server.MCPServer, client *DaemonClient, configPat
 			mcp.WithDescription("Send a message to all other workspace agents."),
 			mcp.WithString("message", mcp.Required(), mcp.Description("Message to broadcast")),
 		),
-		broadcastMessageHandler(client),
+		broadcastMessageHandler(client, configPath),
 	)
 
 	srv.AddTool(
