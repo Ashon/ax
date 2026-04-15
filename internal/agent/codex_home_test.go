@@ -84,6 +84,37 @@ workspaces:
 	}
 }
 
+func TestPrepareCodexHomeForLaunchFreshRemovesStaleState(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	codexHome, err := PrepareCodexHome("ws", "/tmp/workspace", "/tmp/ax.sock", "/tmp/ax", "")
+	if err != nil {
+		t.Fatalf("PrepareCodexHome: %v", err)
+	}
+	stalePath := filepath.Join(codexHome, "sessions", "stale.json")
+	if err := os.MkdirAll(filepath.Dir(stalePath), 0o755); err != nil {
+		t.Fatalf("mkdir stale dir: %v", err)
+	}
+	if err := os.WriteFile(stalePath, []byte("stale"), 0o644); err != nil {
+		t.Fatalf("write stale file: %v", err)
+	}
+
+	refreshedHome, err := PrepareCodexHomeForLaunch("ws", "/tmp/workspace", "/tmp/ax.sock", "/tmp/ax", "", true)
+	if err != nil {
+		t.Fatalf("PrepareCodexHomeForLaunch: %v", err)
+	}
+	if refreshedHome != codexHome {
+		t.Fatalf("expected refreshed home %q, got %q", codexHome, refreshedHome)
+	}
+	if _, err := os.Stat(stalePath); !os.IsNotExist(err) {
+		t.Fatalf("expected stale state %q to be removed, stat err=%v", stalePath, err)
+	}
+	if _, err := os.Stat(filepath.Join(refreshedHome, "config.toml")); err != nil {
+		t.Fatalf("expected regenerated config.toml, got stat err=%v", err)
+	}
+}
+
 func TestUpsertTopLevelKeyReplacesExistingValue(t *testing.T) {
 	content := "model = \"gpt-5.4\"\nmodel_reasoning_effort = \"medium\"\n[projects.\"/tmp/demo\"]\ntrust_level = \"trusted\"\n"
 	updated := upsertTopLevelKey(content, "model_reasoning_effort", `"xhigh"`)

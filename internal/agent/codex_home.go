@@ -52,6 +52,15 @@ func PrepareCodexHome(workspace, dir, socketPath, axBin, configPath string) (str
 	return codexHome, nil
 }
 
+func PrepareCodexHomeForLaunch(workspace, dir, socketPath, axBin, configPath string, fresh bool) (string, error) {
+	if fresh {
+		if err := RemoveCodexHome(workspace, dir); err != nil {
+			return "", err
+		}
+	}
+	return PrepareCodexHome(workspace, dir, socketPath, axBin, configPath)
+}
+
 func CodexHomePath(workspace, dir string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {

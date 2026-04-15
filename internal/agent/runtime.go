@@ -17,11 +17,16 @@ var supportedRuntimeNames = []string{
 	RuntimeCodex,
 }
 
+type LaunchOptions struct {
+	ExtraArgs  []string
+	FreshStart bool
+}
+
 type Runtime interface {
 	Name() string
 	InstructionFile() string
-	Launch(dir, workspace, socketPath, axBin, configPath string) error
-	UserCommand(dir, workspace, socketPath, axBin, configPath string) (string, error)
+	Launch(dir, workspace, socketPath, axBin, configPath string, options LaunchOptions) error
+	UserCommand(dir, workspace, socketPath, axBin, configPath string, options LaunchOptions) (string, error)
 }
 
 func NormalizeRuntime(name string) string {
@@ -77,14 +82,30 @@ func InstructionFile(name string) (string, error) {
 }
 
 func Run(name, workspace, socketPath, configPath string) error {
+	return RunWithOptions(name, workspace, socketPath, configPath, LaunchOptions{})
+}
+
+func RunWithArgs(name, workspace, socketPath, configPath string, extraArgs []string) error {
+	return RunWithOptions(name, workspace, socketPath, configPath, LaunchOptions{ExtraArgs: extraArgs})
+}
+
+func RunWithOptions(name, workspace, socketPath, configPath string, options LaunchOptions) error {
 	dir, err := CurrentDir()
 	if err != nil {
 		return err
 	}
-	return RunInDir(name, dir, workspace, socketPath, configPath)
+	return RunInDirWithOptions(name, dir, workspace, socketPath, configPath, options)
 }
 
 func RunInDir(name, dir, workspace, socketPath, configPath string) error {
+	return RunInDirWithOptions(name, dir, workspace, socketPath, configPath, LaunchOptions{})
+}
+
+func RunInDirWithArgs(name, dir, workspace, socketPath, configPath string, extraArgs []string) error {
+	return RunInDirWithOptions(name, dir, workspace, socketPath, configPath, LaunchOptions{ExtraArgs: extraArgs})
+}
+
+func RunInDirWithOptions(name, dir, workspace, socketPath, configPath string, options LaunchOptions) error {
 	runtime, err := Get(name)
 	if err != nil {
 		return err
@@ -93,13 +114,21 @@ func RunInDir(name, dir, workspace, socketPath, configPath string) error {
 	if err != nil {
 		return err
 	}
-	return runtime.Launch(dir, workspace, socketPath, axBin, configPath)
+	return runtime.Launch(dir, workspace, socketPath, axBin, configPath, options)
 }
 
 func BuildUserCommand(name, dir, workspace, socketPath, axBin, configPath string) (string, error) {
+	return BuildUserCommandWithOptions(name, dir, workspace, socketPath, axBin, configPath, LaunchOptions{})
+}
+
+func BuildUserCommandWithArgs(name, dir, workspace, socketPath, axBin, configPath string, extraArgs []string) (string, error) {
+	return BuildUserCommandWithOptions(name, dir, workspace, socketPath, axBin, configPath, LaunchOptions{ExtraArgs: extraArgs})
+}
+
+func BuildUserCommandWithOptions(name, dir, workspace, socketPath, axBin, configPath string, options LaunchOptions) (string, error) {
 	runtime, err := Get(name)
 	if err != nil {
 		return "", err
 	}
-	return runtime.UserCommand(filepath.Clean(dir), workspace, socketPath, axBin, configPath)
+	return runtime.UserCommand(filepath.Clean(dir), workspace, socketPath, axBin, configPath, options)
 }
