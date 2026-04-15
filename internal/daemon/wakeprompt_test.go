@@ -5,23 +5,28 @@ import (
 	"testing"
 )
 
-func TestWakePromptIncludesLoopGuard(t *testing.T) {
+func TestWakePromptIncludesOnlyDynamicDispatchHints(t *testing.T) {
 	prompt := WakePrompt("ax.orchestrator", false)
 
 	for _, want := range []string{
+		"`read_messages`",
 		`send_message(to="ax.orchestrator")`,
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("wake prompt missing %q: %q", want, prompt)
+		}
+	}
+
+	for _, unwanted := range []string{
 		"ACK",
 		"set_status",
-		"새 작업 결과나 필요한 정보가 있을 때만 회신",
-		"이전과 실질적으로 동일한 메시지",
-		"이전 응답과 실질적으로 동일하면 회신하지",
 		"repeated summary/repeated confirmation",
 		"`update_task(..., status=\"in_progress\"",
 		"owner mismatch",
 		"concise current-status re-ask",
 	} {
-		if !strings.Contains(prompt, want) {
-			t.Fatalf("wake prompt missing %q: %q", want, prompt)
+		if strings.Contains(prompt, unwanted) {
+			t.Fatalf("wake prompt unexpectedly contains %q: %q", unwanted, prompt)
 		}
 	}
 }
@@ -33,8 +38,7 @@ func TestWakePromptIncludesFreshContextInstructions(t *testing.T) {
 		"fresh-context",
 		"`Task ID:`",
 		"`get_task`",
-		"`start_mode`가 `fresh`",
-		"structured evidence와 함께 completion",
+		"이전 대화 문맥을 이어받았다고 가정하지 말고",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("fresh wake prompt missing %q: %q", want, prompt)
