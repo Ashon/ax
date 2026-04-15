@@ -405,6 +405,22 @@ func (c *DaemonClient) SetStatus(status string) error {
 	return err
 }
 
+func (c *DaemonClient) ControlLifecycle(configPath, name string, action types.LifecycleAction) (*daemon.ControlLifecycleResponse, error) {
+	resp, err := c.sendRequest(daemon.MsgControlLifecycle, &daemon.ControlLifecyclePayload{
+		ConfigPath: configPath,
+		Name:       name,
+		Action:     action,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var result daemon.ControlLifecycleResponse
+	if err := decodeResponseData(resp, &result); err != nil {
+		return nil, fmt.Errorf("decode control_lifecycle response: %w", err)
+	}
+	return &result, nil
+}
+
 func (c *DaemonClient) SetSharedValue(key, value string) error {
 	_, err := c.sendRequest(daemon.MsgSetShared, &daemon.SetSharedPayload{
 		Key:   key,

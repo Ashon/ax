@@ -25,6 +25,16 @@ func (t Tokens) Add(o Tokens) Tokens {
 	}
 }
 
+// Sub returns the difference between two Tokens values.
+func (t Tokens) Sub(o Tokens) Tokens {
+	return Tokens{
+		Input:         t.Input - o.Input,
+		Output:        t.Output - o.Output,
+		CacheRead:     t.CacheRead - o.CacheRead,
+		CacheCreation: t.CacheCreation - o.CacheCreation,
+	}
+}
+
 // MCPProxyMetrics captures transcript-derived MCP overhead proxy signals.
 // PromptTokens is an estimate derived from MCP attachment text injected into
 // the prompt; ToolUseTokens/Turns track assistant turns that invoked MCP tools.
@@ -43,6 +53,18 @@ func (m MCPProxyMetrics) Add(o MCPProxyMetrics) MCPProxyMetrics {
 		PromptSignals: m.PromptSignals + o.PromptSignals,
 		ToolUseTokens: m.ToolUseTokens + o.ToolUseTokens,
 		ToolUseTurns:  m.ToolUseTurns + o.ToolUseTurns,
+	}
+	out.Total = out.PromptTokens + out.ToolUseTokens
+	return out
+}
+
+// Sub returns the difference between two MCP proxy metric values.
+func (m MCPProxyMetrics) Sub(o MCPProxyMetrics) MCPProxyMetrics {
+	out := MCPProxyMetrics{
+		PromptTokens:  m.PromptTokens - o.PromptTokens,
+		PromptSignals: m.PromptSignals - o.PromptSignals,
+		ToolUseTokens: m.ToolUseTokens - o.ToolUseTokens,
+		ToolUseTurns:  m.ToolUseTurns - o.ToolUseTurns,
 	}
 	out.Total = out.PromptTokens + out.ToolUseTokens
 	return out

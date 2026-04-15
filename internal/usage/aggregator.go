@@ -22,16 +22,37 @@ type Aggregator struct {
 	turns         int64
 
 	parseErrors int64
+	requests    map[string]*assistantRequestState
+}
+
+type assistantRequestState struct {
+	model    string
+	tokens   Tokens
+	usesMCP  bool
+	mcpProxy MCPProxyMetrics
+}
+
+type ingestResult struct {
+	UsageObserved bool
+	TokensDelta   Tokens
+	MCPDelta      MCPProxyMetrics
+	TurnDelta     int64
 }
 
 // NewAggregator returns an empty aggregator.
 func NewAggregator() *Aggregator {
-	return &Aggregator{byModel: map[string]*ModelTotals{}}
+	return &Aggregator{
+		byModel:  map[string]*ModelTotals{},
+		requests: map[string]*assistantRequestState{},
+	}
 }
 
 // Reset clears accumulated state (used when the active session file changes).
 func (a *Aggregator) Reset() {
-	*a = Aggregator{byModel: map[string]*ModelTotals{}}
+	*a = Aggregator{
+		byModel:  map[string]*ModelTotals{},
+		requests: map[string]*assistantRequestState{},
+	}
 }
 
 // SessionID returns the most recent session id observed, or "".
@@ -43,9 +64,10 @@ func (a *Aggregator) ParseErrors() int64 { return a.parseErrors }
 // Turns returns the number of usage-bearing turns ingested.
 func (a *Aggregator) Turns() int64 { return a.turns }
 
-// Ingest folds a parsed record into the running totals. Returns true if
-// the record carried a usage payload and was counted.
-func (a *Aggregator) Ingest(r parsedRecord) bool {
+// Ingest folds a parsed record into the running totals and returns the
+// effective delta after request-level de-duplication.
+func (a *Aggregator) Ingest(r parsedRecord) ingestResult {
+	result := ingestResult{UsageObserved: r.HasUsage}
 	if r.SessionID != "" {
 		a.sessionID = r.SessionID
 	}
@@ -58,25 +80,65 @@ func (a *Aggregator) Ingest(r parsedRecord) bool {
 		tsCopy := ts
 		a.lastActivity = &tsCopy
 	}
-	if r.MCPProxy.Total > 0 {
-		a.cumulativeMCP = a.cumulativeMCP.Add(r.MCPProxy)
-		a.currentMCP = r.MCPProxy
-	}
 	if !r.HasUsage {
-		return false
+		if r.MCPProxy != (MCPProxyMetrics{}) {
+			a.cumulativeMCP = a.cumulativeMCP.Add(r.MCPProxy)
+			a.currentMCP = r.MCPProxy
+			result.MCPDelta = r.MCPProxy
+		}
+		return result
 	}
-	a.cumulative = a.cumulative.Add(r.Tokens)
+
 	a.currentTokens = r.Tokens
 	a.currentModel = r.Model
-	a.turns++
-	mt, ok := a.byModel[r.Model]
-	if !ok {
-		mt = &ModelTotals{Model: r.Model}
-		a.byModel[r.Model] = mt
+
+	key := r.requestKey()
+	if key == "" {
+		result.TokensDelta = r.Tokens
+		result.MCPDelta = r.MCPProxy
+		result.TurnDelta = 1
+		a.applyUsageDelta("", Tokens{}, r.Model, r.Tokens, result.TurnDelta)
+		if result.MCPDelta != (MCPProxyMetrics{}) {
+			a.cumulativeMCP = a.cumulativeMCP.Add(result.MCPDelta)
+			a.currentMCP = result.MCPDelta
+		}
+		return result
 	}
-	mt.Totals = mt.Totals.Add(r.Tokens)
-	mt.Turns++
-	return true
+
+	state, ok := a.requests[key]
+	if !ok {
+		state = &assistantRequestState{}
+		a.requests[key] = state
+		result.TurnDelta = 1
+	}
+
+	prevModel := state.model
+	prevTokens := state.tokens
+	prevMCP := state.mcpProxy
+	if r.MCPProxy.ToolUseTurns > 0 {
+		state.usesMCP = true
+	}
+	state.model = r.Model
+	state.tokens = r.Tokens
+	if state.usesMCP {
+		total := state.tokens.Total()
+		state.mcpProxy = MCPProxyMetrics{
+			Total:         total,
+			ToolUseTokens: total,
+			ToolUseTurns:  1,
+		}
+	} else {
+		state.mcpProxy = MCPProxyMetrics{}
+	}
+
+	result.TokensDelta = state.tokens.Sub(prevTokens)
+	a.applyUsageDelta(prevModel, prevTokens, state.model, state.tokens, result.TurnDelta)
+	result.MCPDelta = state.mcpProxy.Sub(prevMCP)
+	if result.MCPDelta != (MCPProxyMetrics{}) {
+		a.cumulativeMCP = a.cumulativeMCP.Add(result.MCPDelta)
+		a.currentMCP = state.mcpProxy
+	}
+	return result
 }
 
 // IngestLine parses and ingests a single jsonl line. Malformed lines
@@ -87,7 +149,40 @@ func (a *Aggregator) IngestLine(line []byte) bool {
 		a.parseErrors++
 		return false
 	}
-	return a.Ingest(rec)
+	return a.Ingest(rec).UsageObserved
+}
+
+func (a *Aggregator) applyUsageDelta(prevModel string, prevTokens Tokens, nextModel string, nextTokens Tokens, turnDelta int64) {
+	a.cumulative = a.cumulative.Add(nextTokens.Sub(prevTokens))
+	a.turns += turnDelta
+
+	switch {
+	case prevModel == "" || prevModel == nextModel:
+		mt := a.ensureModel(nextModel)
+		mt.Totals = mt.Totals.Add(nextTokens.Sub(prevTokens))
+		mt.Turns += turnDelta
+	default:
+		prev := a.ensureModel(prevModel)
+		prev.Totals = prev.Totals.Sub(prevTokens)
+		prev.Turns--
+		if prev.Turns == 0 && prev.Totals == (Tokens{}) {
+			delete(a.byModel, prevModel)
+		}
+
+		next := a.ensureModel(nextModel)
+		next.Totals = next.Totals.Add(nextTokens)
+		next.Turns++
+	}
+}
+
+func (a *Aggregator) ensureModel(model string) *ModelTotals {
+	mt, ok := a.byModel[model]
+	if ok {
+		return mt
+	}
+	mt = &ModelTotals{Model: model}
+	a.byModel[model] = mt
+	return mt
 }
 
 // Snapshot materializes the current state into a WorkspaceUsage value.

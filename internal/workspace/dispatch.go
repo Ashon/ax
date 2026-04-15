@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/ashon/ax/internal/config"
-	"github.com/ashon/ax/internal/daemon"
+	"github.com/ashon/ax/internal/daemonutil"
 	"github.com/ashon/ax/internal/tmux"
 )
 
@@ -27,7 +27,7 @@ func DispatchRunnableWork(socketPath, configPath, target, sender string, fresh b
 	if err := EnsureDispatchTarget(socketPath, configPath, target, fresh); err != nil {
 		return err
 	}
-	if err := workspaceWakeSession(target, daemon.WakePrompt(sender, fresh)); err != nil {
+	if err := workspaceWakeSession(target, daemonutil.WakePrompt(sender, fresh)); err != nil {
 		return fmt.Errorf("wake %q: %w", target, err)
 	}
 	return nil
@@ -116,5 +116,5 @@ func ensureOrchestratorDispatchTarget(socketPath, configPath string, entry Desir
 	if workspaceSessionExists(entry.Name) {
 		return nil
 	}
-	return EnsureOrchestrator(entry.Node, entry.ParentName, daemon.ExpandSocketPath(socketPath), configPath, true)
+	return EnsureOrchestrator(entry.Node, entry.ParentName, daemonutil.ExpandSocketPath(socketPath), configPath, true)
 }

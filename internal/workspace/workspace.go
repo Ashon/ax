@@ -6,7 +6,7 @@ import (
 
 	"github.com/ashon/ax/internal/agent"
 	"github.com/ashon/ax/internal/config"
-	"github.com/ashon/ax/internal/daemon"
+	"github.com/ashon/ax/internal/daemonutil"
 	"github.com/ashon/ax/internal/tmux"
 )
 
@@ -26,7 +26,7 @@ type Manager struct {
 
 func NewManager(socketPath, configPath string) *Manager {
 	return &Manager{
-		socketPath: daemon.ExpandSocketPath(socketPath),
+		socketPath: daemonutil.ExpandSocketPath(socketPath),
 		configPath: configPath,
 	}
 }
@@ -40,7 +40,7 @@ func EnsureArtifacts(name string, ws config.Workspace, socketPath, configPath st
 	if err := os.MkdirAll(ws.Dir, 0o755); err != nil {
 		return fmt.Errorf("create workspace dir: %w", err)
 	}
-	if err := WriteMCPConfig(ws.Dir, name, daemon.ExpandSocketPath(socketPath), configPath); err != nil {
+	if err := WriteMCPConfig(ws.Dir, name, daemonutil.ExpandSocketPath(socketPath), configPath); err != nil {
 		return fmt.Errorf("write mcp config: %w", err)
 	}
 	if err := WriteInstructions(ws.Dir, name, runtime, ws.Instructions); err != nil {

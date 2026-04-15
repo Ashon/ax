@@ -96,3 +96,55 @@ func TestQueryHistory_UsesWorkspaceHintAndSessionForAttribution(t *testing.T) {
 		t.Fatalf("cli unavailable reason=%q", cliWS.UnavailableReason)
 	}
 }
+
+func TestQueryHistory_DedupesRepeatedAssistantRequestFrames(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	workspaceDir := filepath.Join(home, "work", "ax")
+	if err := os.MkdirAll(workspaceDir, 0o755); err != nil {
+		t.Fatalf("mkdir workspace: %v", err)
+	}
+	projectDir, err := ProjectPath(workspaceDir)
+	if err != nil {
+		t.Fatalf("project path: %v", err)
+	}
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project dir: %v", err)
+	}
+
+	path := filepath.Join(projectDir, "sess-1.jsonl")
+	thinking := fmt.Sprintf(`{"type":"assistant","timestamp":"2026-04-11T05:45:28Z","sessionId":"sess-1","cwd":"%s","requestId":"req-1","message":{"id":"msg-1","role":"assistant","model":"claude-opus-4-6","content":[{"type":"thinking","thinking":""}],"usage":{"input_tokens":3,"output_tokens":26,"cache_read_input_tokens":100,"cache_creation_input_tokens":0}}}`, workspaceDir)
+	tool := fmt.Sprintf(`{"type":"assistant","timestamp":"2026-04-11T05:45:29Z","sessionId":"sess-1","cwd":"%s","requestId":"req-1","message":{"id":"msg-1","role":"assistant","model":"claude-opus-4-6","content":[{"type":"tool_use","name":"mcp__ax__read_messages","input":{}}],"usage":{"input_tokens":3,"output_tokens":26,"cache_read_input_tokens":100,"cache_creation_input_tokens":0}}}`, workspaceDir)
+	final := fmt.Sprintf(`{"type":"assistant","timestamp":"2026-04-11T05:45:30Z","sessionId":"sess-1","cwd":"%s","requestId":"req-1","message":{"id":"msg-1","role":"assistant","model":"claude-opus-4-6","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":3,"output_tokens":40,"cache_read_input_tokens":100,"cache_creation_input_tokens":0}}}`, workspaceDir)
+	writeFile(t, path, thinking+"\n"+tool+"\n"+final+"\n")
+
+	resp, err := QueryHistory([]WorkspaceBinding{{Name: "ax.daemon", Dir: workspaceDir}}, HistoryQuery{
+		Since:      time.Date(2026, 4, 11, 5, 40, 0, 0, time.UTC),
+		Until:      time.Date(2026, 4, 11, 6, 0, 0, 0, time.UTC),
+		BucketSize: 5 * time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("QueryHistory: %v", err)
+	}
+	if len(resp.Workspaces) != 1 {
+		t.Fatalf("workspaces=%d, want 1", len(resp.Workspaces))
+	}
+	ws := resp.Workspaces[0]
+	if !ws.Available {
+		t.Fatalf("workspace unavailable: %+v", ws)
+	}
+	if len(ws.RecentBuckets) != 1 {
+		t.Fatalf("buckets=%d, want 1", len(ws.RecentBuckets))
+	}
+	b := ws.RecentBuckets[0]
+	if b.Turns != 1 {
+		t.Fatalf("bucket turns=%d, want 1", b.Turns)
+	}
+	if b.Total != 143 {
+		t.Fatalf("bucket total=%d, want 143", b.Total)
+	}
+	if b.MCPProxy.ToolUseTokens != 143 || b.MCPProxy.ToolUseTurns != 1 {
+		t.Fatalf("bucket MCP=%+v, want tokens=143 turns=1", b.MCPProxy)
+	}
+}

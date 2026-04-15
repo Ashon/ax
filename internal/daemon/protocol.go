@@ -11,32 +11,33 @@ import (
 type MessageType string
 
 const (
-	MsgRegister       MessageType = "register"
-	MsgUnregister     MessageType = "unregister"
-	MsgSendMessage    MessageType = "send_message"
-	MsgBroadcast      MessageType = "broadcast"
-	MsgReadMessages   MessageType = "read_messages"
-	MsgListWorkspaces MessageType = "list_workspaces"
-	MsgSetStatus      MessageType = "set_status"
-	MsgSetShared      MessageType = "set_shared"
-	MsgGetShared      MessageType = "get_shared"
-	MsgListShared     MessageType = "list_shared"
-	MsgUsageTrends    MessageType = "usage_trends"
-	MsgCreateTask     MessageType = "create_task"
-	MsgStartTask      MessageType = "start_task"
-	MsgUpdateTask     MessageType = "update_task"
-	MsgGetTask        MessageType = "get_task"
-	MsgListTasks      MessageType = "list_tasks"
-	MsgCancelTask     MessageType = "cancel_task"
-	MsgRemoveTask     MessageType = "remove_task"
-	MsgInterveneTask  MessageType = "intervene_task"
-	MsgGetTeamState   MessageType = "get_team_state"
-	MsgDryRunTeam     MessageType = "dry_run_team_reconfigure"
-	MsgApplyTeam      MessageType = "apply_team_reconfigure"
-	MsgFinishTeam     MessageType = "finish_team_reconfigure"
-	MsgPushMessage    MessageType = "push_message"
-	MsgResponse       MessageType = "response"
-	MsgError          MessageType = "error"
+	MsgRegister         MessageType = "register"
+	MsgUnregister       MessageType = "unregister"
+	MsgSendMessage      MessageType = "send_message"
+	MsgBroadcast        MessageType = "broadcast"
+	MsgReadMessages     MessageType = "read_messages"
+	MsgListWorkspaces   MessageType = "list_workspaces"
+	MsgSetStatus        MessageType = "set_status"
+	MsgControlLifecycle MessageType = "control_lifecycle"
+	MsgSetShared        MessageType = "set_shared"
+	MsgGetShared        MessageType = "get_shared"
+	MsgListShared       MessageType = "list_shared"
+	MsgUsageTrends      MessageType = "usage_trends"
+	MsgCreateTask       MessageType = "create_task"
+	MsgStartTask        MessageType = "start_task"
+	MsgUpdateTask       MessageType = "update_task"
+	MsgGetTask          MessageType = "get_task"
+	MsgListTasks        MessageType = "list_tasks"
+	MsgCancelTask       MessageType = "cancel_task"
+	MsgRemoveTask       MessageType = "remove_task"
+	MsgInterveneTask    MessageType = "intervene_task"
+	MsgGetTeamState     MessageType = "get_team_state"
+	MsgDryRunTeam       MessageType = "dry_run_team_reconfigure"
+	MsgApplyTeam        MessageType = "apply_team_reconfigure"
+	MsgFinishTeam       MessageType = "finish_team_reconfigure"
+	MsgPushMessage      MessageType = "push_message"
+	MsgResponse         MessageType = "response"
+	MsgError            MessageType = "error"
 )
 
 // Envelope is the wire format for daemon <-> MCP server communication.
@@ -71,6 +72,12 @@ type ReadMessagesPayload struct {
 
 type SetStatusPayload struct {
 	Status string `json:"status"`
+}
+
+type ControlLifecyclePayload struct {
+	ConfigPath string                `json:"config_path,omitempty"`
+	Name       string                `json:"name"`
+	Action     types.LifecycleAction `json:"action"`
 }
 
 type SetSharedPayload struct {
@@ -185,6 +192,12 @@ type ErrorPayload struct {
 
 type ListWorkspacesResponse struct {
 	Workspaces []types.WorkspaceInfo `json:"workspaces"`
+}
+
+type ControlLifecycleResponse struct {
+	Target  types.LifecycleTarget `json:"target"`
+	Action  types.LifecycleAction `json:"action"`
+	Running bool                  `json:"running"`
 }
 
 type ReadMessagesResponse struct {

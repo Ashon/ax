@@ -12,7 +12,7 @@ import (
 
 	"github.com/ashon/ax/internal/agent"
 	"github.com/ashon/ax/internal/config"
-	"github.com/ashon/ax/internal/daemon"
+	"github.com/ashon/ax/internal/daemonutil"
 	"github.com/ashon/ax/internal/tmux"
 )
 
@@ -131,7 +131,7 @@ type sessionSnapshot struct {
 
 func NewReconciler(socketPath, configPath string) *Reconciler {
 	return &Reconciler{
-		socketPath: daemon.ExpandSocketPath(socketPath),
+		socketPath: daemonutil.ExpandSocketPath(socketPath),
 		configPath: cleanPath(configPath),
 		manager:    NewManager(socketPath, configPath),
 	}
@@ -139,7 +139,7 @@ func NewReconciler(socketPath, configPath string) *Reconciler {
 
 func BuildDesiredState(cfg *config.Config, tree *config.ProjectNode, socketPath, configPath string, includeRoot bool) (*DesiredState, error) {
 	desired := &DesiredState{
-		SocketPath:    daemon.ExpandSocketPath(socketPath),
+		SocketPath:    daemonutil.ExpandSocketPath(socketPath),
 		ConfigPath:    cleanPath(configPath),
 		Workspaces:    make(map[string]DesiredWorkspace),
 		Orchestrators: make(map[string]DesiredOrchestrator),

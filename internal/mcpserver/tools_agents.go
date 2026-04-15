@@ -24,4 +24,28 @@ func registerAgentTools(srv *server.MCPServer, client *DaemonClient, configPath 
 		),
 		inspectAgentHandler(client, configPath),
 	)
+
+	srv.AddTool(
+		mcp.NewTool("start_agent",
+			mcp.WithDescription("Start a configured workspace agent or managed child orchestrator by exact name. Root orchestrator lifecycle is not supported by this MCP surface."),
+			mcp.WithString("name", mcp.Required(), mcp.Description("Exact configured workspace or managed child orchestrator name")),
+		),
+		agentLifecycleHandler(client, configPath, agentLifecycleActionStart),
+	)
+
+	srv.AddTool(
+		mcp.NewTool("stop_agent",
+			mcp.WithDescription("Stop a configured workspace agent or managed child orchestrator by exact name. This removes the managed session and cleans generated artifacts for that target."),
+			mcp.WithString("name", mcp.Required(), mcp.Description("Exact configured workspace or managed child orchestrator name")),
+		),
+		agentLifecycleHandler(client, configPath, agentLifecycleActionStop),
+	)
+
+	srv.AddTool(
+		mcp.NewTool("restart_agent",
+			mcp.WithDescription("Restart a configured workspace agent or managed child orchestrator by exact name from a fresh managed session. Root orchestrator lifecycle is not supported by this MCP surface."),
+			mcp.WithString("name", mcp.Required(), mcp.Description("Exact configured workspace or managed child orchestrator name")),
+		),
+		agentLifecycleHandler(client, configPath, agentLifecycleActionRestart),
+	)
 }

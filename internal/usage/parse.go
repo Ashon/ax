@@ -17,11 +17,13 @@ type rawRecord struct {
 	SessionID  string         `json:"sessionId"`
 	Cwd        string         `json:"cwd"`
 	AgentID    string         `json:"agentId"`
+	RequestID  string         `json:"requestId"`
 	Attachment *rawAttachment `json:"attachment"`
 	Message    *rawMessage    `json:"message"`
 }
 
 type rawMessage struct {
+	ID      string          `json:"id"`
 	Role    string          `json:"role"`
 	Model   string          `json:"model"`
 	Usage   *rawUsage       `json:"usage"`
@@ -56,6 +58,8 @@ type parsedRecord struct {
 	SessionID string
 	Cwd       string
 	Timestamp time.Time
+	RequestID string
+	MessageID string
 	Model     string
 	Tokens    Tokens
 	MCPProxy  MCPProxyMetrics
@@ -86,9 +90,11 @@ func parsedRecordFromRaw(r rawRecord) parsedRecord {
 		SessionID: r.SessionID,
 		Cwd:       r.Cwd,
 		Timestamp: r.Timestamp,
+		RequestID: r.RequestID,
 	}
 	p.MCPProxy = attachmentMCPProxy(r.Attachment)
 	if r.Message != nil && r.Message.Usage != nil {
+		p.MessageID = r.Message.ID
 		p.Model = r.Message.Model
 		p.Tokens = Tokens{
 			Input:         r.Message.Usage.Input,
@@ -102,6 +108,16 @@ func parsedRecordFromRaw(r rawRecord) parsedRecord {
 		p.MCPProxy = p.MCPProxy.Add(messageMCPProxy(r.Message, p.Tokens, p.HasUsage))
 	}
 	return p
+}
+
+func (p parsedRecord) requestKey() string {
+	if p.RequestID != "" {
+		return "request:" + p.RequestID
+	}
+	if p.MessageID != "" {
+		return "message:" + p.MessageID
+	}
+	return ""
 }
 
 func attachmentMCPProxy(att *rawAttachment) MCPProxyMetrics {

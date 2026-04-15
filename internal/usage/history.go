@@ -315,11 +315,11 @@ func scanTranscript(path string, q HistoryQuery) (*transcriptSeries, error) {
 		}
 
 		rec := parsedRecordFromRaw(raw)
-		counted := agg.Ingest(rec)
+		effect := agg.Ingest(rec)
 		if rec.Timestamp.IsZero() || rec.Timestamp.Before(q.Since) || !rec.Timestamp.Before(q.Until) {
 			continue
 		}
-		if !counted && rec.MCPProxy.Total == 0 {
+		if effect.TurnDelta == 0 && effect.TokensDelta == (Tokens{}) && effect.MCPDelta == (MCPProxyMetrics{}) {
 			continue
 		}
 		start := rec.Timestamp.UTC().Truncate(q.BucketSize)
@@ -331,13 +331,15 @@ func scanTranscript(path string, q HistoryQuery) (*transcriptSeries, error) {
 			}
 			buckets[start] = b
 		}
-		if counted {
-			b.Tokens = b.Tokens.Add(rec.Tokens)
-			b.Total += rec.Tokens.Total()
-			b.Turns++
+		if effect.TokensDelta != (Tokens{}) {
+			b.Tokens = b.Tokens.Add(effect.TokensDelta)
+			b.Total += effect.TokensDelta.Total()
 		}
-		if rec.MCPProxy.Total > 0 {
-			b.MCPProxy = b.MCPProxy.Add(rec.MCPProxy)
+		if effect.TurnDelta != 0 {
+			b.Turns += effect.TurnDelta
+		}
+		if effect.MCPDelta != (MCPProxyMetrics{}) {
+			b.MCPProxy = b.MCPProxy.Add(effect.MCPDelta)
 		}
 	}
 	if err := scanner.Err(); err != nil {
