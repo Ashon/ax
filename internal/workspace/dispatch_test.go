@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDispatchRunnableWorkCreatesMissingWorkspaceSessionAndWakes(t *testing.T) {
@@ -31,6 +32,9 @@ func TestDispatchRunnableWorkCreatesMissingWorkspaceSessionAndWakes(t *testing.T
 			return fmt.Errorf("unexpected dir %q", dir)
 		}
 		return nil
+	}
+	workspaceSessionIdle = func(name string) bool {
+		return name == "worker" && sessionExists
 	}
 	workspaceWakeSession = func(target, prompt string) error {
 		woke = true
@@ -81,6 +85,9 @@ func TestDispatchRunnableWorkFreshWorkspaceRestartsBeforeWake(t *testing.T) {
 		sessionExists = true
 		return nil
 	}
+	workspaceSessionIdle = func(name string) bool {
+		return name == "worker" && sessionExists
+	}
 	workspaceWakeSession = func(target, prompt string) error {
 		steps = append(steps, "wake:"+target)
 		if !strings.Contains(prompt, "fresh-context") {
@@ -125,6 +132,9 @@ func TestDispatchRunnableWorkStartsMissingManagedOrchestrator(t *testing.T) {
 		}
 		return nil
 	}
+	workspaceSessionIdle = func(name string) bool {
+		return name == "team.orchestrator" && sessionExists
+	}
 	workspaceWakeSession = func(target, prompt string) error {
 		woke = true
 		if !sessionExists {
@@ -145,6 +155,78 @@ func TestDispatchRunnableWorkStartsMissingManagedOrchestrator(t *testing.T) {
 	}
 	if !woke {
 		t.Fatal("expected managed orchestrator to be woken")
+	}
+}
+
+func TestDispatchRunnableWorkWaitsForNewSessionPromptBeforeWake(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	configPath := writeDispatchConfig(t, home, "project: root\nworkspaces:\n  worker:\n    dir: ./worker\n    runtime: claude\n")
+
+	restoreWorkspaceSessionStubs(t)
+	sessionExists := false
+	idleChecks := 0
+	wakeIdleChecks := 0
+	dispatchTargetReadyTimeout = 5 * time.Millisecond
+	dispatchTargetReadyPollInterval = 1 * time.Millisecond
+	dispatchTargetReadySettleDelay = 0
+	dispatchTargetReadyFallbackDelay = 0
+
+	workspaceSessionExists = func(name string) bool {
+		return name == "worker" && sessionExists
+	}
+	workspaceCreateSessionWithArgsEnv = func(name, dir string, argv []string, env map[string]string) error {
+		sessionExists = true
+		return nil
+	}
+	workspaceSessionIdle = func(name string) bool {
+		if name != "worker" || !sessionExists {
+			return false
+		}
+		idleChecks++
+		return idleChecks >= 3
+	}
+	workspaceWakeSession = func(target, prompt string) error {
+		wakeIdleChecks = idleChecks
+		return nil
+	}
+
+	if err := DispatchRunnableWork("/tmp/ax.sock", configPath, "worker", "ax.orchestrator", false); err != nil {
+		t.Fatalf("dispatch runnable work: %v", err)
+	}
+
+	if wakeIdleChecks < 3 {
+		t.Fatalf("wake ran before startup prompt was observed: idle_checks=%d", wakeIdleChecks)
+	}
+}
+
+func TestDispatchRunnableWorkDoesNotWaitForExistingBusySession(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	configPath := writeDispatchConfig(t, home, "project: root\nworkspaces:\n  worker:\n    dir: ./worker\n    runtime: claude\n")
+
+	restoreWorkspaceSessionStubs(t)
+	idleChecks := 0
+
+	workspaceSessionExists = func(name string) bool {
+		return name == "worker"
+	}
+	workspaceSessionIdle = func(name string) bool {
+		idleChecks++
+		return false
+	}
+	workspaceWakeSession = func(target, prompt string) error {
+		return nil
+	}
+
+	if err := DispatchRunnableWork("/tmp/ax.sock", configPath, "worker", "ax.orchestrator", false); err != nil {
+		t.Fatalf("dispatch runnable work: %v", err)
+	}
+
+	if idleChecks != 0 {
+		t.Fatalf("expected existing session dispatch to skip startup wait, got %d idle checks", idleChecks)
 	}
 }
 

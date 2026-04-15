@@ -113,6 +113,12 @@ func restoreWorkspaceSessionStubs(t *testing.T) {
 	oldCreateSessionWithArgs := workspaceCreateSessionWithArgs
 	oldDestroySession := workspaceDestroySession
 	oldWakeSession := workspaceWakeSession
+	oldSessionIdle := workspaceSessionIdle
+	oldSleep := workspaceSleep
+	oldReadyTimeout := dispatchTargetReadyTimeout
+	oldReadyPollInterval := dispatchTargetReadyPollInterval
+	oldReadySettleDelay := dispatchTargetReadySettleDelay
+	oldReadyFallbackDelay := dispatchTargetReadyFallbackDelay
 
 	t.Cleanup(func() {
 		workspaceSessionExists = oldSessionExists
@@ -122,5 +128,11 @@ func restoreWorkspaceSessionStubs(t *testing.T) {
 		workspaceCreateSessionWithArgs = oldCreateSessionWithArgs
 		workspaceDestroySession = oldDestroySession
 		workspaceWakeSession = oldWakeSession
+		workspaceSessionIdle = oldSessionIdle
+		workspaceSleep = oldSleep
+		dispatchTargetReadyTimeout = oldReadyTimeout
+		dispatchTargetReadyPollInterval = oldReadyPollInterval
+		dispatchTargetReadySettleDelay = oldReadySettleDelay
+		dispatchTargetReadyFallbackDelay = oldReadyFallbackDelay
 	})
 }

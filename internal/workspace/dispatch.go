@@ -3,13 +3,22 @@ package workspace
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/ashon/ax/internal/config"
 	"github.com/ashon/ax/internal/daemonutil"
 	"github.com/ashon/ax/internal/tmux"
 )
 
-var workspaceWakeSession = tmux.WakeWorkspace
+var (
+	workspaceWakeSession             = tmux.WakeWorkspace
+	workspaceSessionIdle             = tmux.IsIdle
+	workspaceSleep                   = time.Sleep
+	dispatchTargetReadyTimeout       = 20 * time.Second
+	dispatchTargetReadyPollInterval  = 250 * time.Millisecond
+	dispatchTargetReadySettleDelay   = 300 * time.Millisecond
+	dispatchTargetReadyFallbackDelay = 1500 * time.Millisecond
+)
 
 // DispatchRunnableWork ensures the target session is ready to receive work and
 // then injects the standard wake prompt that tells the agent to process queued
@@ -24,13 +33,33 @@ func DispatchRunnableWork(socketPath, configPath, target, sender string, fresh b
 		return fmt.Errorf("dispatch sender is required")
 	}
 
+	needsStartupSync := fresh || !workspaceSessionExists(target)
 	if err := EnsureDispatchTarget(socketPath, configPath, target, fresh); err != nil {
 		return err
+	}
+	if needsStartupSync {
+		waitForDispatchTargetReady(target)
 	}
 	if err := workspaceWakeSession(target, daemonutil.WakePrompt(sender, fresh)); err != nil {
 		return fmt.Errorf("wake %q: %w", target, err)
 	}
 	return nil
+}
+
+func waitForDispatchTargetReady(target string) {
+	deadline := time.Now().Add(dispatchTargetReadyTimeout)
+	for time.Now().Before(deadline) {
+		if workspaceSessionIdle(target) {
+			if dispatchTargetReadySettleDelay > 0 {
+				workspaceSleep(dispatchTargetReadySettleDelay)
+			}
+			return
+		}
+		workspaceSleep(dispatchTargetReadyPollInterval)
+	}
+	if dispatchTargetReadyFallbackDelay > 0 {
+		workspaceSleep(dispatchTargetReadyFallbackDelay)
+	}
 }
 
 // EnsureDispatchTarget makes sure the named target session exists before a
