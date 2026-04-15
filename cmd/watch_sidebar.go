@@ -47,12 +47,7 @@ func (m watchModel) renderSidebar(w, h int) string {
 
 	// Title
 	title := headerStyle.Render(" agents ")
-	titleW := lipgloss.Width(title)
-	pad := innerW - titleW - 1
-	if pad < 0 {
-		pad = 0
-	}
-	topLine := borderClr.Render("╭─") + title + borderClr.Render(strings.Repeat("─", pad)+"╮")
+	topLine := renderPanelTopBorder(borderClr, title, innerW, watchAgentsPanelHelpCandidates()...)
 
 	var lines []string
 	stateNow := m.dataRefreshedAt

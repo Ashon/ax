@@ -184,12 +184,7 @@ func (m watchModel) renderStream(totalW, totalH int) string {
 	}
 
 	title := msgTitleStyle.Render(" messages ")
-	titleW := lipgloss.Width(title)
-	pad := innerW - titleW - 1
-	if pad < 0 {
-		pad = 0
-	}
-	topLine := msgBorderClr.Render("╭─") + title + msgBorderClr.Render(strings.Repeat("─", pad)+"╮")
+	topLine := renderPanelTopBorder(msgBorderClr, title, innerW, watchMessagePanelHelpCandidates(m.streamOnly)...)
 
 	var msgLines []string
 	start := 0
@@ -200,9 +195,11 @@ func (m watchModel) renderStream(totalW, totalH int) string {
 		ts := msgTimeStyle.Render(entry.Timestamp.Format("15:04:05"))
 		from := msgFromStyle.Render(entry.From)
 		to := msgToStyle.Render(entry.To)
-		content := strings.ReplaceAll(entry.Content, "\n", " ")
-		content = truncateStr(content, innerW-30)
-		msgLines = append(msgLines, fmt.Sprintf(" %s %s → %s: %s", ts, from, to, content))
+		content := sanitizeDisplayLine(strings.ReplaceAll(entry.Content, "\n", " "))
+		prefix := fmt.Sprintf(" %s %s → %s: ", ts, from, to)
+		contentW := max(0, innerW-lipgloss.Width(prefix))
+		line := prefix + fitDisplayText(content, contentW)
+		msgLines = append(msgLines, fitDisplayText(line, innerW))
 	}
 	if len(msgLines) == 0 {
 		msgLines = append(msgLines, msgTimeStyle.Render("  (no messages yet)"))
@@ -216,7 +213,7 @@ func (m watchModel) renderStream(totalW, totalH int) string {
 		}
 		visW := lipgloss.Width(line)
 		if visW > innerW {
-			line = truncateStr(line, innerW)
+			line = fitDisplayText(line, innerW)
 			visW = lipgloss.Width(line)
 		}
 		padding := innerW - visW
@@ -633,12 +630,7 @@ func (m watchModel) renderTokens(totalW, totalH int) string {
 	}
 
 	title := tokenTitleSty.Render(" tokens ")
-	titleW := lipgloss.Width(title)
-	pad := innerW - titleW - 1
-	if pad < 0 {
-		pad = 0
-	}
-	topLine := tokenBorderClr.Render("╭─") + title + tokenBorderClr.Render(strings.Repeat("─", pad)+"╮")
+	topLine := renderPanelTopBorder(tokenBorderClr, title, innerW, watchTokenPanelHelpCandidates(m.streamOnly)...)
 
 	entries := tokenEntriesFromMap(m.tokenData)
 	summary := summarizeTokenEntries(entries, len(m.sessions))
@@ -813,17 +805,24 @@ func renderTaskListLines(task types.Task, selected bool, width int) []string {
 
 // renderTaskSplitTopBorder draws the connected top border for the list/detail
 // split layout used when at least one task matches the current filter.
-func renderTaskSplitTopBorder(title string, listW, detailW int) string {
+func renderTaskSplitTopBorder(title string, listW, detailW int, helpCandidates ...string) string {
 	leftSegmentW := listW + 1
 	rightSegmentW := detailW + 1
 	titleSegment := fitDisplayText(title, max(0, leftSegmentW-1))
-	leftFill := leftSegmentW - 1 - lipgloss.Width(titleSegment)
+	help := renderPanelHelpSegment(leftSegmentW-lipgloss.Width(titleSegment)-2, helpCandidates...)
+	leftFill := leftSegmentW - lipgloss.Width(help) - lipgloss.Width(titleSegment) - 1
+	if leftFill < 0 {
+		help = ""
+		leftFill = leftSegmentW - lipgloss.Width(titleSegment) - 1
+	}
 	if leftFill < 0 {
 		leftFill = 0
 	}
 	return taskBorderClr.Render("╭─") +
 		titleSegment +
-		taskBorderClr.Render(strings.Repeat("─", leftFill)+"┬"+strings.Repeat("─", rightSegmentW)+"╮")
+		taskBorderClr.Render(strings.Repeat("─", leftFill)) +
+		help +
+		taskBorderClr.Render("┬"+strings.Repeat("─", rightSegmentW)+"╮")
 }
 
 // renderTaskSplitBottomBorder mirrors renderTaskSplitTopBorder so the divider
@@ -845,17 +844,12 @@ func (m watchModel) renderTasks(totalW, totalH int) string {
 
 	filtered := filterTasksCached(m.tasks, m.taskFilter, tasksCacheVersionFor(m.tasksPath))
 	title := taskTitleStyle.Render(fmt.Sprintf(" tasks %s %d/%d ", m.taskFilter.label(), len(filtered), len(m.tasks)))
-	titleW := lipgloss.Width(title)
 
 	var bodyLines []string
 	var topLine string
 	var botLine string
 	if len(filtered) == 0 {
-		pad := innerW - titleW - 1
-		if pad < 0 {
-			pad = 0
-		}
-		topLine = taskBorderClr.Render("╭─") + title + taskBorderClr.Render(strings.Repeat("─", pad)+"╮")
+		topLine = renderPanelTopBorder(taskBorderClr, title, innerW, watchTaskPanelHelpCandidates(m.streamOnly)...)
 		for i := 0; i < innerH; i++ {
 			line := ""
 			if i == 0 {
@@ -881,7 +875,7 @@ func (m watchModel) renderTasks(totalW, totalH int) string {
 			detailW = 24
 			listW = innerW - detailW - 3
 		}
-		topLine = renderTaskSplitTopBorder(title, listW, detailW)
+		topLine = renderTaskSplitTopBorder(title, listW, detailW, watchTaskPanelHelpCandidates(m.streamOnly)...)
 		botLine = renderTaskSplitBottomBorder(listW, detailW)
 
 		selectedIdx := clampIndex(m.taskSelected, len(filtered))

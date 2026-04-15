@@ -93,13 +93,14 @@ func TestWatchViewStreamOnlyHidesAgentsPane(t *testing.T) {
 	}
 
 	view := xansi.Strip(m.View())
+	lines := strings.Split(view, "\n")
 	if strings.Contains(view, "SELECTED PANE CONTENT") {
 		t.Fatalf("did not expect selected session pane content in stream-only view %q", view)
 	}
-	if strings.Contains(view, "╭─ agents ") {
+	if len(lines) > 0 && strings.Contains(lines[0], " agents ") {
 		t.Fatalf("did not expect agents sidebar in stream-only view %q", view)
 	}
-	if !strings.Contains(view, "╭─ tasks ") {
+	if !strings.Contains(view, " tasks active 1/1 ") {
 		t.Fatalf("expected tasks pane in stream-only view %q", view)
 	}
 }
@@ -141,7 +142,7 @@ func TestWatchViewDefaultSplitKeepsAgentsPane(t *testing.T) {
 	if !strings.Contains(view, "SELECTED PANE CONTENT") {
 		t.Fatalf("expected selected session pane content in split view %q", view)
 	}
-	if !strings.Contains(view, "╭─ agents ") {
+	if !strings.Contains(view, " agents ") {
 		t.Fatalf("expected agents sidebar in split view %q", view)
 	}
 }
@@ -269,12 +270,20 @@ func TestRenderSidebarShowsCompactRowAndSelectedDetail(t *testing.T) {
 	}
 
 	view := xansi.Strip(m.renderSidebar(38, 10))
-	for _, line := range strings.Split(view, "\n") {
+	lines := strings.Split(view, "\n")
+	for _, line := range lines {
 		if w := lipgloss.Width(line); w > 38 {
 			t.Fatalf("rendered sidebar line width %d exceeds pane width: %q", w, line)
 		}
 	}
+	if len(lines) == 0 {
+		t.Fatalf("expected sidebar header line in view %q", view)
+	}
+	if strings.Index(lines[0], " agents ") >= strings.Index(lines[0], "↑↓ agent") {
+		t.Fatalf("expected sidebar title before help in header %q", lines[0])
+	}
 	for _, want := range []string{
+		"↑↓ agent",
 		"codex",
 		"Inspecting divergence",
 		"↑1.2k ↓345",
@@ -532,6 +541,24 @@ func TestFooterTokenSummaryShowsTotalsIndependentOfTab(t *testing.T) {
 	}
 }
 
+func TestRenderMainShowsLeftHeaderHelp(t *testing.T) {
+	m := watchModel{}
+	view := xansi.Strip(m.renderMain("ax.cli", "ready", 80, 6))
+	lines := strings.Split(view, "\n")
+	if len(lines) == 0 {
+		t.Fatalf("expected main header line in view %q", view)
+	}
+	if strings.Index(lines[0], " ax.cli ") >= strings.Index(lines[0], "↑↓ agent") {
+		t.Fatalf("expected main title before help in header %q", lines[0])
+	}
+	if !strings.Contains(view, "↑↓ agent") {
+		t.Fatalf("expected left-side main help in view %q", view)
+	}
+	if !strings.Contains(view, " tab ") && !strings.Contains(view, "tab") {
+		t.Fatalf("expected tab control hint in main view %q", view)
+	}
+}
+
 func TestParseAgentTokensStripsANSIFromClaudeUsageLine(t *testing.T) {
 	content := "\x1b[38;5;174m✻\x1b[39m \x1b[38;5;174mWhisking… \x1b[38;5;246m(1m\x1b[39m \x1b[38;5;246m50s\x1b[39m \x1b[38;5;246m·\x1b[39m \x1b[38;5;246m↓\x1b[39m \x1b[38;5;246m4.5k\x1b[39m \x1b[38;5;246mtokens\x1b[39m \x1b[38;5;246m·\x1b[39m \x1b[38;5;249mthinking\x1b[39m)\n"
 
@@ -657,6 +684,8 @@ func TestRenderTasksShowsAttentionBadgesInList(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
+		"[/]",
+		" f ",
 		"DIVERGED",
 		"STALE",
 		"Q2",
@@ -693,6 +722,9 @@ func TestRenderTasksConnectsSplitPaneDividerToBorders(t *testing.T) {
 	lines := strings.Split(view, "\n")
 	if len(lines) < 3 {
 		t.Fatalf("expected multi-line split view, got %q", view)
+	}
+	if strings.Index(lines[0], " tasks active 1/1 ") >= strings.Index(lines[0], "[/]") {
+		t.Fatalf("expected task title before help in split header %q", lines[0])
 	}
 	topJunction := runeIndex(lines[0], '┬', 1)
 	bottomJunction := runeIndex(lines[len(lines)-1], '┴', 1)
@@ -775,7 +807,7 @@ func TestRenderTokensCombinesLiveUsageAndHistoryTrend(t *testing.T) {
 	}
 
 	view := xansi.Strip(m.renderTokens(100, 12))
-	for _, want := range []string{"live usage", "history 24h", "ax.cli", "↑1.2k", "24H", "TREND", "MCP~", "~480", "~60"} {
+	for _, want := range []string{"tab", "live usage", "history 24h", "ax.cli", "↑1.2k", "24H", "TREND", "MCP~", "~480", "~60"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected %q in tokens view %q", want, view)
 		}
@@ -810,6 +842,57 @@ func TestRenderTokensKeepsLiveUsageVisibleWhenHistoryUnavailable(t *testing.T) {
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected %q in tokens view %q", want, view)
 		}
+	}
+}
+
+func TestRenderMessagesShowsHeaderHelp(t *testing.T) {
+	now := time.Now()
+	m := watchModel{
+		msgHistory: []daemon.HistoryEntry{
+			{Timestamp: now, From: "ax.orchestrator", To: "ax.cli", Content: "Task dispatch"},
+		},
+	}
+
+	view := xansi.Strip(m.renderStream(90, 8))
+	lines := strings.Split(view, "\n")
+	if len(lines) == 0 {
+		t.Fatalf("expected messages header line in view %q", view)
+	}
+	if strings.Index(lines[0], " messages ") >= strings.Index(lines[0], "tab") {
+		t.Fatalf("expected messages title before help in header %q", lines[0])
+	}
+	for _, want := range []string{"tab", "q", "messages"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected %q in messages view %q", want, view)
+		}
+	}
+}
+
+func TestRenderMessagesUsesAvailableWidthForLongRows(t *testing.T) {
+	now := time.Now()
+	m := watchModel{
+		msgHistory: []daemon.HistoryEntry{
+			{
+				Timestamp: now,
+				From:      "ax.orchestrator",
+				To:        "ax.workspace",
+				Content:   strings.Repeat("payload ", 16),
+			},
+		},
+	}
+
+	view := xansi.Strip(m.renderStream(80, 6))
+	lines := strings.Split(view, "\n")
+	if len(lines) < 2 {
+		t.Fatalf("expected message body line in view %q", view)
+	}
+	body := strings.TrimSuffix(strings.TrimPrefix(lines[1], "│"), "│")
+	trailingGap := len(body) - len(strings.TrimRight(body, " "))
+	if trailingGap > 4 {
+		t.Fatalf("expected message content to use available width, trailing gap=%d in %q", trailingGap, lines[1])
+	}
+	if !strings.Contains(lines[1], "payload") {
+		t.Fatalf("expected message payload in line %q", lines[1])
 	}
 }
 

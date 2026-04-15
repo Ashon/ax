@@ -16,6 +16,7 @@ var (
 	unselectedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("7"))
 	headerStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
 	borderClr       = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	panelHelpStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	statStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
 	msgBorderClr    = lipgloss.NewStyle().Foreground(lipgloss.Color("5"))
 	msgTitleStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("5"))
@@ -113,18 +114,104 @@ func (m watchModel) renderSelectedStream(totalW, totalH int) string {
 	}
 }
 
+func renderPanelHelpSegment(width int, candidates ...string) string {
+	if width < 3 {
+		return ""
+	}
+	helpText := firstFittingDisplay(width-2, candidates...)
+	if helpText == "" {
+		return ""
+	}
+	help := panelHelpStyle.Render(" " + helpText + " ")
+	if lipgloss.Width(help) > width {
+		return ""
+	}
+	return help
+}
+
+func renderPanelTopBorder(borderStyle lipgloss.Style, title string, innerW int, helpCandidates ...string) string {
+	help := renderPanelHelpSegment(innerW-lipgloss.Width(title)-2, helpCandidates...)
+	fill := innerW - lipgloss.Width(help) - lipgloss.Width(title) - 1
+	if fill < 0 {
+		help = ""
+		fill = innerW - lipgloss.Width(title) - 1
+	}
+	if fill < 0 {
+		fill = 0
+	}
+	return borderStyle.Render("╭─") + title + borderStyle.Render(strings.Repeat("─", fill)) + help + borderStyle.Render("╮")
+}
+
+func watchAgentsPanelHelpCandidates() []string {
+	return []string{
+		"↑↓ agent · x interrupt · q quit",
+		"↑↓ agent · x · q",
+		"↑↓ agent · x",
+	}
+}
+
+func watchMainPanelHelpCandidates() []string {
+	return []string{
+		"↑↓ agent · x interrupt · tab stream · q quit",
+		"↑↓ agent · x · tab · q",
+		"↑↓ agent · x",
+	}
+}
+
+func watchMessagePanelHelpCandidates(streamOnly bool) []string {
+	if streamOnly {
+		return []string{
+			"tab tasks/tokens · q quit",
+			"tab tasks/tokens · q",
+			"tab · q",
+		}
+	}
+	return []string{
+		"tab tasks/tokens/off · q quit",
+		"tab tasks/tokens/off · q",
+		"tab · q",
+	}
+}
+
+func watchTaskPanelHelpCandidates(streamOnly bool) []string {
+	if streamOnly {
+		return []string{
+			"[/] task · f filter · tab msgs/tokens · q quit",
+			"[/] task · f filter · tab · q",
+			"[/] task · f · tab · q",
+			"[/] · f · tab",
+		}
+	}
+	return []string{
+		"[/] task · f filter · tab msgs/tokens/off · q quit",
+		"[/] task · f filter · tab · q",
+		"[/] task · f · tab · q",
+		"[/] · f · tab",
+	}
+}
+
+func watchTokenPanelHelpCandidates(streamOnly bool) []string {
+	if streamOnly {
+		return []string{
+			"tab msgs/tasks · q quit",
+			"tab msgs/tasks · q",
+			"tab · q",
+		}
+	}
+	return []string{
+		"tab msgs/tasks/off · q quit",
+		"tab msgs/tasks/off · q",
+		"tab · q",
+	}
+}
+
 func (m watchModel) renderMain(ws, content string, w, h int) string {
 	innerW := w - 2 // subtract left + right border
 	innerH := h - 2
 
 	// Title
 	title := headerStyle.Render(fmt.Sprintf(" %s ", ws))
-	titleW := lipgloss.Width(title)
-	pad := innerW - titleW - 1
-	if pad < 0 {
-		pad = 0
-	}
-	topLine := borderClr.Render("╭─") + title + borderClr.Render(strings.Repeat("─", pad)+"╮")
+	topLine := renderPanelTopBorder(borderClr, title, innerW, watchMainPanelHelpCandidates()...)
 
 	// Content
 	lines := strings.Split(content, "\n")
