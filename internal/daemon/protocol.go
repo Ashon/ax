@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/ashon/ax/internal/types"
+	"github.com/ashon/ax/internal/usage"
 )
 
 type MessageType string
@@ -20,6 +21,7 @@ const (
 	MsgSetShared      MessageType = "set_shared"
 	MsgGetShared      MessageType = "get_shared"
 	MsgListShared     MessageType = "list_shared"
+	MsgUsageTrends    MessageType = "usage_trends"
 	MsgCreateTask     MessageType = "create_task"
 	MsgUpdateTask     MessageType = "update_task"
 	MsgGetTask        MessageType = "get_task"
@@ -74,6 +76,17 @@ type SetSharedPayload struct {
 
 type GetSharedPayload struct {
 	Key string `json:"key"`
+}
+
+type UsageTrendWorkspace struct {
+	Workspace string `json:"workspace"`
+	Cwd       string `json:"cwd"`
+}
+
+type UsageTrendsPayload struct {
+	Workspaces    []UsageTrendWorkspace `json:"workspaces"`
+	SinceMinutes  int                   `json:"since_minutes,omitempty"`
+	BucketMinutes int                   `json:"bucket_minutes,omitempty"`
 }
 
 // Task payloads
@@ -149,6 +162,10 @@ type GetSharedResponse struct {
 
 type ListSharedResponse struct {
 	Values map[string]string `json:"values"`
+}
+
+type UsageTrendsResponse struct {
+	Trends []usage.WorkspaceTrend `json:"trends"`
 }
 
 // Task responses

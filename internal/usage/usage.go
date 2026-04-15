@@ -10,6 +10,11 @@ type Tokens struct {
 	CacheCreation int64 `json:"cache_creation"`
 }
 
+// Total returns the summed token count across all tracked dimensions.
+func (t Tokens) Total() int64 {
+	return t.Input + t.Output + t.CacheRead + t.CacheCreation
+}
+
 // Add returns the sum of two Tokens.
 func (t Tokens) Add(o Tokens) Tokens {
 	return Tokens{

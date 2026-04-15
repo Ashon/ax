@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/ashon/ax/internal/daemon"
 	"github.com/ashon/ax/internal/types"
+	"github.com/ashon/ax/internal/usage"
 	"github.com/google/uuid"
 )
 
@@ -25,10 +27,12 @@ const DefaultRequestTimeout = 60 * time.Second
 
 // DaemonClient connects to the ax daemon via Unix socket.
 type DaemonClient struct {
-	socketPath string
-	workspace  string
-	conn       net.Conn
-	writeMu    sync.Mutex
+	socketPath  string
+	workspace   string
+	dir         string
+	description string
+	conn        net.Conn
+	writeMu     sync.Mutex
 
 	// Pending request tracking
 	pending   map[string]chan requestResult
@@ -68,6 +72,11 @@ func (c *DaemonClient) SetRequestTimeout(d time.Duration) {
 	c.requestTimeout = d
 }
 
+func (c *DaemonClient) SetRegistrationInfo(dir, description string) {
+	c.dir = dir
+	c.description = description
+}
+
 func (c *DaemonClient) Connect() error {
 	conn, err := net.Dial("unix", c.socketPath)
 	if err != nil {
@@ -80,9 +89,18 @@ func (c *DaemonClient) Connect() error {
 	// Start reader goroutine
 	go c.readLoop()
 
+	dir := c.dir
+	if dir == "" {
+		if wd, err := os.Getwd(); err == nil {
+			dir = wd
+		}
+	}
+
 	// Register with daemon
 	_, err = c.sendRequest(daemon.MsgRegister, &daemon.RegisterPayload{
-		Workspace: c.workspace,
+		Workspace:   c.workspace,
+		Dir:         dir,
+		Description: c.description,
 	})
 	if err != nil {
 		conn.Close()
@@ -419,6 +437,22 @@ func (c *DaemonClient) ListSharedValues() (map[string]string, error) {
 		return nil, fmt.Errorf("decode list_shared response: %w", err)
 	}
 	return result.Values, nil
+}
+
+func (c *DaemonClient) GetUsageTrends(workspaces []daemon.UsageTrendWorkspace, sinceMinutes, bucketMinutes int) ([]usage.WorkspaceTrend, error) {
+	resp, err := c.sendRequest(daemon.MsgUsageTrends, &daemon.UsageTrendsPayload{
+		Workspaces:    workspaces,
+		SinceMinutes:  sinceMinutes,
+		BucketMinutes: bucketMinutes,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var respPayload daemon.ResponsePayload
+	resp.DecodePayload(&respPayload)
+	var result daemon.UsageTrendsResponse
+	json.Unmarshal(respPayload.Data, &result)
+	return result.Trends, nil
 }
 
 // Task operations

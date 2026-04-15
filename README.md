@@ -70,11 +70,23 @@ go install github.com/ashon/ax@latest
 
 `$GOPATH/bin`(기본값 `~/go/bin`)이 `PATH`에 포함되어 있어야 합니다.
 
-### 소스에서 빌드
+### 소스에서 설치
 
 ```bash
 git clone https://github.com/Ashon/ax.git
 cd ax
+
+# make build + copy to $(go env GOPATH)/bin/ax
+make install
+```
+
+`make install`은 빌드 후 바이너리를 `$(go env GOPATH)/bin/ax`에 복사하고, 이어서 `codesign -s - $(go env GOPATH)/bin/ax`를 실행합니다.
+
+- macOS에서는 ad-hoc codesign까지 포함한 기본 설치 경로입니다.
+- `$(go env GOPATH)/bin`(보통 `~/go/bin`)이 `PATH`에 포함되어 있어야 합니다.
+- `codesign`이 없는 환경(예: 일반적인 Linux)에서는 수동 설치를 사용하세요.
+
+```bash
 make build
 sudo mv ax /usr/local/bin/
 ```
@@ -201,21 +213,28 @@ ax init --global
 
 ## CLI 레퍼런스
 
-### 주요 명령어
+### top-level 명령어 (`ax --help`)
 
 ```bash
-ax init                          # 프로젝트 초기화 (기본: claude)
-ax init --codex                  # 프로젝트 초기화 (codex 기반)
-ax up                            # 데몬 + 워크스페이스 + 서브 오케스트레이터 기동
-ax refresh                       # MCP/프롬프트 산출물 리프레시
-ax down                          # 전체 종료
-ax status                        # 프로젝트 상태 표시
 ax claude                        # 루트 오케스트레이터로 Claude CLI 실행 (포그라운드)
 ax codex                         # 루트 오케스트레이터로 Codex CLI 실행 (포그라운드)
+ax completion <shell>            # 셸 자동완성 스크립트 생성
+ax daemon                        # 데몬 관리
+ax down                          # 전체 종료
+ax init                          # 프로젝트 초기화 (기본: setup agent)
+ax messages                      # CLI inbox(_cli) 메시지 조회
+ax refresh                       # 생성된 ax 파일 리프레시 및 세션 reconcile
+ax send <workspace> <message>    # 메시지 전송 + 에이전트 wake
+ax status                        # 전체 상태 표시
+ax tasks                         # task 상태/진행 조회
+ax up                            # 데몬 + 워크스페이스 기동
 ax watch                         # 워크스페이스 모니터링 TUI
+ax workspace                     # 워크스페이스 관리
 ```
 
-### 워크스페이스 관리
+숨김 내부 명령으로 `ax run-agent`, `ax mcp-server`, deprecated `ax messages-json`가 있습니다.
+
+### 워크스페이스/작업/메시지 관련 하위 명령
 
 ```bash
 ax workspace list                # 활성 워크스페이스 목록
@@ -223,12 +242,10 @@ ax workspace attach <name>       # tmux 세션에 연결
 ax workspace create <name>       # 워크스페이스 수동 생성
 ax workspace destroy <name>      # 워크스페이스 삭제
 ax workspace interrupt <name>    # 에이전트에 Escape 전송
-```
-
-### 메시지 전송
-
-```bash
-ax send <workspace> <message>    # 메시지 전송 + 에이전트 웨이크
+ax tasks show <task-id>          # task 상세, 로그, 관련 메시지 표시
+ax tasks activity [task-id]      # task activity 타임라인 표시
+ax messages --json               # CLI inbox 메시지를 JSON으로 출력
+ax messages --wait               # CLI inbox 메시지 대기
 ```
 
 ### 설정 산출물 리프레시
@@ -267,12 +284,11 @@ ax daemon status                 # 상태 확인
 
 에이전트들은 MCP 도구를 통해 서로 통신합니다:
 
-- `send_message` / `read_messages`: 비동기 메시지 전달
-- `request`: 동기 요청-응답 (전송 후 응답 대기)
-- `broadcast_message`: 전체 브로드캐스트
-- `list_workspaces` / `list_agents`: 활성 에이전트 조회
-- `set_status`: 상태 공유
-- `set_shared_value` / `get_shared_value`: 전역 키-값 공유
+- 조회/탐색: `list_agents`, `inspect_agent`, `list_workspaces`
+- 메시징: `send_message`, `read_messages`, `broadcast_message`, `request`
+- 상태/공유값: `set_status`, `set_shared_value`, `get_shared_value`, `list_shared_values`
+- tmux 제어: `interrupt_agent`, `send_keys`
+- 작업 관리: `create_task`, `update_task`, `get_task`, `list_tasks`
 
 메시지 전송 시 대상 에이전트가 자동으로 wake 됩니다 (tmux 키 입력 주입).
 

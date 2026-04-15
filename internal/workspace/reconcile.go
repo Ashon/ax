@@ -180,10 +180,7 @@ func appendDesiredOrchestrators(desired *DesiredState, node *config.ProjectNode,
 		if err != nil {
 			return err
 		}
-		prompt, err := buildOrchestratorPromptContent(node, node.Prefix, parentName, runtime)
-		if err != nil {
-			return err
-		}
+		prompt := buildOrchestratorPromptContent(node, node.Prefix, parentName)
 		desired.Orchestrators[selfName] = DesiredOrchestrator{
 			Name:           selfName,
 			Node:           node,

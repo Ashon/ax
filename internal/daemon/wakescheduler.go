@@ -27,6 +27,8 @@ type pendingWake struct {
 	NextRetry time.Time
 }
 
+// WakeState is a snapshot of the retry metadata for a workspace with a pending
+// wake request.
 type WakeState struct {
 	Workspace string
 	Sender    string
@@ -54,6 +56,8 @@ func wakeBackoff(attempt int) time.Duration {
 	return delays[attempt]
 }
 
+// NewWakeScheduler creates a scheduler that tracks unread-message wake retries
+// for active workspaces.
 func NewWakeScheduler(queue *MessageQueue, logger *log.Logger) *WakeScheduler {
 	return &WakeScheduler{
 		pending: make(map[string]*pendingWake),
@@ -90,6 +94,8 @@ func (s *WakeScheduler) Cancel(workspace string) {
 	delete(s.pending, workspace)
 }
 
+// State returns a copy of the current retry state for a workspace, if one is
+// pending.
 func (s *WakeScheduler) State(workspace string) (WakeState, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
