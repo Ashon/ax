@@ -24,6 +24,7 @@ type Message struct {
 	From      string    `json:"from"`
 	To        string    `json:"to"`
 	Content   string    `json:"content"`
+	TaskID    string    `json:"task_id,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -78,13 +79,13 @@ type TeamReconfigureChange struct {
 }
 
 type TeamOverlay struct {
-	DisableRootOrchestrator *bool                         `json:"disable_root_orchestrator,omitempty"`
-	AddedWorkspaces         map[string]TeamWorkspaceSpec  `json:"added_workspaces,omitempty"`
-	RemovedWorkspaces       map[string]bool               `json:"removed_workspaces,omitempty"`
-	DisabledWorkspaces      map[string]bool               `json:"disabled_workspaces,omitempty"`
-	AddedChildren           map[string]TeamChildSpec      `json:"added_children,omitempty"`
-	RemovedChildren         map[string]bool               `json:"removed_children,omitempty"`
-	DisabledChildren        map[string]bool               `json:"disabled_children,omitempty"`
+	DisableRootOrchestrator *bool                        `json:"disable_root_orchestrator,omitempty"`
+	AddedWorkspaces         map[string]TeamWorkspaceSpec `json:"added_workspaces,omitempty"`
+	RemovedWorkspaces       map[string]bool              `json:"removed_workspaces,omitempty"`
+	DisabledWorkspaces      map[string]bool              `json:"disabled_workspaces,omitempty"`
+	AddedChildren           map[string]TeamChildSpec     `json:"added_children,omitempty"`
+	RemovedChildren         map[string]bool              `json:"removed_children,omitempty"`
+	DisabledChildren        map[string]bool              `json:"disabled_children,omitempty"`
 }
 
 type TeamConfiguredState struct {
@@ -112,14 +113,14 @@ type TeamApplyReport struct {
 }
 
 type TeamReconfigureState struct {
-	TeamID              string               `json:"team_id"`
-	BaseConfigPath      string               `json:"base_config_path"`
-	EffectiveConfigPath string               `json:"effective_config_path"`
-	FeatureEnabled      bool                 `json:"feature_enabled"`
-	Revision            int                  `json:"revision"`
-	Overlay             TeamOverlay          `json:"overlay,omitempty"`
-	Desired             TeamConfiguredState  `json:"desired"`
-	LastApply           *TeamApplyReport     `json:"last_apply,omitempty"`
+	TeamID              string              `json:"team_id"`
+	BaseConfigPath      string              `json:"base_config_path"`
+	EffectiveConfigPath string              `json:"effective_config_path"`
+	FeatureEnabled      bool                `json:"feature_enabled"`
+	Revision            int                 `json:"revision"`
+	Overlay             TeamOverlay         `json:"overlay,omitempty"`
+	Desired             TeamConfiguredState `json:"desired"`
+	LastApply           *TeamApplyReport    `json:"last_apply,omitempty"`
 }
 
 type TeamReconfigurePlan struct {
@@ -131,9 +132,9 @@ type TeamReconfigurePlan struct {
 }
 
 type TeamApplyTicket struct {
-	Token         string               `json:"token"`
-	Plan          TeamReconfigurePlan  `json:"plan"`
-	ReconcileMode TeamReconcileMode    `json:"reconcile_mode"`
+	Token         string              `json:"token"`
+	Plan          TeamReconfigurePlan `json:"plan"`
+	ReconcileMode TeamReconcileMode   `json:"reconcile_mode"`
 }
 
 // Task management types
@@ -143,8 +144,10 @@ type TaskStatus string
 const (
 	TaskPending    TaskStatus = "pending"
 	TaskInProgress TaskStatus = "in_progress"
+	TaskBlocked    TaskStatus = "blocked"
 	TaskCompleted  TaskStatus = "completed"
 	TaskFailed     TaskStatus = "failed"
+	TaskCancelled  TaskStatus = "cancelled"
 )
 
 type TaskStartMode string
@@ -169,13 +172,28 @@ type Task struct {
 	Description       string         `json:"description,omitempty"`
 	Assignee          string         `json:"assignee"`
 	CreatedBy         string         `json:"created_by"`
+	ParentTaskID      string         `json:"parent_task_id,omitempty"`
+	ChildTaskIDs      []string       `json:"child_task_ids,omitempty"`
+	Version           int64          `json:"version"`
 	Status            TaskStatus     `json:"status"`
 	StartMode         TaskStartMode  `json:"start_mode"`
 	Priority          TaskPriority   `json:"priority,omitempty"`
 	StaleAfterSeconds int            `json:"stale_after_seconds,omitempty"`
+	DispatchCount     int            `json:"dispatch_count,omitempty"`
+	AttemptCount      int            `json:"attempt_count,omitempty"`
+	LastDispatchAt    *time.Time     `json:"last_dispatch_at,omitempty"`
+	LastAttemptAt     *time.Time     `json:"last_attempt_at,omitempty"`
+	NextRetryAt       *time.Time     `json:"next_retry_at,omitempty"`
+	ClaimedAt         *time.Time     `json:"claimed_at,omitempty"`
+	ClaimedBy         string         `json:"claimed_by,omitempty"`
+	ClaimSource       string         `json:"claim_source,omitempty"`
 	Result            string         `json:"result,omitempty"`
 	Logs              []TaskLog      `json:"logs,omitempty"`
+	Rollup            *TaskRollup    `json:"rollup,omitempty"`
 	StaleInfo         *TaskStaleInfo `json:"stale_info,omitempty"`
+	RemovedAt         *time.Time     `json:"removed_at,omitempty"`
+	RemovedBy         string         `json:"removed_by,omitempty"`
+	RemoveReason      string         `json:"remove_reason,omitempty"`
 	CreatedAt         time.Time      `json:"created_at"`
 	UpdatedAt         time.Time      `json:"updated_at"`
 }
@@ -184,6 +202,22 @@ type TaskLog struct {
 	Timestamp time.Time `json:"timestamp"`
 	Workspace string    `json:"workspace"`
 	Message   string    `json:"message"`
+}
+
+type TaskRollup struct {
+	TotalChildren             int        `json:"total_children"`
+	PendingChildren           int        `json:"pending_children,omitempty"`
+	InProgressChildren        int        `json:"in_progress_children,omitempty"`
+	BlockedChildren           int        `json:"blocked_children,omitempty"`
+	CompletedChildren         int        `json:"completed_children,omitempty"`
+	FailedChildren            int        `json:"failed_children,omitempty"`
+	CancelledChildren         int        `json:"cancelled_children,omitempty"`
+	TerminalChildren          int        `json:"terminal_children,omitempty"`
+	ActiveChildren            int        `json:"active_children,omitempty"`
+	LastChildUpdateAt         *time.Time `json:"last_child_update_at,omitempty"`
+	AllChildrenTerminal       bool       `json:"all_children_terminal,omitempty"`
+	NeedsParentReconciliation bool       `json:"needs_parent_reconciliation,omitempty"`
+	Summary                   string     `json:"summary,omitempty"`
 }
 
 type TaskStaleInfo struct {
@@ -197,6 +231,11 @@ type TaskStaleInfo struct {
 	WakePending         bool       `json:"wake_pending,omitempty"`
 	WakeAttempts        int        `json:"wake_attempts,omitempty"`
 	NextWakeRetryAt     *time.Time `json:"next_wake_retry_at,omitempty"`
+	ClaimState          string     `json:"claim_state,omitempty"`
+	ClaimStateNote      string     `json:"claim_state_note,omitempty"`
+	Runnable            bool       `json:"runnable,omitempty"`
+	RunnableReason      string     `json:"runnable_reason,omitempty"`
+	RecoveryEligible    bool       `json:"recovery_eligible,omitempty"`
 	StateDivergence     bool       `json:"state_divergence,omitempty"`
 	StateDivergenceNote string     `json:"state_divergence_note,omitempty"`
 }
