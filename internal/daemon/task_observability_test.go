@@ -165,7 +165,7 @@ func TestEnrichTaskNotesFreshStartBarrierUntilWorkerReconnects(t *testing.T) {
 	workerConnA, workerConnB := net.Pipe()
 	defer workerConnA.Close()
 	defer workerConnB.Close()
-	d.registry.Register("worker", "", "", workerConnA)
+	d.registry.Register("worker", "", "", "", 0, workerConnA)
 
 	time.Sleep(10 * time.Millisecond)
 	now := time.Now()

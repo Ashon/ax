@@ -16,6 +16,7 @@ const (
 	DefaultConfigFile           = "config.yaml"
 	LegacyConfigFile            = "ax.yaml"
 	DefaultCodexReasoningEffort = "xhigh"
+	DefaultIdleTimeoutMinutes   = 15
 )
 
 type Config struct {
@@ -24,6 +25,7 @@ type Config struct {
 	DisableRootOrchestrator        bool                 `yaml:"disable_root_orchestrator,omitempty"`
 	ExperimentalMCPTeamReconfigure bool                 `yaml:"experimental_mcp_team_reconfigure,omitempty"`
 	CodexModelReasoningEffort      string               `yaml:"codex_model_reasoning_effort,omitempty"`
+	IdleTimeoutMinutes             int                  `yaml:"idle_timeout_minutes,omitempty"`
 	Children                       map[string]Child     `yaml:"children,omitempty"`
 	Workspaces                     map[string]Workspace `yaml:"workspaces"`
 }
@@ -84,6 +86,7 @@ func loadRecursive(path string, seen map[string]bool) (*Config, error) {
 		DisableRootOrchestrator:        cfg.DisableRootOrchestrator,
 		ExperimentalMCPTeamReconfigure: cfg.ExperimentalMCPTeamReconfigure,
 		CodexModelReasoningEffort:      strings.TrimSpace(cfg.CodexModelReasoningEffort),
+		IdleTimeoutMinutes:             cfg.IdleTimeoutMinutes,
 		Children:                       cfg.Children,
 		Workspaces:                     make(map[string]Workspace, len(cfg.Workspaces)),
 	}
@@ -170,6 +173,7 @@ func DefaultConfigForRuntime(projectName, runtime string) *Config {
 		Project:                   projectName,
 		OrchestratorRuntime:       runtime,
 		CodexModelReasoningEffort: DefaultCodexReasoningEffort,
+		IdleTimeoutMinutes:        DefaultIdleTimeoutMinutes,
 		Workspaces: map[string]Workspace{
 			"main": {
 				Dir:                       ".",
@@ -179,6 +183,13 @@ func DefaultConfigForRuntime(projectName, runtime string) *Config {
 			},
 		},
 	}
+}
+
+func (c *Config) IdleTimeoutMinutesOrDefault() int {
+	if c != nil && c.IdleTimeoutMinutes > 0 {
+		return c.IdleTimeoutMinutes
+	}
+	return DefaultIdleTimeoutMinutes
 }
 
 func (c *Config) CodexReasoningEffortForWorkspace(name string) string {

@@ -54,6 +54,8 @@ type RegisterPayload struct {
 	Workspace   string `json:"workspace"`
 	Dir         string `json:"dir,omitempty"`
 	Description string `json:"description,omitempty"`
+	ConfigPath  string `json:"config_path,omitempty"`
+	IdleTimeout int64  `json:"idle_timeout_seconds,omitempty"`
 }
 
 type SendMessagePayload struct {

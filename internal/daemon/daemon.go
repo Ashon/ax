@@ -115,6 +115,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	defer os.Remove(pidPath)
 
 	go d.wakeScheduler.Run(ctx)
+	go d.runIdleSleepLoop(ctx)
 
 	go func() {
 		<-ctx.Done()

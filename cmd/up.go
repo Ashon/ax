@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"sort"
 	"syscall"
 	"time"
 
@@ -15,9 +16,16 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var (
+	upEnsureDaemon                 = ensureDaemon
+	upEnsureWorkspaceArtifacts     = workspace.EnsureArtifacts
+	upRefreshOrchestratorArtifacts = refreshOrchestratorArtifacts
+	upRootOrchestratorDisabled     = rootOrchestratorDisabled
+)
+
 var upCmd = &cobra.Command{
 	Use:   "up",
-	Short: "Start daemon and all workspaces defined in ax config",
+	Short: "Start daemon and prepare on-demand workspace/orchestrator artifacts",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfgPath, err := resolveConfigPath()
 		if err != nil {
@@ -27,46 +35,65 @@ var upCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-
-		fmt.Printf("Project: %s\n\n", cfg.Project)
-
-		// Ensure daemon is running
-		if err := ensureDaemon(); err != nil {
-			return fmt.Errorf("start daemon: %w", err)
-		}
-		fmt.Println("Daemon: running")
-
-		// Create workspaces
-		fmt.Println("\nWorkspaces:")
-		mgr := workspace.NewManager(socketPath, cfgPath)
-		if err := mgr.CreateAll(cfg); err != nil {
-			return err
-		}
-
-		// Create orchestrator sessions for the full project tree
 		tree, err := config.LoadTree(cfgPath)
 		if err != nil {
 			return fmt.Errorf("load config tree: %w", err)
 		}
-		sp := daemon.ExpandSocketPath(socketPath)
-		fmt.Println("\nOrchestrators:")
-		if err := ensureOrchestrators(tree, sp, cfgPath); err != nil {
+
+		fmt.Printf("Project: %s\n\n", cfg.Project)
+
+		// Ensure daemon is running
+		if err := upEnsureDaemon(); err != nil {
+			return fmt.Errorf("start daemon: %w", err)
+		}
+		fmt.Println("Daemon: running")
+
+		// Prepare workspace artifacts for on-demand dispatch.
+		fmt.Println("\nWorkspaces:")
+		if err := prepareOnDemandWorkspaces(cfg, cfgPath); err != nil {
 			return err
 		}
 
-		disabledRoot, err := rootOrchestratorDisabled(cfgPath)
+		// Prepare orchestrator artifacts without starting sessions.
+		sp := daemon.ExpandSocketPath(socketPath)
+		fmt.Println("\nOrchestrators:")
+		if err := upRefreshOrchestratorArtifacts(tree, "", sp, cfgPath); err != nil {
+			return err
+		}
+		fmt.Println("  tree: ready (on-demand)")
+
+		disabledRoot, err := upRootOrchestratorDisabled(cfgPath)
 		if err != nil {
 			return err
 		}
 		if disabledRoot {
-			fmt.Println("\nManaged root orchestrator state is disabled by config; child/project orchestrators remain available.")
+			fmt.Println("\nManaged root orchestrator state is disabled by config.")
+			fmt.Println("Workspace and child/project orchestrator agents will start on demand when work is dispatched.")
 			fmt.Println("Run 'ax claude' or 'ax codex' to launch a foreground root orchestrator manually.")
 			return nil
 		}
 
 		fmt.Println("\nRun 'ax claude' or 'ax codex' to launch the root orchestrator CLI.")
+		fmt.Println("Workspace and child/project orchestrator agents will start on demand when messages or tasks are dispatched.")
 		return nil
 	},
+}
+
+func prepareOnDemandWorkspaces(cfg *config.Config, cfgPath string) error {
+	names := make([]string, 0, len(cfg.Workspaces))
+	for name := range cfg.Workspaces {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		ws := cfg.Workspaces[name]
+		if err := upEnsureWorkspaceArtifacts(name, ws, socketPath, cfgPath); err != nil {
+			return fmt.Errorf("prepare workspace %q: %w", name, err)
+		}
+		fmt.Printf("  %s: ready (on-demand, dir: %s)\n", name, ws.Dir)
+	}
+	return nil
 }
 
 func ensureDaemon() error {

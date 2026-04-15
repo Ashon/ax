@@ -14,7 +14,7 @@ func TestConnEntrySendDeliversAndClose(t *testing.T) {
 	defer serverConn.Close()
 
 	r := NewRegistry()
-	entry, previous := r.Register("worker", "/tmp", "test", clientConn)
+	entry, previous := r.Register("worker", "/tmp", "test", "/tmp/.ax/config.yaml", 15*time.Minute, clientConn)
 	if previous != nil {
 		t.Fatalf("expected no previous entry, got %+v", previous)
 	}
@@ -44,7 +44,7 @@ func TestConnEntrySendTimesOutWhenOutboxFull(t *testing.T) {
 	defer clientConn.Close()
 	defer serverConn.Close()
 
-	entry := newConnEntry(types.WorkspaceInfo{Name: "worker"}, clientConn)
+	entry := newConnEntry(types.WorkspaceInfo{Name: "worker"}, "", 0, time.Now(), clientConn)
 	defer entry.Close()
 
 	env, _ := NewEnvelope("e", MsgPushMessage, map[string]string{"k": "v"})
@@ -71,7 +71,7 @@ func TestRegistryUnregisterIfConnClosesEntry(t *testing.T) {
 	defer serverConn.Close()
 
 	r := NewRegistry()
-	entry, _ := r.Register("worker", "", "", clientConn)
+	entry, _ := r.Register("worker", "", "", "", 0, clientConn)
 	if !r.UnregisterIfConn("worker", clientConn) {
 		t.Fatal("expected UnregisterIfConn to succeed")
 	}
@@ -83,4 +83,3 @@ func TestRegistryUnregisterIfConnClosesEntry(t *testing.T) {
 		t.Fatal("entry was not closed by UnregisterIfConn")
 	}
 }
-

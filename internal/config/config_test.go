@@ -266,6 +266,17 @@ children:
 	assertLoadersFailWithError(t, rootConfigPath, config.ErrDuplicateChildPrefix, "first.grandchild", grandChildDir, secondDir)
 }
 
+func TestIdleTimeoutMinutesOrDefault(t *testing.T) {
+	if got := config.DefaultConfig("demo").IdleTimeoutMinutesOrDefault(); got != config.DefaultIdleTimeoutMinutes {
+		t.Fatalf("default idle timeout = %d, want %d", got, config.DefaultIdleTimeoutMinutes)
+	}
+
+	cfg := &config.Config{IdleTimeoutMinutes: 42}
+	if got := cfg.IdleTimeoutMinutesOrDefault(); got != 42 {
+		t.Fatalf("configured idle timeout = %d, want 42", got)
+	}
+}
+
 func TestLoadRejectsReservedOrchestratorNameCollisions(t *testing.T) {
 	t.Run("root workspace", func(t *testing.T) {
 		rootDir := t.TempDir()

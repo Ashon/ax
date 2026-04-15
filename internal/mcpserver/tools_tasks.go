@@ -34,7 +34,7 @@ func registerTaskTools(srv *server.MCPServer, client *DaemonClient, configPath s
 			mcp.WithString("priority", mcp.Description("Optional task priority: `low`, `normal`, `high`, or `urgent`. Defaults to `normal`.")),
 			mcp.WithNumber("stale_after_seconds", mcp.Description("Optional staleness threshold. When >0, daemon task snapshots will mark the task stale if no progress update arrives within this many seconds while the task is still pending or in_progress.")),
 		),
-		startTaskHandler(client),
+		startTaskHandler(client, configPath),
 	)
 
 	srv.AddTool(

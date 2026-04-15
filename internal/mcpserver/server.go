@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/ashon/ax/internal/daemon"
 	"github.com/mark3labs/mcp-go/server"
@@ -22,12 +23,16 @@ func Run(workspace, socketPath, configPath string) error {
 	client := NewDaemonClient(socketPath, workspace)
 	if dir, err := os.Getwd(); err == nil {
 		description := ""
-		if _, cfg, err := loadToolConfig(client, configPath); err == nil {
+		cfgPath := configPath
+		idleTimeout := time.Duration(0)
+		if resolvedPath, cfg, err := loadToolConfig(client, configPath); err == nil {
+			cfgPath = resolvedPath
+			idleTimeout = time.Duration(cfg.IdleTimeoutMinutesOrDefault()) * time.Minute
 			if ws, ok := cfg.Workspaces[workspace]; ok {
 				description = strings.TrimSpace(ws.Description)
 			}
 		}
-		client.SetRegistrationInfo(dir, description)
+		client.SetRegistrationInfo(dir, description, cfgPath, idleTimeout)
 	}
 	if err := client.Connect(); err != nil {
 		return fmt.Errorf("connect to daemon: %w", err)

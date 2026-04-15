@@ -60,6 +60,7 @@ func (d *Daemon) handleControlLifecycleEnvelope(env *Envelope, requester string)
 	if err != nil {
 		return nil, err
 	}
+	d.registry.Touch(requester)
 
 	running := action != types.LifecycleActionStop
 	if d.logger != nil {

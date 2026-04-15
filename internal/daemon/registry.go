@@ -14,19 +14,25 @@ import (
 const outboxCapacity = 256
 
 type connEntry struct {
-	info    types.WorkspaceInfo
-	conn    net.Conn
-	outbox  chan *Envelope
-	closeCh chan struct{}
-	once    sync.Once
+	info         types.WorkspaceInfo
+	configPath   string
+	idleTimeout  time.Duration
+	lastActiveAt time.Time
+	conn         net.Conn
+	outbox       chan *Envelope
+	closeCh      chan struct{}
+	once         sync.Once
 }
 
-func newConnEntry(info types.WorkspaceInfo, conn net.Conn) *connEntry {
+func newConnEntry(info types.WorkspaceInfo, configPath string, idleTimeout time.Duration, lastActiveAt time.Time, conn net.Conn) *connEntry {
 	return &connEntry{
-		info:    info,
-		conn:    conn,
-		outbox:  make(chan *Envelope, outboxCapacity),
-		closeCh: make(chan struct{}),
+		info:         info,
+		configPath:   configPath,
+		idleTimeout:  idleTimeout,
+		lastActiveAt: lastActiveAt,
+		conn:         conn,
+		outbox:       make(chan *Envelope, outboxCapacity),
+		closeCh:      make(chan struct{}),
 	}
 }
 
@@ -87,6 +93,13 @@ type Registry struct {
 	entries map[string]*connEntry
 }
 
+type RegisteredWorkspace struct {
+	Info         types.WorkspaceInfo
+	ConfigPath   string
+	IdleTimeout  time.Duration
+	LastActiveAt time.Time
+}
+
 func NewRegistry() *Registry {
 	return &Registry{
 		entries: make(map[string]*connEntry),
@@ -97,7 +110,7 @@ func NewRegistry() *Registry {
 // for the same name and a different connection, that previous entry (and
 // its underlying connection) is returned so the caller can close it. The
 // new entry is returned for the caller to attach a writer goroutine to.
-func (r *Registry) Register(name, dir, description string, conn net.Conn) (entry *connEntry, previous *connEntry) {
+func (r *Registry) Register(name, dir, description, configPath string, idleTimeout time.Duration, conn net.Conn) (entry *connEntry, previous *connEntry) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := time.Now()
@@ -115,7 +128,7 @@ func (r *Registry) Register(name, dir, description string, conn net.Conn) (entry
 		Status:      types.StatusOnline,
 		StatusText:  statusText,
 		ConnectedAt: &now,
-	}, conn)
+	}, configPath, idleTimeout, now, conn)
 	r.entries[name] = entry
 	return entry, previous
 }
@@ -169,6 +182,35 @@ func (r *Registry) SetStatus(name, status string) bool {
 	}
 	entry.info.StatusText = status
 	return true
+}
+
+func (r *Registry) Touch(name string) bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	entry, ok := r.entries[name]
+	if !ok {
+		return false
+	}
+	entry.lastActiveAt = time.Now()
+	return true
+}
+
+func (r *Registry) Snapshot() []RegisteredWorkspace {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	result := make([]RegisteredWorkspace, 0, len(r.entries))
+	for _, entry := range r.entries {
+		result = append(result, RegisteredWorkspace{
+			Info:         entry.info,
+			ConfigPath:   entry.configPath,
+			IdleTimeout:  entry.idleTimeout,
+			LastActiveAt: entry.lastActiveAt,
+		})
+	}
+	return result
 }
 
 func (r *Registry) FindByConn(conn net.Conn) (string, bool) {

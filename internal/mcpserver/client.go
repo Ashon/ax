@@ -31,6 +31,8 @@ type DaemonClient struct {
 	workspace   string
 	dir         string
 	description string
+	configPath  string
+	idleTimeout time.Duration
 	conn        net.Conn
 	writeMu     sync.Mutex
 
@@ -72,9 +74,11 @@ func (c *DaemonClient) SetRequestTimeout(d time.Duration) {
 	c.requestTimeout = d
 }
 
-func (c *DaemonClient) SetRegistrationInfo(dir, description string) {
+func (c *DaemonClient) SetRegistrationInfo(dir, description, configPath string, idleTimeout time.Duration) {
 	c.dir = dir
 	c.description = description
+	c.configPath = configPath
+	c.idleTimeout = idleTimeout
 }
 
 func (c *DaemonClient) Connect() error {
@@ -101,6 +105,8 @@ func (c *DaemonClient) Connect() error {
 		Workspace:   c.workspace,
 		Dir:         dir,
 		Description: c.description,
+		ConfigPath:  c.configPath,
+		IdleTimeout: int64(c.idleTimeout / time.Second),
 	})
 	if err != nil {
 		conn.Close()

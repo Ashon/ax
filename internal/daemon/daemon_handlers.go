@@ -34,7 +34,7 @@ func (d *Daemon) handleRegisterEnvelope(conn net.Conn, env *Envelope, workspace 
 	}
 
 	*workspace = p.Workspace
-	entry, previous := d.registry.Register(p.Workspace, p.Dir, p.Description, conn)
+	entry, previous := d.registry.Register(p.Workspace, p.Dir, p.Description, p.ConfigPath, time.Duration(p.IdleTimeout)*time.Second, conn)
 	d.startConnWriter(entry)
 	if previous != nil {
 		d.logger.Printf("workspace %q re-registered; closing previous connection", p.Workspace)
@@ -84,6 +84,7 @@ func (d *Daemon) handleSendMessageEnvelope(env *Envelope, workspace string) (*En
 	d.taskStore.RecordDispatch(msg.TaskID, msg.To, msg.CreatedAt)
 	d.history.AppendMessage(msg)
 	d.logger.Printf("message %s -> %s: %s", workspace, p.To, truncate(p.Message, 50))
+	d.registry.Touch(workspace)
 	if d.canDeliverMessage(p.To, msg) {
 		d.sendPushEnvelope(p.To, msg, "push to %q dropped (outbox full or closed); wake scheduler will retry")
 		d.wakeScheduler.Schedule(p.To, workspace)
@@ -131,6 +132,7 @@ func (d *Daemon) handleBroadcastEnvelope(env *Envelope, workspace string) (*Enve
 		}
 	}
 
+	d.registry.Touch(workspace)
 	d.refreshTaskSnapshots()
 	return NewResponseEnvelope(env.ID, map[string]interface{}{
 		"recipients": recipients,
@@ -154,6 +156,9 @@ func (d *Daemon) handleReadMessagesEnvelope(env *Envelope, workspace string) (*E
 	messages := d.queue.DequeueIf(workspace, limit, p.From, func(msg types.Message) bool {
 		return d.canDeliverMessage(workspace, msg)
 	})
+	if len(messages) > 0 {
+		d.registry.Touch(workspace)
+	}
 	if d.queue.PendingCountIf(workspace, func(msg types.Message) bool {
 		return d.canDeliverMessage(workspace, msg)
 	}) == 0 {
@@ -182,6 +187,7 @@ func (d *Daemon) handleSetStatusEnvelope(env *Envelope, workspace string) (*Enve
 	}
 
 	d.registry.SetStatus(workspace, p.Status)
+	d.registry.Touch(workspace)
 	d.refreshTaskSnapshots()
 	return NewResponseEnvelope(env.ID, map[string]string{"status": "updated"})
 }
@@ -264,6 +270,7 @@ func (d *Daemon) handleCreateTaskEnvelope(env *Envelope, workspace string) (*Env
 	if err != nil {
 		return nil, err
 	}
+	d.registry.Touch(workspace)
 	d.refreshTaskSnapshots()
 	task, _ = d.taskStore.Get(task.ID)
 	d.logger.Printf("task created: %s (assignee=%s, by=%s)", task.ID, task.Assignee, workspace)
@@ -294,6 +301,7 @@ func (d *Daemon) handleStartTaskEnvelope(env *Envelope, workspace string) (*Enve
 	}
 
 	dispatch := d.dispatchTaskStart(*task)
+	d.registry.Touch(workspace)
 	d.refreshTaskSnapshots()
 	task, _ = d.taskStore.Get(task.ID)
 	d.logger.Printf("task started: %s (assignee=%s, by=%s, dispatch=%s)", task.ID, task.Assignee, workspace, dispatch.Status)
@@ -316,6 +324,7 @@ func (d *Daemon) handleUpdateTaskEnvelope(env *Envelope, workspace string) (*Env
 	if err != nil {
 		return nil, err
 	}
+	d.registry.Touch(workspace)
 	d.releaseSerialWorkflowSuccessor(*task)
 	d.refreshTaskSnapshots()
 	task, _ = d.taskStore.Get(task.ID)
@@ -365,6 +374,7 @@ func (d *Daemon) handleCancelTaskEnvelope(env *Envelope, workspace string) (*Env
 	if err != nil {
 		return nil, err
 	}
+	d.registry.Touch(workspace)
 	dropped := d.queue.RemoveTaskMessages(task.Assignee, task.ID)
 	if d.queue.PendingCount(task.Assignee) == 0 {
 		d.wakeScheduler.Cancel(task.Assignee)
@@ -389,6 +399,7 @@ func (d *Daemon) handleRemoveTaskEnvelope(env *Envelope, workspace string) (*Env
 	if err != nil {
 		return nil, err
 	}
+	d.registry.Touch(workspace)
 	_ = d.queue.RemoveTaskMessages(task.Assignee, task.ID)
 	if d.queue.PendingCount(task.Assignee) == 0 {
 		d.wakeScheduler.Cancel(task.Assignee)
@@ -464,6 +475,7 @@ func (d *Daemon) handleInterveneTaskEnvelope(env *Envelope, workspace string) (*
 	default:
 		return nil, fmt.Errorf("invalid intervene_task action %q", p.Action)
 	}
+	d.registry.Touch(workspace)
 
 	return NewResponseEnvelope(env.ID, &resp)
 }
