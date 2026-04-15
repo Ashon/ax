@@ -598,6 +598,28 @@ var dispatchRunnableTarget = workspace.DispatchRunnableWork
 
 type startTaskResult = daemon.StartTaskResponse
 
+type workspaceTaskView string
+
+const (
+	workspaceTaskViewAssigned workspaceTaskView = "assigned"
+	workspaceTaskViewCreated  workspaceTaskView = "created"
+	workspaceTaskViewBoth     workspaceTaskView = "both"
+)
+
+type workspaceTaskViewResult struct {
+	Count int          `json:"count"`
+	Tasks []types.Task `json:"tasks"`
+}
+
+type workspaceTaskListResult struct {
+	Workspace       string                   `json:"workspace"`
+	View            string                   `json:"view"`
+	Status          string                   `json:"status,omitempty"`
+	UniqueTaskCount int                      `json:"unique_task_count"`
+	Assigned        *workspaceTaskViewResult `json:"assigned,omitempty"`
+	Created         *workspaceTaskViewResult `json:"created,omitempty"`
+}
+
 func sendMessageHandler(client *DaemonClient, configPath string) server.ToolHandlerFunc {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		to, _ := request.RequireString("to")
@@ -992,6 +1014,34 @@ func parseTaskPriority(value string) (types.TaskPriority, error) {
 	}
 }
 
+func parseListTaskStatusFilter(value string) (*types.TaskStatus, error) {
+	statusValue := strings.TrimSpace(value)
+	if statusValue == "" {
+		return nil, nil
+	}
+
+	status := types.TaskStatus(statusValue)
+	switch status {
+	case types.TaskPending, types.TaskInProgress, types.TaskCompleted, types.TaskFailed, types.TaskCancelled:
+		return &status, nil
+	default:
+		return nil, fmt.Errorf("Invalid status filter: %q", statusValue)
+	}
+}
+
+func parseWorkspaceTaskView(value string) (workspaceTaskView, error) {
+	viewValue := strings.TrimSpace(value)
+	view := workspaceTaskView(viewValue)
+	switch view {
+	case "", workspaceTaskViewBoth:
+		return workspaceTaskViewBoth, nil
+	case workspaceTaskViewAssigned, workspaceTaskViewCreated:
+		return view, nil
+	default:
+		return "", fmt.Errorf("Invalid workspace task view: %q (must be assigned, created, or both)", viewValue)
+	}
+}
+
 func normalizeStartTaskMessage(message string) (string, error) {
 	trimmed := strings.TrimSpace(message)
 	if trimmed == "" {
@@ -1058,17 +1108,9 @@ func listTasksHandler(client *DaemonClient) server.ToolHandlerFunc {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		assignee := request.GetString("assignee", "")
 		createdBy := request.GetString("created_by", "")
-		statusStr := request.GetString("status", "")
-
-		var status *types.TaskStatus
-		if statusStr != "" {
-			s := types.TaskStatus(statusStr)
-			switch s {
-			case types.TaskPending, types.TaskInProgress, types.TaskCompleted, types.TaskFailed, types.TaskCancelled:
-				status = &s
-			default:
-				return mcp.NewToolResultError(fmt.Sprintf("Invalid status filter: %q", statusStr)), nil
-			}
+		status, err := parseListTaskStatusFilter(request.GetString("status", ""))
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
 		}
 
 		tasks, err := client.ListTasks(assignee, createdBy, status)
@@ -1084,6 +1126,70 @@ func listTasksHandler(client *DaemonClient) server.ToolHandlerFunc {
 			"count": len(tasks),
 			"tasks": tasks,
 		}, "", "  ")
+		return mcp.NewToolResultText(string(data)), nil
+	}
+}
+
+func listWorkspaceTasksHandler(client *DaemonClient) server.ToolHandlerFunc {
+	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		workspace, _ := request.RequireString("workspace")
+		workspace = strings.TrimSpace(workspace)
+		if workspace == "" {
+			return mcp.NewToolResultError("workspace is required"), nil
+		}
+
+		view, err := parseWorkspaceTaskView(request.GetString("view", string(workspaceTaskViewBoth)))
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		status, err := parseListTaskStatusFilter(request.GetString("status", ""))
+		if err != nil {
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+
+		result := workspaceTaskListResult{
+			Workspace: workspace,
+			View:      string(view),
+		}
+		if status != nil {
+			result.Status = string(*status)
+		}
+
+		uniqueTaskIDs := make(map[string]struct{})
+		addUniqueTasks := func(tasks []types.Task) {
+			for _, task := range tasks {
+				uniqueTaskIDs[task.ID] = struct{}{}
+			}
+		}
+
+		if view == workspaceTaskViewAssigned || view == workspaceTaskViewBoth {
+			tasks, err := client.ListTasksAssignedToWorkspace(workspace, status)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("Failed to list tasks assigned to workspace %q: %v", workspace, err)), nil
+			}
+			result.Assigned = &workspaceTaskViewResult{
+				Count: len(tasks),
+				Tasks: tasks,
+			}
+			addUniqueTasks(tasks)
+		}
+
+		if view == workspaceTaskViewCreated || view == workspaceTaskViewBoth {
+			tasks, err := client.ListTasksCreatedByWorkspace(workspace, status)
+			if err != nil {
+				return mcp.NewToolResultError(fmt.Sprintf("Failed to list tasks created by workspace %q: %v", workspace, err)), nil
+			}
+			result.Created = &workspaceTaskViewResult{
+				Count: len(tasks),
+				Tasks: tasks,
+			}
+			addUniqueTasks(tasks)
+		}
+
+		result.UniqueTaskCount = len(uniqueTaskIDs)
+
+		data, _ := json.MarshalIndent(result, "", "  ")
 		return mcp.NewToolResultText(string(data)), nil
 	}
 }

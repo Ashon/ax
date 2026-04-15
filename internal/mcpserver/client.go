@@ -569,6 +569,14 @@ func (c *DaemonClient) ListTasks(assignee, createdBy string, status *types.TaskS
 	return result.Tasks, nil
 }
 
+func (c *DaemonClient) ListTasksAssignedToWorkspace(workspace string, status *types.TaskStatus) ([]types.Task, error) {
+	return c.ListTasks(workspace, "", status)
+}
+
+func (c *DaemonClient) ListTasksCreatedByWorkspace(workspace string, status *types.TaskStatus) ([]types.Task, error) {
+	return c.ListTasks("", workspace, status)
+}
+
 func (c *DaemonClient) CancelTask(id, reason string, expectedVersion *int64) (*types.Task, error) {
 	resp, err := c.sendRequest(daemon.MsgCancelTask, &daemon.CancelTaskPayload{
 		ID:              id,

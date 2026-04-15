@@ -247,6 +247,104 @@ func TestCreateTaskHandlerPassesWorkflowMode(t *testing.T) {
 	}
 }
 
+func TestListWorkspaceTasksHandlerReturnsExplicitViews(t *testing.T) {
+	const sharedTaskID = "55555555-5555-5555-5555-555555555555"
+	const createdOnlyTaskID = "66666666-6666-6666-6666-666666666666"
+
+	client, serverErr := newTaskToolTestClient(t, 2, func(step int, env *daemon.Envelope) (*daemon.Envelope, error) {
+		if env.Type != daemon.MsgListTasks {
+			return nil, fmt.Errorf("step %d request type = %s, want %s", step, env.Type, daemon.MsgListTasks)
+		}
+
+		var payload daemon.ListTasksPayload
+		if err := env.DecodePayload(&payload); err != nil {
+			return nil, err
+		}
+		if payload.Status == nil || *payload.Status != types.TaskInProgress {
+			return nil, fmt.Errorf("unexpected status filter %+v", payload.Status)
+		}
+
+		switch step {
+		case 0:
+			if payload.Assignee != "builder" || payload.CreatedBy != "" {
+				return nil, fmt.Errorf("unexpected assigned-view payload assignee=%q created_by=%q", payload.Assignee, payload.CreatedBy)
+			}
+			return daemon.NewResponseEnvelope(env.ID, &daemon.ListTasksResponse{
+				Tasks: []types.Task{
+					{
+						ID:        sharedTaskID,
+						Title:     "Assigned to builder",
+						Assignee:  "builder",
+						CreatedBy: "reviewer",
+						Status:    types.TaskInProgress,
+					},
+				},
+			})
+		case 1:
+			if payload.Assignee != "" || payload.CreatedBy != "builder" {
+				return nil, fmt.Errorf("unexpected created-view payload assignee=%q created_by=%q", payload.Assignee, payload.CreatedBy)
+			}
+			return daemon.NewResponseEnvelope(env.ID, &daemon.ListTasksResponse{
+				Tasks: []types.Task{
+					{
+						ID:        sharedTaskID,
+						Title:     "Assigned to builder",
+						Assignee:  "builder",
+						CreatedBy: "reviewer",
+						Status:    types.TaskInProgress,
+					},
+					{
+						ID:        createdOnlyTaskID,
+						Title:     "Created by builder",
+						Assignee:  "runner",
+						CreatedBy: "builder",
+						Status:    types.TaskInProgress,
+					},
+				},
+			})
+		default:
+			return nil, fmt.Errorf("unexpected request step %d", step)
+		}
+	})
+
+	result, err := listWorkspaceTasksHandler(client)(context.Background(), mcp.CallToolRequest{
+		Params: mcp.CallToolParams{
+			Arguments: map[string]any{
+				"workspace": "builder",
+				"view":      "both",
+				"status":    "in_progress",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("listWorkspaceTasksHandler returned error: %v", err)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatalf("daemon stub failed: %v", err)
+	}
+
+	var payload workspaceTaskListResult
+	decodeToolResultJSON(t, result, &payload)
+	if payload.Workspace != "builder" {
+		t.Fatalf("workspace = %q, want builder", payload.Workspace)
+	}
+	if payload.View != "both" {
+		t.Fatalf("view = %q, want both", payload.View)
+	}
+	if payload.Status != "in_progress" {
+		t.Fatalf("status = %q, want in_progress", payload.Status)
+	}
+	if payload.Assigned == nil || payload.Assigned.Count != 1 {
+		t.Fatalf("assigned view = %+v, want count=1", payload.Assigned)
+	}
+	if payload.Created == nil || payload.Created.Count != 2 {
+		t.Fatalf("created view = %+v, want count=2", payload.Created)
+	}
+	if payload.UniqueTaskCount != 2 {
+		t.Fatalf("unique_task_count = %d, want 2", payload.UniqueTaskCount)
+	}
+}
+
 func TestNormalizeStartTaskMessageRejectsEmbeddedTaskID(t *testing.T) {
 	_, err := normalizeStartTaskMessage("Task ID: 33333333-3333-3333-3333-333333333333\n\nPlease handle this")
 	if err == nil {
@@ -328,6 +426,26 @@ func TestParseTaskCreateOptionsValidation(t *testing.T) {
 			t.Fatal("expected invalid priority to fail")
 		}
 		if !strings.Contains(err.Error(), "must be low, normal, high, or urgent") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("rejects unknown workspace task view", func(t *testing.T) {
+		_, err := parseWorkspaceTaskView("owner")
+		if err == nil {
+			t.Fatal("expected invalid workspace task view to fail")
+		}
+		if !strings.Contains(err.Error(), "must be assigned, created, or both") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("rejects unknown task list status filter", func(t *testing.T) {
+		_, err := parseListTaskStatusFilter("waiting")
+		if err == nil {
+			t.Fatal("expected invalid status filter to fail")
+		}
+		if !strings.Contains(err.Error(), "Invalid status filter") {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})

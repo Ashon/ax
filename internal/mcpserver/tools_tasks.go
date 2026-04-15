@@ -58,12 +58,22 @@ func registerTaskTools(srv *server.MCPServer, client *DaemonClient, configPath s
 
 	srv.AddTool(
 		mcp.NewTool("list_tasks",
-			mcp.WithDescription("List tasks with optional filters. Returns all tasks if no filters are specified."),
+			mcp.WithDescription("List tasks with optional raw filters. Returns all tasks if no filters are specified. Prefer `list_workspace_tasks` when querying tasks relative to a workspace."),
 			mcp.WithString("assignee", mcp.Description("Filter by assigned workspace")),
 			mcp.WithString("created_by", mcp.Description("Filter by creator workspace")),
 			mcp.WithString("status", mcp.Description("Filter by status: pending, in_progress, completed, failed, or cancelled")),
 		),
 		listTasksHandler(client),
+	)
+
+	srv.AddTool(
+		mcp.NewTool("list_workspace_tasks",
+			mcp.WithDescription("List tasks relative to a workspace with an explicit view: tasks assigned to that workspace, tasks created by that workspace, or both."),
+			mcp.WithString("workspace", mcp.Required(), mcp.Description("Workspace name to query")),
+			mcp.WithString("view", mcp.Description("Workspace task view: `assigned`, `created`, or `both` (default).")),
+			mcp.WithString("status", mcp.Description("Optional status filter applied consistently to every requested view: pending, in_progress, completed, failed, or cancelled.")),
+		),
+		listWorkspaceTasksHandler(client),
 	)
 
 	srv.AddTool(
