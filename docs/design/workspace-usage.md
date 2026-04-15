@@ -175,6 +175,10 @@ records since last check, so tail is both simpler and cheaper.
 - Malformed line → count into `parseErrors` metric, skip.
 - If `Usage` is present but missing numeric fields, treat absent fields
   as 0.
+- Repeated assistant frames for the same Claude request are coalesced by
+  `requestId` (falling back to `message.id`) so cumulative usage and MCP
+  proxy totals track the latest request-level usage once, rather than
+  summing every intermediate thinking/tool frame.
 
 ## 5. MCP exposure
 

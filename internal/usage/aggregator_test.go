@@ -86,3 +86,40 @@ func TestAggregator_Reset(t *testing.T) {
 		t.Errorf("cumulative should be zero, got %+v", snap.CumulativeTotals)
 	}
 }
+
+func TestAggregator_DedupesRepeatedAssistantRequests(t *testing.T) {
+	const (
+		lineReq1Thinking = `{"type":"assistant","timestamp":"2026-04-11T05:45:28Z","sessionId":"sess-1","cwd":"/tmp/x","requestId":"req-1","message":{"id":"msg-1","role":"assistant","model":"claude-opus-4-6","content":[{"type":"thinking","thinking":""}],"usage":{"input_tokens":3,"output_tokens":26,"cache_read_input_tokens":100,"cache_creation_input_tokens":0}}}`
+		lineReq1Tool     = `{"type":"assistant","timestamp":"2026-04-11T05:45:29Z","sessionId":"sess-1","cwd":"/tmp/x","requestId":"req-1","message":{"id":"msg-1","role":"assistant","model":"claude-opus-4-6","content":[{"type":"tool_use","name":"mcp__ax__read_messages","input":{}}],"usage":{"input_tokens":3,"output_tokens":26,"cache_read_input_tokens":100,"cache_creation_input_tokens":0}}}`
+		lineReq1Final    = `{"type":"assistant","timestamp":"2026-04-11T05:45:30Z","sessionId":"sess-1","cwd":"/tmp/x","requestId":"req-1","message":{"id":"msg-1","role":"assistant","model":"claude-opus-4-6","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":3,"output_tokens":40,"cache_read_input_tokens":100,"cache_creation_input_tokens":0}}}`
+	)
+
+	a := NewAggregator()
+	for _, line := range []string{lineReq1Thinking, lineReq1Tool, lineReq1Final} {
+		if !a.IngestLine([]byte(line)) {
+			t.Fatalf("expected usage-bearing line: %s", line)
+		}
+	}
+
+	snap := a.Snapshot("ws", "/tmp/x.jsonl")
+	if snap.Turns != 1 {
+		t.Fatalf("turns=%d, want 1", snap.Turns)
+	}
+	wantTotals := Tokens{Input: 3, Output: 40, CacheRead: 100}
+	if snap.CumulativeTotals != wantTotals {
+		t.Fatalf("cumulative=%+v, want %+v", snap.CumulativeTotals, wantTotals)
+	}
+	if len(snap.ByModel) != 1 || snap.ByModel[0].Turns != 1 {
+		t.Fatalf("by_model=%+v, want one deduped turn", snap.ByModel)
+	}
+	wantMCP := wantTotals.Total()
+	if snap.CumulativeMCP.ToolUseTurns != 1 {
+		t.Fatalf("cumulative MCP turns=%d, want 1", snap.CumulativeMCP.ToolUseTurns)
+	}
+	if snap.CumulativeMCP.ToolUseTokens != wantMCP {
+		t.Fatalf("cumulative MCP tokens=%d, want %d", snap.CumulativeMCP.ToolUseTokens, wantMCP)
+	}
+	if snap.CurrentMCP.ToolUseTokens != wantMCP {
+		t.Fatalf("current MCP tokens=%d, want %d", snap.CurrentMCP.ToolUseTokens, wantMCP)
+	}
+}
