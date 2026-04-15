@@ -73,7 +73,7 @@ func New(socketPath string) *Daemon {
 		logger.Printf("load shared values: %v", err)
 		sharedValues = make(map[string]string)
 	}
-	return &Daemon{
+	d := &Daemon{
 		socketPath:     sp,
 		registry:       NewRegistry(),
 		queue:          queue,
@@ -85,6 +85,8 @@ func New(socketPath string) *Daemon {
 		wakeScheduler:  NewWakeScheduler(queue, logger),
 		logger:         logger,
 	}
+	d.wakeScheduler.SetQueueRefiller(d.recoverRunnableTaskMessages)
+	return d
 }
 
 func (d *Daemon) Run(ctx context.Context) error {

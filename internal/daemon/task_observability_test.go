@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/json"
 	"net"
 	"strings"
 	"testing"
@@ -259,6 +260,90 @@ func TestEnrichTaskIncludesPendingWakeState(t *testing.T) {
 	}
 	if enriched.StaleInfo.NextWakeRetryAt == nil {
 		t.Fatal("expected next_wake_retry_at to be populated")
+	}
+}
+
+func TestHandleReadMessagesSchedulesClaimFollowUpAfterConsumingTaskDispatch(t *testing.T) {
+	stateDir := t.TempDir()
+	d := &Daemon{
+		queue:     NewMessageQueue(),
+		history:   NewHistory(stateDir, 50),
+		registry:  NewRegistry(),
+		taskStore: NewTaskStore(stateDir),
+	}
+	d.wakeScheduler = NewWakeScheduler(d.queue, nil)
+	d.wakeScheduler.SetQueueRefiller(d.recoverRunnableTaskMessages)
+
+	task, err := d.taskStore.CreateWithWorkflow("claim follow-up", "desc", "worker", "orch", "", "", types.TaskWorkflowParallel, "", 0, "Inspect and claim")
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	msg := taskAwareMessage("orch", "worker", task.DispatchMessage)
+	msg = d.queue.EnqueueMessage(msg)
+	if _, ok := d.taskStore.RecordDispatch(msg.TaskID, msg.To, msg.CreatedAt); !ok {
+		t.Fatal("expected task dispatch metadata to record")
+	}
+
+	env, _ := NewEnvelope("read-task", MsgReadMessages, &ReadMessagesPayload{Limit: 10})
+	resp, err := d.handleReadMessagesEnvelope(env, "worker")
+	if err != nil {
+		t.Fatalf("handle read_messages: %v", err)
+	}
+	var payload ResponsePayload
+	if err := resp.DecodePayload(&payload); err != nil {
+		t.Fatalf("decode read payload: %v", err)
+	}
+	var readResp ReadMessagesResponse
+	if err := json.Unmarshal(payload.Data, &readResp); err != nil {
+		t.Fatalf("unmarshal read response: %v", err)
+	}
+	if len(readResp.Messages) != 1 || readResp.Messages[0].TaskID != task.ID {
+		t.Fatalf("expected consumed task dispatch, got %+v", readResp.Messages)
+	}
+	if d.queue.PendingCount("worker") != 0 {
+		t.Fatalf("expected queue to be empty after read, got %d pending message(s)", d.queue.PendingCount("worker"))
+	}
+	wakeState, ok := d.wakeScheduler.State("worker")
+	if !ok {
+		t.Fatal("expected claim follow-up wake to remain scheduled after dispatch consumption")
+	}
+	if wakeState.Sender != "orch" {
+		t.Fatalf("wake sender = %q, want orch", wakeState.Sender)
+	}
+}
+
+func TestRecoverRunnableTaskMessagesRequeuesConsumedUnclaimedTaskDispatch(t *testing.T) {
+	stateDir := t.TempDir()
+	d := &Daemon{
+		queue:     NewMessageQueue(),
+		history:   NewHistory(stateDir, 50),
+		registry:  NewRegistry(),
+		taskStore: NewTaskStore(stateDir),
+	}
+	d.wakeScheduler = NewWakeScheduler(d.queue, nil)
+
+	task, err := d.taskStore.CreateWithWorkflow("recover", "desc", "worker", "orch", "", "", types.TaskWorkflowParallel, "", 0, "Inspect and claim")
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if _, ok := d.taskStore.RecordDispatch(task.ID, "worker", time.Now()); !ok {
+		t.Fatal("expected task dispatch metadata to record")
+	}
+	if got := d.recoverRunnableTaskMessages("worker"); got != 1 {
+		t.Fatalf("recoverRunnableTaskMessages() = %d, want 1", got)
+	}
+	pending := d.queue.Pending("worker")
+	if len(pending) != 1 || messageTaskID(pending[0]) != task.ID || pending[0].Content != task.DispatchMessage {
+		t.Fatalf("expected one rehydrated canonical dispatch, got %+v", pending)
+	}
+
+	logMsg := "claiming recovered task"
+	if _, err := d.taskStore.Update(task.ID, nil, nil, &logMsg, "worker"); err != nil {
+		t.Fatalf("claim recovered task: %v", err)
+	}
+	_ = d.queue.RemoveTaskMessages("worker", task.ID)
+	if got := d.recoverRunnableTaskMessages("worker"); got != 0 {
+		t.Fatalf("expected claimed task to stop rehydrating, got %d", got)
 	}
 }
 

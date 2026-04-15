@@ -18,6 +18,7 @@ type WakeScheduler struct {
 	queue   *MessageQueue
 	logger  *log.Logger
 	notify  chan struct{} // signals the run loop to check immediately
+	refill  func(workspace string) int
 }
 
 type pendingWake struct {
@@ -65,6 +66,15 @@ func NewWakeScheduler(queue *MessageQueue, logger *log.Logger) *WakeScheduler {
 		logger:  logger,
 		notify:  make(chan struct{}, 1),
 	}
+}
+
+// SetQueueRefiller installs an optional callback that can rehydrate runnable
+// task messages when a wake retry finds an empty inbox for the target
+// workspace. The callback should return the number of messages it re-enqueued.
+func (s *WakeScheduler) SetQueueRefiller(refill func(workspace string) int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.refill = refill
 }
 
 // Schedule registers a pending wake for the target workspace.
@@ -145,6 +155,14 @@ func (s *WakeScheduler) process() {
 
 	for _, pw := range ready {
 		// Check if messages are still pending
+		if s.queue.PendingCount(pw.Workspace) == 0 {
+			if s.refill != nil {
+				rehydrated := s.refill(pw.Workspace)
+				if rehydrated > 0 && s.logger != nil {
+					s.logger.Printf("wake %q rehydrated %d runnable task message(s)", pw.Workspace, rehydrated)
+				}
+			}
+		}
 		if s.queue.PendingCount(pw.Workspace) == 0 {
 			s.Cancel(pw.Workspace)
 			continue

@@ -41,7 +41,7 @@ func (d *Daemon) handleRegisterEnvelope(conn net.Conn, env *Envelope, workspace 
 		previous.Close()
 		_ = previous.Conn().Close()
 	}
-	rehydrated := d.rehydrateRunnableTaskMessages(p.Workspace, false)
+	rehydrated := d.rehydrateRunnableTaskMessages(p.Workspace, false, true)
 	d.refreshTaskSnapshots()
 	d.logger.Printf("registered workspace %q (rehydrated_tasks=%d)", p.Workspace, rehydrated)
 	return NewResponseEnvelope(env.ID, map[string]string{"status": "registered"})
@@ -157,7 +157,11 @@ func (d *Daemon) handleReadMessagesEnvelope(env *Envelope, workspace string) (*E
 	if d.queue.PendingCountIf(workspace, func(msg types.Message) bool {
 		return d.canDeliverMessage(workspace, msg)
 	}) == 0 {
-		d.wakeScheduler.Cancel(workspace)
+		if sender, ok := d.taskClaimFollowUpSender(workspace, messages); ok {
+			d.wakeScheduler.Schedule(workspace, sender)
+		} else {
+			d.wakeScheduler.Cancel(workspace)
+		}
 	}
 	d.refreshTaskSnapshots()
 	return NewResponseEnvelope(env.ID, &ReadMessagesResponse{Messages: messages})
@@ -464,7 +468,7 @@ func (d *Daemon) handleInterveneTaskEnvelope(env *Envelope, workspace string) (*
 	return NewResponseEnvelope(env.ID, &resp)
 }
 
-func (d *Daemon) rehydrateRunnableTaskMessages(workspace string, push bool) int {
+func (d *Daemon) rehydrateRunnableTaskMessages(workspace string, push bool, scheduleWake bool) int {
 	now := time.Now()
 	runnable := d.taskStore.RunnableByAssignee(workspace, now)
 	rehydrated := 0
@@ -479,10 +483,42 @@ func (d *Daemon) rehydrateRunnableTaskMessages(workspace string, push bool) int 
 		if push && d.canDeliverMessage(task.Assignee, msg) {
 			d.sendPushEnvelope(task.Assignee, msg, "rehydrated task push to %q dropped (outbox full or closed)")
 		}
-		d.wakeScheduler.Schedule(task.Assignee, task.CreatedBy)
+		if scheduleWake {
+			d.wakeScheduler.Schedule(task.Assignee, task.CreatedBy)
+		}
 		rehydrated++
 	}
 	return rehydrated
+}
+
+func (d *Daemon) recoverRunnableTaskMessages(workspace string) int {
+	rehydrated := d.rehydrateRunnableTaskMessages(workspace, false, false)
+	if rehydrated > 0 {
+		d.refreshTaskSnapshots()
+	}
+	return rehydrated
+}
+
+func (d *Daemon) taskClaimFollowUpSender(workspace string, messages []types.Message) (string, bool) {
+	for _, msg := range messages {
+		taskID := messageTaskID(msg)
+		if taskID == "" {
+			continue
+		}
+		task, ok := d.taskStore.Get(taskID)
+		if !ok || task.Assignee != workspace || task.Status != types.TaskPending || task.ClaimedAt != nil || task.LastDispatchAt == nil {
+			continue
+		}
+		sender := strings.TrimSpace(msg.From)
+		if sender == "" {
+			sender = task.CreatedBy
+		}
+		if sender == "" {
+			sender = workspace
+		}
+		return sender, true
+	}
+	return "", false
 }
 
 func taskDispatchContent(task types.Task, note string) string {
