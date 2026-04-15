@@ -26,6 +26,9 @@ const (
 	MsgUpdateTask     MessageType = "update_task"
 	MsgGetTask        MessageType = "get_task"
 	MsgListTasks      MessageType = "list_tasks"
+	MsgCancelTask     MessageType = "cancel_task"
+	MsgRemoveTask     MessageType = "remove_task"
+	MsgInterveneTask  MessageType = "intervene_task"
 	MsgGetTeamState   MessageType = "get_team_state"
 	MsgDryRunTeam     MessageType = "dry_run_team_reconfigure"
 	MsgApplyTeam      MessageType = "apply_team_reconfigure"
@@ -95,6 +98,7 @@ type CreateTaskPayload struct {
 	Title             string `json:"title"`
 	Description       string `json:"description,omitempty"`
 	Assignee          string `json:"assignee"`
+	ParentTaskID      string `json:"parent_task_id,omitempty"`
 	StartMode         string `json:"start_mode,omitempty"`
 	Priority          string `json:"priority,omitempty"`
 	StaleAfterSeconds int    `json:"stale_after_seconds,omitempty"`
@@ -115,6 +119,25 @@ type ListTasksPayload struct {
 	Assignee  string            `json:"assignee,omitempty"`
 	CreatedBy string            `json:"created_by,omitempty"`
 	Status    *types.TaskStatus `json:"status,omitempty"`
+}
+
+type CancelTaskPayload struct {
+	ID              string `json:"id"`
+	Reason          string `json:"reason,omitempty"`
+	ExpectedVersion *int64 `json:"expected_version,omitempty"`
+}
+
+type RemoveTaskPayload struct {
+	ID              string `json:"id"`
+	Reason          string `json:"reason,omitempty"`
+	ExpectedVersion *int64 `json:"expected_version,omitempty"`
+}
+
+type InterveneTaskPayload struct {
+	ID              string `json:"id"`
+	Action          string `json:"action"`
+	Note            string `json:"note,omitempty"`
+	ExpectedVersion *int64 `json:"expected_version,omitempty"`
 }
 
 type GetTeamStatePayload struct {
@@ -176,6 +199,13 @@ type TaskResponse struct {
 
 type ListTasksResponse struct {
 	Tasks []types.Task `json:"tasks"`
+}
+
+type InterveneTaskResponse struct {
+	Task      types.Task `json:"task"`
+	Action    string     `json:"action"`
+	Status    string     `json:"status"`
+	MessageID string     `json:"message_id,omitempty"`
 }
 
 type TeamStateResponse struct {

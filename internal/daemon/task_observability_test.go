@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -73,11 +75,158 @@ func TestEnrichTaskMarksPendingTaskWithNoQueuedMessageAsDiverged(t *testing.T) {
 	if enriched.StaleInfo == nil {
 		t.Fatal("expected stale_info to be populated")
 	}
+	if enriched.StaleInfo.StateDivergence {
+		t.Fatal("did not expect divergence before a task-aware dispatch is recorded")
+	}
+	if enriched.StaleInfo.ClaimState != "undispatched" {
+		t.Fatalf("claim_state=%q, want undispatched", enriched.StaleInfo.ClaimState)
+	}
+}
+
+func TestEnrichTaskMarksDispatchedUnclaimedTaskAsRecoverable(t *testing.T) {
+	stateDir := t.TempDir()
+	now := time.Now()
+	d := &Daemon{
+		queue:     NewMessageQueue(),
+		history:   NewHistory(stateDir, 50),
+		registry:  NewRegistry(),
+		taskStore: NewTaskStore(stateDir),
+	}
+
+	task := types.Task{
+		ID:             "task-2b",
+		Title:          "Re-dispatch work",
+		Assignee:       "worker",
+		CreatedBy:      "orch",
+		Status:         types.TaskPending,
+		LastDispatchAt: &now,
+		UpdatedAt:      now,
+		CreatedAt:      now,
+	}
+
+	enriched := d.enrichTask(task)
+	if enriched.StaleInfo == nil {
+		t.Fatal("expected stale_info to be populated")
+	}
 	if !enriched.StaleInfo.StateDivergence {
-		t.Fatal("expected state divergence when pending task has no queued message")
+		t.Fatal("expected divergence once dispatch is gone and no first task-flow action exists")
+	}
+	if !enriched.StaleInfo.Runnable || !enriched.StaleInfo.RecoveryEligible {
+		t.Fatalf("expected runnable recovery hint, got %+v", enriched.StaleInfo)
 	}
 	if enriched.StaleInfo.RecommendedAction == "" {
 		t.Fatal("expected recommended action for divergence")
+	}
+}
+
+func TestEnrichTaskTreatsBlockedTaskAsRecoverable(t *testing.T) {
+	stateDir := t.TempDir()
+	now := time.Now()
+	d := &Daemon{
+		queue:     NewMessageQueue(),
+		history:   NewHistory(stateDir, 50),
+		registry:  NewRegistry(),
+		taskStore: NewTaskStore(stateDir),
+	}
+
+	task := types.Task{
+		ID:           "task-blocked",
+		Title:        "Wait for credentials",
+		Assignee:     "worker",
+		CreatedBy:    "orch",
+		Status:       types.TaskBlocked,
+		AttemptCount: 1,
+		UpdatedAt:    now,
+		CreatedAt:    now,
+	}
+
+	enriched := d.enrichTask(task)
+	if enriched.StaleInfo == nil {
+		t.Fatal("expected stale_info to be populated")
+	}
+	if !enriched.StaleInfo.RecoveryEligible {
+		t.Fatalf("expected blocked task to be recoverable, got %+v", enriched.StaleInfo)
+	}
+	if enriched.StaleInfo.Reason == "" || !strings.Contains(enriched.StaleInfo.Reason, "blocked") {
+		t.Fatalf("expected blocked reason, got %+v", enriched.StaleInfo)
+	}
+}
+
+func TestEnrichTaskNotesFreshStartBarrierUntilWorkerReconnects(t *testing.T) {
+	stateDir := t.TempDir()
+	d := &Daemon{
+		queue:     NewMessageQueue(),
+		history:   NewHistory(stateDir, 50),
+		registry:  NewRegistry(),
+		taskStore: NewTaskStore(stateDir),
+	}
+
+	workerConnA, workerConnB := net.Pipe()
+	defer workerConnA.Close()
+	defer workerConnB.Close()
+	d.registry.Register("worker", "", "", workerConnA)
+
+	time.Sleep(10 * time.Millisecond)
+	now := time.Now()
+	task := types.Task{
+		ID:             "task-fresh",
+		Title:          "Fresh start work",
+		Assignee:       "worker",
+		CreatedBy:      "orch",
+		Status:         types.TaskPending,
+		StartMode:      types.TaskStartFresh,
+		LastDispatchAt: &now,
+		UpdatedAt:      now,
+		CreatedAt:      now,
+	}
+
+	enriched := d.enrichTask(task)
+	if enriched.StaleInfo == nil {
+		t.Fatal("expected stale_info to be populated")
+	}
+	if enriched.StaleInfo.ClaimState != "awaiting_claim" {
+		t.Fatalf("claim_state=%q, want awaiting_claim", enriched.StaleInfo.ClaimState)
+	}
+	if enriched.StaleInfo.ClaimStateNote == "" || !strings.Contains(enriched.StaleInfo.ClaimStateNote, "fresh-context") {
+		t.Fatalf("expected fresh-context note, got %+v", enriched.StaleInfo)
+	}
+	if enriched.StaleInfo.RecommendedAction == "" {
+		t.Fatalf("expected fresh barrier recommendation, got %+v", enriched.StaleInfo)
+	}
+}
+
+func TestEnrichTaskTreatsClaimedPendingTaskAsClaimedNotDiverged(t *testing.T) {
+	stateDir := t.TempDir()
+	now := time.Now()
+	d := &Daemon{
+		queue:     NewMessageQueue(),
+		history:   NewHistory(stateDir, 50),
+		registry:  NewRegistry(),
+		taskStore: NewTaskStore(stateDir),
+	}
+
+	task := types.Task{
+		ID:             "task-2c",
+		Title:          "Inspect files",
+		Assignee:       "worker",
+		CreatedBy:      "orch",
+		Status:         types.TaskPending,
+		LastDispatchAt: &now,
+		ClaimedAt:      &now,
+		ClaimedBy:      "worker",
+		ClaimSource:    "log",
+		UpdatedAt:      now,
+	}
+
+	enriched := d.enrichTask(task)
+	if enriched.StaleInfo == nil {
+		t.Fatal("expected stale_info to be populated")
+	}
+	if enriched.StaleInfo.StateDivergence {
+		t.Fatalf("did not expect divergence after first task-flow claim: %+v", enriched.StaleInfo)
+	}
+	if enriched.StaleInfo.ClaimState != "claimed" {
+		t.Fatalf("claim_state=%q, want claimed", enriched.StaleInfo.ClaimState)
 	}
 }
 
@@ -110,5 +259,42 @@ func TestEnrichTaskIncludesPendingWakeState(t *testing.T) {
 	}
 	if enriched.StaleInfo.NextWakeRetryAt == nil {
 		t.Fatal("expected next_wake_retry_at to be populated")
+	}
+}
+
+func TestEnrichTaskSurfacesParentReconciliationNeed(t *testing.T) {
+	stateDir := t.TempDir()
+	d := &Daemon{
+		queue:     NewMessageQueue(),
+		history:   NewHistory(stateDir, 50),
+		registry:  NewRegistry(),
+		taskStore: NewTaskStore(stateDir),
+	}
+
+	task := types.Task{
+		ID:        "parent",
+		Title:     "Umbrella task",
+		Assignee:  "orch",
+		Status:    types.TaskInProgress,
+		UpdatedAt: time.Now(),
+		Rollup: &types.TaskRollup{
+			TotalChildren:             2,
+			CompletedChildren:         2,
+			TerminalChildren:          2,
+			AllChildrenTerminal:       true,
+			NeedsParentReconciliation: true,
+			Summary:                   "Child rollup: total=2 active=0 completed=2 failed=0 cancelled=0 pending=0 in_progress=0 blocked=0. All child tasks are terminal; parent reconciliation is still required.",
+		},
+	}
+
+	enriched := d.enrichTask(task)
+	if enriched.StaleInfo == nil {
+		t.Fatal("expected stale_info to be populated")
+	}
+	if !enriched.StaleInfo.StateDivergence {
+		t.Fatal("expected parent reconciliation to surface as divergence")
+	}
+	if enriched.StaleInfo.RecommendedAction == "" {
+		t.Fatal("expected reconciliation action guidance")
 	}
 }

@@ -3,8 +3,10 @@ package daemon
 import (
 	"fmt"
 	"net"
+	"strings"
 	"time"
 
+	"github.com/ashon/ax/internal/tmux"
 	"github.com/ashon/ax/internal/types"
 	"github.com/ashon/ax/internal/usage"
 )
@@ -39,8 +41,9 @@ func (d *Daemon) handleRegisterEnvelope(conn net.Conn, env *Envelope, workspace 
 		previous.Close()
 		_ = previous.Conn().Close()
 	}
+	rehydrated := d.rehydrateRunnableTaskMessages(p.Workspace, false)
 	d.refreshTaskSnapshots()
-	d.logger.Printf("registered workspace %q", p.Workspace)
+	d.logger.Printf("registered workspace %q (rehydrated_tasks=%d)", p.Workspace, rehydrated)
 	return NewResponseEnvelope(env.ID, map[string]string{"status": "registered"})
 }
 
@@ -76,11 +79,17 @@ func (d *Daemon) handleSendMessageEnvelope(env *Envelope, workspace string) (*En
 		})
 	}
 
-	msg := d.queue.Enqueue(workspace, p.To, p.Message)
-	d.history.Append(workspace, p.To, p.Message)
+	msg := taskAwareMessage(workspace, p.To, p.Message)
+	msg = d.queue.EnqueueMessage(msg)
+	d.taskStore.RecordDispatch(msg.TaskID, msg.To, msg.CreatedAt)
+	d.history.AppendMessage(msg)
 	d.logger.Printf("message %s -> %s: %s", workspace, p.To, truncate(p.Message, 50))
-	d.sendPushEnvelope(p.To, msg, "push to %q dropped (outbox full or closed); wake scheduler will retry")
-	d.wakeScheduler.Schedule(p.To, workspace)
+	if d.canDeliverMessage(p.To, msg) {
+		d.sendPushEnvelope(p.To, msg, "push to %q dropped (outbox full or closed); wake scheduler will retry")
+		d.wakeScheduler.Schedule(p.To, workspace)
+	} else {
+		d.logger.Printf("withheld fresh-task delivery %s -> %s until %q registers a session newer than task creation", workspace, p.To, p.To)
+	}
 	d.refreshTaskSnapshots()
 
 	return NewResponseEnvelope(env.ID, map[string]string{
@@ -109,11 +118,17 @@ func (d *Daemon) handleBroadcastEnvelope(env *Envelope, workspace string) (*Enve
 			continue
 		}
 
-		msg := d.queue.Enqueue(workspace, ws.Name, p.Message)
-		d.history.Append(workspace, ws.Name, p.Message)
+		msg := taskAwareMessage(workspace, ws.Name, p.Message)
+		msg = d.queue.EnqueueMessage(msg)
+		d.taskStore.RecordDispatch(msg.TaskID, msg.To, msg.CreatedAt)
+		d.history.AppendMessage(msg)
 		recipients = append(recipients, ws.Name)
-		d.sendPushEnvelope(ws.Name, msg, "broadcast push to %q dropped (outbox full or closed)")
-		d.wakeScheduler.Schedule(ws.Name, workspace)
+		if d.canDeliverMessage(ws.Name, msg) {
+			d.sendPushEnvelope(ws.Name, msg, "broadcast push to %q dropped (outbox full or closed)")
+			d.wakeScheduler.Schedule(ws.Name, workspace)
+		} else {
+			d.logger.Printf("withheld fresh-task broadcast %s -> %s until %q registers a session newer than task creation", workspace, ws.Name, ws.Name)
+		}
 	}
 
 	d.refreshTaskSnapshots()
@@ -136,8 +151,12 @@ func (d *Daemon) handleReadMessagesEnvelope(env *Envelope, workspace string) (*E
 	if limit <= 0 {
 		limit = 10
 	}
-	messages := d.queue.Dequeue(workspace, limit, p.From)
-	if d.queue.PendingCount(workspace) == 0 {
+	messages := d.queue.DequeueIf(workspace, limit, p.From, func(msg types.Message) bool {
+		return d.canDeliverMessage(workspace, msg)
+	})
+	if d.queue.PendingCountIf(workspace, func(msg types.Message) bool {
+		return d.canDeliverMessage(workspace, msg)
+	}) == 0 {
 		d.wakeScheduler.Cancel(workspace)
 	}
 	d.refreshTaskSnapshots()
@@ -250,7 +269,10 @@ func (d *Daemon) handleCreateTaskEnvelope(env *Envelope, workspace string) (*Env
 		return nil, fmt.Errorf("invalid task priority %q", p.Priority)
 	}
 
-	task := d.taskStore.Create(p.Title, p.Description, p.Assignee, workspace, startMode, priority, p.StaleAfterSeconds)
+	task, err := d.taskStore.Create(p.Title, p.Description, p.Assignee, workspace, p.ParentTaskID, startMode, priority, p.StaleAfterSeconds)
+	if err != nil {
+		return nil, err
+	}
 	d.refreshTaskSnapshots()
 	task, _ = d.taskStore.Get(task.ID)
 	d.logger.Printf("task created: %s (assignee=%s, by=%s)", task.ID, task.Assignee, workspace)
@@ -303,6 +325,142 @@ func (d *Daemon) handleListTasksEnvelope(env *Envelope) (*Envelope, error) {
 	return NewResponseEnvelope(env.ID, &ListTasksResponse{Tasks: tasks})
 }
 
+func (d *Daemon) handleCancelTaskEnvelope(env *Envelope, workspace string) (*Envelope, error) {
+	var p CancelTaskPayload
+	if err := env.DecodePayload(&p); err != nil {
+		return nil, fmt.Errorf("decode cancel_task: %w", err)
+	}
+	if err := requireRegisteredWorkspace(workspace); err != nil {
+		return nil, err
+	}
+
+	task, err := d.taskStore.Cancel(p.ID, p.Reason, workspace, p.ExpectedVersion)
+	if err != nil {
+		return nil, err
+	}
+	dropped := d.queue.RemoveTaskMessages(task.Assignee, task.ID)
+	if d.queue.PendingCount(task.Assignee) == 0 {
+		d.wakeScheduler.Cancel(task.Assignee)
+	}
+	d.refreshTaskSnapshots()
+	task, _ = d.taskStore.Get(task.ID)
+	d.logger.Printf("task cancelled: %s (dropped_messages=%d)", task.ID, dropped)
+	return NewResponseEnvelope(env.ID, &TaskResponse{Task: d.enrichTask(*task)})
+}
+
+func (d *Daemon) handleRemoveTaskEnvelope(env *Envelope, workspace string) (*Envelope, error) {
+	var p RemoveTaskPayload
+	if err := env.DecodePayload(&p); err != nil {
+		return nil, fmt.Errorf("decode remove_task: %w", err)
+	}
+	if err := requireRegisteredWorkspace(workspace); err != nil {
+		return nil, err
+	}
+
+	task, err := d.taskStore.Remove(p.ID, p.Reason, workspace, p.ExpectedVersion)
+	if err != nil {
+		return nil, err
+	}
+	_ = d.queue.RemoveTaskMessages(task.Assignee, task.ID)
+	if d.queue.PendingCount(task.Assignee) == 0 {
+		d.wakeScheduler.Cancel(task.Assignee)
+	}
+	d.refreshTaskSnapshots()
+	task, _ = d.taskStore.Get(task.ID)
+	d.logger.Printf("task removed: %s", task.ID)
+	return NewResponseEnvelope(env.ID, &TaskResponse{Task: d.enrichTask(*task)})
+}
+
+func (d *Daemon) handleInterveneTaskEnvelope(env *Envelope, workspace string) (*Envelope, error) {
+	var p InterveneTaskPayload
+	if err := env.DecodePayload(&p); err != nil {
+		return nil, fmt.Errorf("decode intervene_task: %w", err)
+	}
+	if err := requireRegisteredWorkspace(workspace); err != nil {
+		return nil, err
+	}
+
+	task, found := d.taskStore.Get(p.ID)
+	if !found {
+		return nil, fmt.Errorf("task %q not found", p.ID)
+	}
+	if err := validateTaskControl(task, workspace, p.ExpectedVersion, true); err != nil {
+		return nil, err
+	}
+	if task.Status != types.TaskPending && task.Status != types.TaskInProgress && task.Status != types.TaskBlocked {
+		return nil, fmt.Errorf("task %q is not pending/in_progress/blocked", task.ID)
+	}
+
+	resp := InterveneTaskResponse{
+		Task:   d.enrichTask(*task),
+		Action: p.Action,
+		Status: "noop",
+	}
+
+	switch p.Action {
+	case "wake":
+		if !tmux.SessionExists(task.Assignee) {
+			return nil, fmt.Errorf("workspace %q is not running", task.Assignee)
+		}
+		if err := tmux.WakeWorkspace(task.Assignee, WakePrompt(workspace, false)); err != nil {
+			return nil, err
+		}
+		resp.Status = "woken"
+	case "interrupt":
+		if !tmux.SessionExists(task.Assignee) {
+			return nil, fmt.Errorf("workspace %q is not running", task.Assignee)
+		}
+		if err := tmux.InterruptWorkspace(task.Assignee); err != nil {
+			return nil, err
+		}
+		resp.Status = "interrupted"
+	case "retry":
+		retried, err := d.taskStore.Retry(task.ID, p.Note, workspace, p.ExpectedVersion)
+		if err != nil {
+			return nil, err
+		}
+		_ = d.queue.RemoveTaskMessages(task.Assignee, task.ID)
+		msg := taskAwareMessage(workspace, task.Assignee, buildTaskReminderMessage(*retried, strings.TrimSpace(p.Note)))
+		msg = d.queue.EnqueueMessage(msg)
+		d.taskStore.RecordDispatch(msg.TaskID, msg.To, msg.CreatedAt)
+		d.history.AppendMessage(msg)
+		if d.canDeliverMessage(task.Assignee, msg) {
+			d.sendPushEnvelope(task.Assignee, msg, "intervention push to %q dropped (outbox full or closed)")
+		}
+		d.wakeScheduler.Schedule(task.Assignee, workspace)
+		d.refreshTaskSnapshots()
+		refreshed, _ := d.taskStore.Get(task.ID)
+		resp.Task = d.enrichTask(*refreshed)
+		resp.Status = "queued"
+		resp.MessageID = msg.ID
+	default:
+		return nil, fmt.Errorf("invalid intervene_task action %q", p.Action)
+	}
+
+	return NewResponseEnvelope(env.ID, &resp)
+}
+
+func (d *Daemon) rehydrateRunnableTaskMessages(workspace string, push bool) int {
+	now := time.Now()
+	runnable := d.taskStore.RunnableByAssignee(workspace, now)
+	rehydrated := 0
+	for _, task := range runnable {
+		if d.queue.HasTaskMessage(workspace, task.ID) {
+			continue
+		}
+		msg := taskAwareMessage(task.CreatedBy, task.Assignee, buildTaskReminderMessage(task, ""))
+		msg = d.queue.EnqueueMessage(msg)
+		d.taskStore.RecordDispatch(msg.TaskID, msg.To, msg.CreatedAt)
+		d.history.AppendMessage(msg)
+		if push && d.canDeliverMessage(task.Assignee, msg) {
+			d.sendPushEnvelope(task.Assignee, msg, "rehydrated task push to %q dropped (outbox full or closed)")
+		}
+		d.wakeScheduler.Schedule(task.Assignee, task.CreatedBy)
+		rehydrated++
+	}
+	return rehydrated
+}
+
 func (d *Daemon) handleGetTeamStateEnvelope(env *Envelope) (*Envelope, error) {
 	var p GetTeamStatePayload
 	if err := env.DecodePayload(&p); err != nil {
@@ -314,6 +472,26 @@ func (d *Daemon) handleGetTeamStateEnvelope(env *Envelope) (*Envelope, error) {
 		return nil, err
 	}
 	return NewResponseEnvelope(env.ID, &TeamStateResponse{State: state})
+}
+
+func taskAwareMessage(from, to, content string) types.Message {
+	return types.Message{
+		From:    from,
+		To:      to,
+		Content: content,
+		TaskID:  extractTaskID(content),
+	}
+}
+
+func buildTaskReminderMessage(task types.Task, note string) string {
+	base := fmt.Sprintf("Task ID: %s\n\nTask: %s\nDescription: %s\nCurrent task status: %s\nThe daemon task registry still shows this task as runnable. Call get_task for the latest structured context, then continue or report a blocker.", task.ID, strings.TrimSpace(task.Title), strings.TrimSpace(task.Description), task.Status)
+	if strings.TrimSpace(task.Description) == "" {
+		base = fmt.Sprintf("Task ID: %s\n\nTask: %s\nCurrent task status: %s\nThe daemon task registry still shows this task as runnable. Call get_task for the latest structured context, then continue or report a blocker.", task.ID, strings.TrimSpace(task.Title), task.Status)
+	}
+	if note == "" {
+		return base
+	}
+	return base + "\n\nOperator note: " + note
 }
 
 func (d *Daemon) handleDryRunTeamEnvelope(env *Envelope) (*Envelope, error) {

@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/ashon/ax/internal/types"
 )
 
 type HistoryEntry struct {
@@ -15,6 +17,7 @@ type HistoryEntry struct {
 	From      string    `json:"from"`
 	To        string    `json:"to"`
 	Content   string    `json:"content"`
+	TaskID    string    `json:"task_id,omitempty"`
 }
 
 type History struct {
@@ -67,14 +70,19 @@ func (h *History) Load() error {
 }
 
 func (h *History) Append(from, to, content string) {
+	h.AppendMessage(types.Message{From: from, To: to, Content: content})
+}
+
+func (h *History) AppendMessage(msg types.Message) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	entry := HistoryEntry{
 		Timestamp: time.Now(),
-		From:      from,
-		To:        to,
-		Content:   content,
+		From:      msg.From,
+		To:        msg.To,
+		Content:   msg.Content,
+		TaskID:    msg.TaskID,
 	}
 	h.entries = append(h.entries, entry)
 	if len(h.entries) > h.maxSize {

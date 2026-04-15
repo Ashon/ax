@@ -16,6 +16,9 @@ func TestWakePromptIncludesLoopGuard(t *testing.T) {
 		"이전과 실질적으로 동일한 메시지",
 		"이전 응답과 실질적으로 동일하면 회신하지",
 		"repeated summary/repeated confirmation",
+		"`update_task(..., status=\"in_progress\"",
+		"owner mismatch",
+		"concise current-status re-ask",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("wake prompt missing %q: %q", want, prompt)
@@ -31,6 +34,7 @@ func TestWakePromptIncludesFreshContextInstructions(t *testing.T) {
 		"`Task ID:`",
 		"`get_task`",
 		"`start_mode`가 `fresh`",
+		"structured evidence와 함께 completion",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("fresh wake prompt missing %q: %q", want, prompt)

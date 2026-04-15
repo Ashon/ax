@@ -236,6 +236,15 @@ func (d *Daemon) handleEnvelope(conn net.Conn, env *Envelope, workspace *string)
 	case MsgListTasks:
 		return d.handleListTasksEnvelope(env)
 
+	case MsgCancelTask:
+		return d.handleCancelTaskEnvelope(env, *workspace)
+
+	case MsgRemoveTask:
+		return d.handleRemoveTaskEnvelope(env, *workspace)
+
+	case MsgInterveneTask:
+		return d.handleInterveneTaskEnvelope(env, *workspace)
+
 	case MsgGetTeamState:
 		return d.handleGetTeamStateEnvelope(env)
 
@@ -308,6 +317,60 @@ func truncate(s string, n int) string {
 	return s[:n] + "..."
 }
 
+func (d *Daemon) canDeliverMessage(workspace string, msg types.Message) bool {
+	taskID := messageTaskID(msg)
+	if taskID == "" {
+		return true
+	}
+	task, ok := d.taskStore.Get(taskID)
+	if !ok || task.Assignee != workspace {
+		return true
+	}
+	return !d.freshTaskDeliveryHeld(*task)
+}
+
+func (d *Daemon) freshTaskDeliveryHeld(task types.Task) bool {
+	if task.StartMode != types.TaskStartFresh || task.ClaimedAt != nil || task.LastDispatchAt == nil {
+		return false
+	}
+	entry, ok := d.registry.Get(task.Assignee)
+	if !ok {
+		return true
+	}
+	info := entry.Info()
+	return info.ConnectedAt == nil || !info.ConnectedAt.After(task.CreatedAt)
+}
+
+func (d *Daemon) taskRunnableReason(task types.Task, pendingCount int, now time.Time) string {
+	if task.Status != types.TaskPending {
+		return ""
+	}
+	if task.LastDispatchAt == nil || task.ClaimedAt != nil {
+		return ""
+	}
+	if task.NextRetryAt != nil && task.NextRetryAt.After(now) {
+		return ""
+	}
+	if d.freshTaskDeliveryHeld(task) || pendingCount > 0 {
+		return ""
+	}
+	return "task registry shows the task should still run, but no queued task message remains; daemon can synthesize a reminder from task metadata"
+}
+
+func countTaskMessages(messages []types.Message, taskID string) int {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return 0
+	}
+	count := 0
+	for _, msg := range messages {
+		if messageTaskID(msg) == taskID {
+			count++
+		}
+	}
+	return count
+}
+
 func (d *Daemon) refreshTaskSnapshots() {
 	d.taskStore.Refresh(d.enrichTask)
 }
@@ -324,7 +387,7 @@ func (d *Daemon) computeTaskStaleInfo(task types.Task) *types.TaskStaleInfo {
 	if task.Priority == "" {
 		task.Priority = types.TaskPriorityNormal
 	}
-	if task.Status != types.TaskPending && task.Status != types.TaskInProgress {
+	if task.Status != types.TaskPending && task.Status != types.TaskInProgress && task.Status != types.TaskBlocked {
 		return nil
 	}
 
@@ -340,6 +403,7 @@ func (d *Daemon) computeTaskStaleInfo(task types.Task) *types.TaskStaleInfo {
 
 	pendingMessages := d.queue.Pending(task.Assignee)
 	pendingCount := len(pendingMessages)
+	taskPendingCount := countTaskMessages(pendingMessages, task.ID)
 	lastMessageAt := d.lastRelevantMessageAt(task, pendingMessages)
 
 	info := &types.TaskStaleInfo{
@@ -347,6 +411,22 @@ func (d *Daemon) computeTaskStaleInfo(task types.Task) *types.TaskStaleInfo {
 		AgeSeconds:      int64(age / time.Second),
 		PendingMessages: pendingCount,
 		LastMessageAt:   lastMessageAt,
+	}
+	if task.ClaimedAt != nil {
+		info.ClaimState = "claimed"
+		info.ClaimStateNote = fmt.Sprintf("first task-flow action recorded by %s via %s", task.ClaimedBy, task.ClaimSource)
+	} else if task.LastDispatchAt != nil {
+		info.ClaimState = "awaiting_claim"
+		if d.freshTaskDeliveryHeld(task) {
+			info.ClaimStateNote = "fresh-context start pending; queued dispatch is held until the assignee registers a session newer than task creation"
+		} else if taskPendingCount > 0 {
+			info.ClaimStateNote = "task dispatch is queued; waiting for the assignee's first task-flow action"
+		} else {
+			info.ClaimStateNote = "task dispatch is no longer queued and no first task-flow action has been recorded"
+		}
+	} else {
+		info.ClaimState = "undispatched"
+		info.ClaimStateNote = "task has no recorded task-aware dispatch to the assignee yet"
 	}
 	if d.wakeScheduler != nil {
 		if wakeState, ok := d.wakeScheduler.State(task.Assignee); ok {
@@ -364,24 +444,61 @@ func (d *Daemon) computeTaskStaleInfo(task types.Task) *types.TaskStaleInfo {
 		info.Reason = fmt.Sprintf("no task progress update for %s (threshold %ds)", formatTaskAge(age), task.StaleAfterSeconds)
 		info.RecommendedAction = "inspect the assignee workspace and either append a progress log or redispatch/recover the task"
 	}
+	if runnableReason := d.taskRunnableReason(task, taskPendingCount, now); runnableReason != "" {
+		info.Runnable = true
+		info.RunnableReason = runnableReason
+		info.RecoveryEligible = true
+		if info.RecommendedAction == "" {
+			info.RecommendedAction = "re-register or wake the assignee so the daemon can rehydrate the runnable task reminder"
+		}
+	}
+	if task.Status == types.TaskPending && task.ClaimedAt == nil && d.freshTaskDeliveryHeld(task) && info.RecommendedAction == "" {
+		info.RecommendedAction = "recreate or re-register the assignee workspace, then wake it so it can call read_messages"
+	}
 
 	switch {
-	case task.Status == types.TaskPending && pendingCount == 0 && len(task.Logs) == 0:
-		info.StateDivergence = true
-		info.StateDivergenceNote = "task is still pending but no queued message remains for the assignee"
-		if info.RecommendedAction == "" {
-			info.RecommendedAction = "redispatch the task or confirm whether the assignee already consumed the request outside the task flow"
+	case task.Status == types.TaskBlocked:
+		if !info.IsStale {
+			info.Reason = "task is blocked awaiting a retry or new input"
 		}
-	case task.Status == types.TaskInProgress && pendingCount > 0:
+		info.RecoveryEligible = true
+		if info.RecommendedAction == "" {
+			info.RecommendedAction = "send follow-up input or use intervene_task(... action=\"retry\") when the blocker is cleared"
+		}
+	case task.Status == types.TaskPending && task.ClaimedAt == nil && task.LastDispatchAt != nil && taskPendingCount == 0:
 		info.StateDivergence = true
-		info.StateDivergenceNote = fmt.Sprintf("task is in_progress while %d pending message(s) still exist for %s", pendingCount, task.Assignee)
+		info.StateDivergenceNote = "task dispatch was consumed or removed, but the assignee still has not produced a first task-flow action"
+		if info.RecommendedAction == "" {
+			info.RecommendedAction = "recover, redispatch, or reroute the task unless the assignee promptly emits an in-task update"
+		}
+	case task.Status == types.TaskPending && task.ClaimedAt == nil && task.LastDispatchAt == nil:
+		if info.Reason == "" {
+			info.Reason = "task is pending and undispatched"
+		}
+	case task.Status == types.TaskInProgress && taskPendingCount > 0:
+		info.StateDivergence = true
+		info.StateDivergenceNote = fmt.Sprintf("task is claimed/in_progress while %d pending follow-up message(s) still exist for %s", taskPendingCount, task.Assignee)
 		if info.RecommendedAction == "" {
 			info.RecommendedAction = "check whether the pending inbox backlog or a missed handoff is preventing task completion"
+		}
+		if info.IsStale {
+			info.RecoveryEligible = true
+		}
+	}
+	if task.Rollup != nil && task.Rollup.NeedsParentReconciliation {
+		info.StateDivergence = true
+		info.StateDivergenceNote = "all child tasks are terminal, but the parent task still needs reconciliation"
+		info.RecommendedAction = "record the synthesized parent result or close the umbrella task"
+		if !info.IsStale {
+			info.Reason = info.StateDivergenceNote
 		}
 	}
 
 	if info.Reason == "" && info.StateDivergence {
 		info.Reason = info.StateDivergenceNote
+	}
+	if info.Reason == "" && info.ClaimStateNote != "" {
+		info.Reason = info.ClaimStateNote
 	}
 	if info.Reason == "" && pendingCount > 0 {
 		info.Reason = fmt.Sprintf("%d pending message(s) queued for %s", pendingCount, task.Assignee)
@@ -416,7 +533,7 @@ func (d *Daemon) lastRelevantMessageAt(task types.Task, pending []types.Message)
 }
 
 func taskRelatedHistory(entry HistoryEntry, task types.Task) bool {
-	if strings.Contains(entry.Content, task.ID) {
+	if entry.TaskID == task.ID || strings.Contains(entry.Content, task.ID) {
 		return true
 	}
 	if entry.From == task.CreatedBy && entry.To == task.Assignee {

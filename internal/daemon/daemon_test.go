@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -105,6 +106,31 @@ func sendAndRead(t *testing.T, conn net.Conn, scanner *bufio.Scanner, env *daemo
 		t.Fatalf("unmarshal response: %v", err)
 	}
 	return &resp
+}
+
+func createTaskWithStartMode(t *testing.T, conn net.Conn, scanner *bufio.Scanner, assignee, startMode string) string {
+	t.Helper()
+
+	createTaskEnv, _ := daemon.NewEnvelope("create-task", daemon.MsgCreateTask, &daemon.CreateTaskPayload{
+		Title:       "Fresh delivery test",
+		Description: "exercise fresh-task dispatch semantics",
+		Assignee:    assignee,
+		StartMode:   startMode,
+	})
+	createTaskResp := sendAndRead(t, conn, scanner, createTaskEnv)
+	if createTaskResp.Type != daemon.MsgResponse {
+		t.Fatalf("expected create_task response, got %s", createTaskResp.Type)
+	}
+
+	var payload daemon.ResponsePayload
+	if err := createTaskResp.DecodePayload(&payload); err != nil {
+		t.Fatalf("decode create task payload: %v", err)
+	}
+	var taskResp daemon.TaskResponse
+	if err := json.Unmarshal(payload.Data, &taskResp); err != nil {
+		t.Fatalf("unmarshal create task response: %v", err)
+	}
+	return taskResp.Task.ID
 }
 
 func TestDaemonRegisterAndList(t *testing.T) {
@@ -471,6 +497,179 @@ func TestDaemonDoesNotSuppressTaskDispatchMessages(t *testing.T) {
 		if !scanner2.Scan() {
 			t.Fatalf("expected push notification %d", i+1)
 		}
+	}
+}
+
+func TestDaemonFreshTaskDispatchWaitsForNewerWorkerRegistration(t *testing.T) {
+	socketPath, cancel := startTestDaemon(t)
+	defer cancel()
+
+	connOrch, scannerOrch := connectAndRegister(t, socketPath, "orchestrator")
+	defer connOrch.Close()
+
+	connWorker, scannerWorker := connectAndRegister(t, socketPath, "worker")
+
+	taskID := createTaskWithStartMode(t, connOrch, scannerOrch, "worker", "fresh")
+	message := "Task ID: " + taskID + "\nInspect fresh start barrier"
+	sendEnv, _ := daemon.NewEnvelope("send-fresh-held", daemon.MsgSendMessage, &daemon.SendMessagePayload{
+		To:      "worker",
+		Message: message,
+	})
+	sendResp := sendAndRead(t, connOrch, scannerOrch, sendEnv)
+	if sendResp.Type != daemon.MsgResponse {
+		t.Fatalf("expected send_message response, got %s", sendResp.Type)
+	}
+
+	readEnv, _ := daemon.NewEnvelope("read-fresh-held", daemon.MsgReadMessages, &daemon.ReadMessagesPayload{Limit: 10})
+	readResp := sendAndRead(t, connWorker, scannerWorker, readEnv)
+	if readResp.Type != daemon.MsgResponse {
+		t.Fatalf("expected held fresh task to avoid pre-read push, got %s", readResp.Type)
+	}
+	var readPayload daemon.ResponsePayload
+	if err := readResp.DecodePayload(&readPayload); err != nil {
+		t.Fatalf("decode held read payload: %v", err)
+	}
+	var readMessages daemon.ReadMessagesResponse
+	if err := json.Unmarshal(readPayload.Data, &readMessages); err != nil {
+		t.Fatalf("unmarshal held read response: %v", err)
+	}
+	if len(readMessages.Messages) != 0 {
+		t.Fatalf("expected fresh dispatch to stay queued until worker re-registers, got %+v", readMessages.Messages)
+	}
+
+	_ = connWorker.Close()
+
+	connWorkerFresh, scannerWorkerFresh := connectAndRegister(t, socketPath, "worker")
+	defer connWorkerFresh.Close()
+
+	readFreshResp := sendAndRead(t, connWorkerFresh, scannerWorkerFresh, readEnv)
+	if readFreshResp.Type != daemon.MsgResponse {
+		t.Fatalf("expected read_messages response after fresh register, got %s", readFreshResp.Type)
+	}
+	if err := readFreshResp.DecodePayload(&readPayload); err != nil {
+		t.Fatalf("decode fresh read payload: %v", err)
+	}
+	if err := json.Unmarshal(readPayload.Data, &readMessages); err != nil {
+		t.Fatalf("unmarshal fresh read response: %v", err)
+	}
+	if len(readMessages.Messages) != 1 || readMessages.Messages[0].TaskID != taskID {
+		t.Fatalf("expected queued fresh task after re-register, got %+v", readMessages.Messages)
+	}
+}
+
+func TestDaemonFreshTaskDispatchDeliversToWorkerRegisteredAfterTaskCreate(t *testing.T) {
+	socketPath, cancel := startTestDaemon(t)
+	defer cancel()
+
+	connOrch, scannerOrch := connectAndRegister(t, socketPath, "orchestrator")
+	defer connOrch.Close()
+
+	taskID := createTaskWithStartMode(t, connOrch, scannerOrch, "worker", "fresh")
+	time.Sleep(10 * time.Millisecond)
+
+	connWorker, scannerWorker := connectAndRegister(t, socketPath, "worker")
+	defer connWorker.Close()
+
+	message := "Task ID: " + taskID + "\nDispatch after fresh worker start"
+	sendEnv, _ := daemon.NewEnvelope("send-fresh-direct", daemon.MsgSendMessage, &daemon.SendMessagePayload{
+		To:      "worker",
+		Message: message,
+	})
+	sendResp := sendAndRead(t, connOrch, scannerOrch, sendEnv)
+	if sendResp.Type != daemon.MsgResponse {
+		t.Fatalf("expected send_message response, got %s", sendResp.Type)
+	}
+
+	if !scannerWorker.Scan() {
+		t.Fatal("expected immediate push for worker registered after task creation")
+	}
+	var pushEnv daemon.Envelope
+	if err := json.Unmarshal(scannerWorker.Bytes(), &pushEnv); err != nil {
+		t.Fatalf("unmarshal push: %v", err)
+	}
+	if pushEnv.Type != daemon.MsgPushMessage {
+		t.Fatalf("expected push_message, got %s", pushEnv.Type)
+	}
+
+	readEnv, _ := daemon.NewEnvelope("read-fresh-direct", daemon.MsgReadMessages, &daemon.ReadMessagesPayload{Limit: 10})
+	readResp := sendAndRead(t, connWorker, scannerWorker, readEnv)
+	if readResp.Type != daemon.MsgResponse {
+		t.Fatalf("expected read_messages response, got %s", readResp.Type)
+	}
+	var readPayload daemon.ResponsePayload
+	if err := readResp.DecodePayload(&readPayload); err != nil {
+		t.Fatalf("decode read payload: %v", err)
+	}
+	var readMessages daemon.ReadMessagesResponse
+	if err := json.Unmarshal(readPayload.Data, &readMessages); err != nil {
+		t.Fatalf("unmarshal read response: %v", err)
+	}
+	if len(readMessages.Messages) != 1 || readMessages.Messages[0].TaskID != taskID {
+		t.Fatalf("expected immediate delivery once worker connection is newer than task, got %+v", readMessages.Messages)
+	}
+}
+
+func TestDaemonRegisterRehydratesRunnableTaskReminderFromTaskStore(t *testing.T) {
+	socketPath, cancel := startTestDaemon(t)
+	defer cancel()
+
+	connOrch, scannerOrch := connectAndRegister(t, socketPath, "orchestrator")
+	defer connOrch.Close()
+
+	connWorker, scannerWorker := connectAndRegister(t, socketPath, "worker")
+
+	taskID := createTaskWithStartMode(t, connOrch, scannerOrch, "worker", "default")
+	message := "Task ID: " + taskID + "\nPlease inspect the daemon task model"
+	sendEnv, _ := daemon.NewEnvelope("send-task-rehydrate", daemon.MsgSendMessage, &daemon.SendMessagePayload{
+		To:      "worker",
+		Message: message,
+	})
+	sendResp := sendAndRead(t, connOrch, scannerOrch, sendEnv)
+	if sendResp.Type != daemon.MsgResponse {
+		t.Fatalf("expected send_message response, got %s", sendResp.Type)
+	}
+
+	if !scannerWorker.Scan() {
+		t.Fatal("expected initial push notification")
+	}
+
+	readEnv, _ := daemon.NewEnvelope("read-before-rehydrate", daemon.MsgReadMessages, &daemon.ReadMessagesPayload{Limit: 10})
+	readResp := sendAndRead(t, connWorker, scannerWorker, readEnv)
+	if readResp.Type != daemon.MsgResponse {
+		t.Fatalf("expected read_messages response, got %s", readResp.Type)
+	}
+	var readPayload daemon.ResponsePayload
+	if err := readResp.DecodePayload(&readPayload); err != nil {
+		t.Fatalf("decode read payload: %v", err)
+	}
+	var readMessages daemon.ReadMessagesResponse
+	if err := json.Unmarshal(readPayload.Data, &readMessages); err != nil {
+		t.Fatalf("unmarshal read response: %v", err)
+	}
+	if len(readMessages.Messages) != 1 || readMessages.Messages[0].TaskID != taskID {
+		t.Fatalf("expected initial task dispatch to be consumed, got %+v", readMessages.Messages)
+	}
+
+	_ = connWorker.Close()
+
+	connWorker2, scannerWorker2 := connectAndRegister(t, socketPath, "worker")
+	defer connWorker2.Close()
+
+	readResp = sendAndRead(t, connWorker2, scannerWorker2, readEnv)
+	if readResp.Type != daemon.MsgResponse {
+		t.Fatalf("expected read_messages response after re-register, got %s", readResp.Type)
+	}
+	if err := readResp.DecodePayload(&readPayload); err != nil {
+		t.Fatalf("decode rehydrated read payload: %v", err)
+	}
+	if err := json.Unmarshal(readPayload.Data, &readMessages); err != nil {
+		t.Fatalf("unmarshal rehydrated read response: %v", err)
+	}
+	if len(readMessages.Messages) != 1 || readMessages.Messages[0].TaskID != taskID {
+		t.Fatalf("expected daemon to rehydrate runnable task reminder, got %+v", readMessages.Messages)
+	}
+	if !strings.Contains(readMessages.Messages[0].Content, "daemon task registry still shows this task as runnable") {
+		t.Fatalf("expected canonical reminder message, got %q", readMessages.Messages[0].Content)
 	}
 }
 

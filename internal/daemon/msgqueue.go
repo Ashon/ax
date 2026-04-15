@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -171,29 +172,71 @@ func (q *MessageQueue) SetLogger(l *log.Logger) {
 }
 
 func (q *MessageQueue) Enqueue(from, to, content string) types.Message {
+	return q.EnqueueMessage(types.Message{
+		From:    from,
+		To:      to,
+		Content: content,
+	})
+}
+
+func (q *MessageQueue) EnqueueMessage(msg types.Message) types.Message {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	msg := types.Message{
-		ID:        uuid.New().String(),
-		From:      from,
-		To:        to,
-		Content:   content,
-		CreatedAt: time.Now(),
+	if msg.ID == "" {
+		msg.ID = uuid.New().String()
 	}
-	q.messages[to] = append(q.messages[to], msg)
-	if q.maxSize > 0 && len(q.messages[to]) > q.maxSize {
-		dropped := len(q.messages[to]) - q.maxSize
+	if msg.CreatedAt.IsZero() {
+		msg.CreatedAt = time.Now()
+	}
+	q.messages[msg.To] = append(q.messages[msg.To], msg)
+	if q.maxSize > 0 && len(q.messages[msg.To]) > q.maxSize {
+		dropped := len(q.messages[msg.To]) - q.maxSize
 		// Drop oldest entries; new (most recent) messages win.
-		q.messages[to] = q.messages[to][dropped:]
+		q.messages[msg.To] = q.messages[msg.To][dropped:]
 		if q.logger != nil {
-			q.logger.Printf("queue cap exceeded for %q, dropped %d oldest message(s)", to, dropped)
+			q.logger.Printf("queue cap exceeded for %q, dropped %d oldest message(s)", msg.To, dropped)
 		}
 	}
 	q.markDirtyLocked()
 	return msg
 }
 
+func (q *MessageQueue) RemoveTaskMessages(workspace, taskID string) int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	if strings.TrimSpace(taskID) == "" {
+		return 0
+	}
+	pending := q.messages[workspace]
+	if len(pending) == 0 {
+		return 0
+	}
+
+	remaining := pending[:0]
+	removed := 0
+	for _, msg := range pending {
+		if messageTaskID(msg) == taskID {
+			removed++
+			continue
+		}
+		remaining = append(remaining, msg)
+	}
+	if removed == 0 {
+		return 0
+	}
+	q.messages[workspace] = remaining
+	q.markDirtyLocked()
+	return removed
+}
+
 func (q *MessageQueue) Dequeue(workspace string, limit int, from string) []types.Message {
+	return q.DequeueIf(workspace, limit, from, nil)
+}
+
+// DequeueIf removes and returns up to limit pending messages for workspace that
+// match the optional sender filter and satisfy allow when it is provided.
+func (q *MessageQueue) DequeueIf(workspace string, limit int, from string, allow func(types.Message) bool) []types.Message {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
@@ -207,6 +250,10 @@ func (q *MessageQueue) Dequeue(workspace string, limit int, from string) []types
 
 	for _, msg := range pending {
 		if from != "" && msg.From != from {
+			remaining = append(remaining, msg)
+			continue
+		}
+		if allow != nil && !allow(msg) {
 			remaining = append(remaining, msg)
 			continue
 		}
@@ -226,10 +273,22 @@ func (q *MessageQueue) Dequeue(workspace string, limit int, from string) []types
 	return result
 }
 
-func (q *MessageQueue) PendingCount(workspace string) int {
+func (q *MessageQueue) PendingCountIf(workspace string, allow func(types.Message) bool) int {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	return len(q.messages[workspace])
+
+	count := 0
+	for _, msg := range q.messages[workspace] {
+		if allow != nil && !allow(msg) {
+			continue
+		}
+		count++
+	}
+	return count
+}
+
+func (q *MessageQueue) PendingCount(workspace string) int {
+	return q.PendingCountIf(workspace, nil)
 }
 
 func (q *MessageQueue) Pending(workspace string) []types.Message {
@@ -240,6 +299,18 @@ func (q *MessageQueue) Pending(workspace string) []types.Message {
 	result := make([]types.Message, len(pending))
 	copy(result, pending)
 	return result
+}
+
+func (q *MessageQueue) HasTaskMessage(workspace, taskID string) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	for _, msg := range q.messages[workspace] {
+		if messageTaskID(msg) == strings.TrimSpace(taskID) {
+			return true
+		}
+	}
+	return false
 }
 
 func (q *MessageQueue) Load() error {
@@ -270,4 +341,11 @@ func (q *MessageQueue) Load() error {
 	q.messages = messages
 	q.dirty = false
 	return nil
+}
+
+func messageTaskID(msg types.Message) string {
+	if strings.TrimSpace(msg.TaskID) != "" {
+		return strings.TrimSpace(msg.TaskID)
+	}
+	return extractTaskID(msg.Content)
 }

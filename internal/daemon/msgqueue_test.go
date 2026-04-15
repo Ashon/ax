@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ashon/ax/internal/types"
 )
 
 func TestMessageQueueDropsOldestWhenCapExceeded(t *testing.T) {
@@ -111,5 +113,68 @@ func TestPersistentMessageQueueBatchesEnqueueUntilFlush(t *testing.T) {
 	}
 	if _, err := os.Stat(queuePath); err != nil {
 		t.Fatalf("expected queue file after flush: %v", err)
+	}
+}
+
+func TestMessageQueueRemoveTaskMessagesUsesStructuredTaskID(t *testing.T) {
+	q := NewMessageQueue()
+	q.EnqueueMessage(types.Message{From: "orch", To: "worker", Content: "one", TaskID: "task-1"})
+	q.EnqueueMessage(types.Message{From: "orch", To: "worker", Content: "two", TaskID: "task-2"})
+
+	if removed := q.RemoveTaskMessages("worker", "task-1"); removed != 1 {
+		t.Fatalf("removed=%d, want 1", removed)
+	}
+	pending := q.Pending("worker")
+	if len(pending) != 1 || pending[0].TaskID != "task-2" {
+		t.Fatalf("unexpected pending messages after remove: %+v", pending)
+	}
+}
+
+func TestMessageQueueRemoveTaskMessagesFallsBackToTaskIDInContent(t *testing.T) {
+	q := NewMessageQueue()
+	q.Enqueue("orch", "worker", "Task ID: 11111111-1111-1111-1111-111111111111\nretry")
+	q.Enqueue("orch", "worker", "plain note")
+
+	if removed := q.RemoveTaskMessages("worker", "11111111-1111-1111-1111-111111111111"); removed != 1 {
+		t.Fatalf("removed=%d, want 1", removed)
+	}
+	if got := q.PendingCount("worker"); got != 1 {
+		t.Fatalf("pending=%d, want 1", got)
+	}
+}
+
+func TestMessageQueueDequeueIfLeavesBlockedMessagesQueued(t *testing.T) {
+	q := NewMessageQueue()
+	q.Enqueue("orch", "worker", "blocked")
+	q.Enqueue("orch", "worker", "deliver")
+
+	msgs := q.DequeueIf("worker", 10, "", func(msg types.Message) bool {
+		return msg.Content != "blocked"
+	})
+	if len(msgs) != 1 || msgs[0].Content != "deliver" {
+		t.Fatalf("unexpected dequeue result: %+v", msgs)
+	}
+	pending := q.Pending("worker")
+	if len(pending) != 1 || pending[0].Content != "blocked" {
+		t.Fatalf("expected blocked message to remain queued, got %+v", pending)
+	}
+	if got := q.PendingCountIf("worker", func(msg types.Message) bool { return msg.Content != "blocked" }); got != 0 {
+		t.Fatalf("deliverable pending=%d, want 0", got)
+	}
+}
+
+func TestMessageQueueHasTaskMessageMatchesStructuredAndEmbeddedTaskIDs(t *testing.T) {
+	q := NewMessageQueue()
+	q.EnqueueMessage(types.Message{From: "orch", To: "worker", Content: "structured", TaskID: "task-1"})
+	q.Enqueue("orch", "worker", "Task ID: 22222222-2222-2222-2222-222222222222\nembedded")
+
+	if !q.HasTaskMessage("worker", "task-1") {
+		t.Fatal("expected structured task ID to be found")
+	}
+	if !q.HasTaskMessage("worker", "22222222-2222-2222-2222-222222222222") {
+		t.Fatal("expected embedded task ID to be found")
+	}
+	if q.HasTaskMessage("worker", "missing") {
+		t.Fatal("did not expect missing task ID to match")
 	}
 }
