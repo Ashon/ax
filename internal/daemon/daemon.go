@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/ashon/ax/internal/types"
-	"github.com/ashon/ax/internal/usage"
 )
 
 const DefaultSocketPath = "~/.local/state/ax/daemon.sock"
@@ -89,6 +88,8 @@ func New(socketPath string) *Daemon {
 }
 
 func (d *Daemon) Run(ctx context.Context) error {
+	defer d.queue.Close()
+
 	// Ensure socket directory exists
 	dir := filepath.Dir(d.socketPath)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -191,315 +192,61 @@ func (d *Daemon) dispatchResponse(conn net.Conn, workspace string, env *Envelope
 func (d *Daemon) handleEnvelope(conn net.Conn, env *Envelope, workspace *string) (*Envelope, error) {
 	switch env.Type {
 	case MsgRegister:
-		var p RegisterPayload
-		if err := env.DecodePayload(&p); err != nil {
-			return nil, fmt.Errorf("decode register: %w", err)
-		}
-		*workspace = p.Workspace
-		entry, previous := d.registry.Register(p.Workspace, p.Dir, p.Description, conn)
-		d.startConnWriter(entry)
-		if previous != nil {
-			d.logger.Printf("workspace %q re-registered; closing previous connection", p.Workspace)
-			previous.Close()
-			_ = previous.Conn().Close()
-		}
-		d.refreshTaskSnapshots()
-		d.logger.Printf("registered workspace %q", p.Workspace)
-		return NewResponseEnvelope(env.ID, map[string]string{"status": "registered"})
+		return d.handleRegisterEnvelope(conn, env, workspace)
 
 	case MsgUnregister:
-		if *workspace != "" {
-			if d.registry.UnregisterIfConn(*workspace, conn) {
-				d.refreshTaskSnapshots()
-				d.logger.Printf("unregistered workspace %q", *workspace)
-			} else {
-				d.logger.Printf("ignored unregister for workspace %q from stale connection", *workspace)
-			}
-			*workspace = ""
-		}
-		return NewResponseEnvelope(env.ID, map[string]string{"status": "unregistered"})
+		return d.handleUnregisterEnvelope(conn, env, workspace)
 
 	case MsgSendMessage:
-		var p SendMessagePayload
-		if err := env.DecodePayload(&p); err != nil {
-			return nil, fmt.Errorf("decode send_message: %w", err)
-		}
-		if *workspace == "" {
-			return nil, fmt.Errorf("not registered")
-		}
-		if p.To == *workspace {
-			return nil, fmt.Errorf("cannot send message to self")
-		}
-		if d.shouldSuppressDuplicateMessage(*workspace, p.To, p.Message) {
-			d.logger.Printf("suppressed duplicate no-op message %s -> %s: %s", *workspace, p.To, truncate(p.Message, 50))
-			return NewResponseEnvelope(env.ID, map[string]string{
-				"message_id": "",
-				"status":     "suppressed",
-			})
-		}
-		msg := d.queue.Enqueue(*workspace, p.To, p.Message)
-		d.history.Append(*workspace, p.To, p.Message)
-		d.logger.Printf("message %s -> %s: %s", *workspace, p.To, truncate(p.Message, 50))
-
-		// Try to push notification to target via its writer goroutine.
-		// On failure, the wake scheduler retry below still covers delivery.
-		if entry, ok := d.registry.Get(p.To); ok {
-			pushEnv, _ := NewEnvelope("", MsgPushMessage, &msg)
-			if !entry.Send(pushEnv, 100*time.Millisecond) {
-				d.logger.Printf("push to %q dropped (outbox full or closed); wake scheduler will retry", p.To)
-			}
-		}
-
-		// Schedule wake retry for the target workspace
-		d.wakeScheduler.Schedule(p.To, *workspace)
-		d.refreshTaskSnapshots()
-
-		return NewResponseEnvelope(env.ID, map[string]string{
-			"message_id": msg.ID,
-			"status":     "sent",
-		})
+		return d.handleSendMessageEnvelope(env, *workspace)
 
 	case MsgBroadcast:
-		var p BroadcastPayload
-		if err := env.DecodePayload(&p); err != nil {
-			return nil, fmt.Errorf("decode broadcast: %w", err)
-		}
-		if *workspace == "" {
-			return nil, fmt.Errorf("not registered")
-		}
-		workspaces := d.registry.List()
-		var recipients []string
-		for _, ws := range workspaces {
-			if ws.Name == *workspace {
-				continue
-			}
-			if d.shouldSuppressDuplicateMessage(*workspace, ws.Name, p.Message) {
-				d.logger.Printf("suppressed duplicate no-op broadcast %s -> %s: %s", *workspace, ws.Name, truncate(p.Message, 50))
-				continue
-			}
-			msg := d.queue.Enqueue(*workspace, ws.Name, p.Message)
-			d.history.Append(*workspace, ws.Name, p.Message)
-			recipients = append(recipients, ws.Name)
-
-			// Push notification (non-blocking; wake scheduler is the
-			// retry safety net if the target's outbox is full).
-			if entry, ok := d.registry.Get(ws.Name); ok {
-				pushEnv, _ := NewEnvelope("", MsgPushMessage, &msg)
-				if !entry.Send(pushEnv, 100*time.Millisecond) {
-					d.logger.Printf("broadcast push to %q dropped (outbox full or closed)", ws.Name)
-				}
-			}
-			d.wakeScheduler.Schedule(ws.Name, *workspace)
-		}
-		d.refreshTaskSnapshots()
-		return NewResponseEnvelope(env.ID, map[string]interface{}{
-			"recipients": recipients,
-			"count":      len(recipients),
-		})
+		return d.handleBroadcastEnvelope(env, *workspace)
 
 	case MsgReadMessages:
-		var p ReadMessagesPayload
-		if err := env.DecodePayload(&p); err != nil {
-			return nil, fmt.Errorf("decode read_messages: %w", err)
-		}
-		if *workspace == "" {
-			return nil, fmt.Errorf("not registered")
-		}
-		limit := p.Limit
-		if limit <= 0 {
-			limit = 10
-		}
-		messages := d.queue.Dequeue(*workspace, limit, p.From)
-		// Cancel pending wake if no more messages remain
-		if d.queue.PendingCount(*workspace) == 0 {
-			d.wakeScheduler.Cancel(*workspace)
-		}
-		d.refreshTaskSnapshots()
-		return NewResponseEnvelope(env.ID, &ReadMessagesResponse{Messages: messages})
+		return d.handleReadMessagesEnvelope(env, *workspace)
 
 	case MsgListWorkspaces:
-		workspaces := d.registry.List()
-		return NewResponseEnvelope(env.ID, &ListWorkspacesResponse{Workspaces: workspaces})
+		return d.handleListWorkspacesEnvelope(env)
 
 	case MsgSetStatus:
-		var p SetStatusPayload
-		if err := env.DecodePayload(&p); err != nil {
-			return nil, fmt.Errorf("decode set_status: %w", err)
-		}
-		if *workspace == "" {
-			return nil, fmt.Errorf("not registered")
-		}
-		d.registry.SetStatus(*workspace, p.Status)
-		d.refreshTaskSnapshots()
-		return NewResponseEnvelope(env.ID, map[string]string{"status": "updated"})
+		return d.handleSetStatusEnvelope(env, *workspace)
 
 	case MsgSetShared:
-		var p SetSharedPayload
-		if err := env.DecodePayload(&p); err != nil {
-			return nil, fmt.Errorf("decode set_shared: %w", err)
-		}
-		d.sharedMu.Lock()
-		d.sharedValues[p.Key] = p.Value
-		sharedValuesCopy := copySharedValues(d.sharedValues)
-		d.sharedMu.Unlock()
-		if err := persistSharedValues(d.sharedPath, sharedValuesCopy); err != nil {
-			d.logger.Printf("persist shared values: %v", err)
-		}
-		return NewResponseEnvelope(env.ID, map[string]string{"status": "stored"})
+		return d.handleSetSharedEnvelope(env)
 
 	case MsgGetShared:
-		var p GetSharedPayload
-		if err := env.DecodePayload(&p); err != nil {
-			return nil, fmt.Errorf("decode get_shared: %w", err)
-		}
-		d.sharedMu.RLock()
-		val, found := d.sharedValues[p.Key]
-		d.sharedMu.RUnlock()
-		return NewResponseEnvelope(env.ID, &GetSharedResponse{Key: p.Key, Value: val, Found: found})
+		return d.handleGetSharedEnvelope(env)
 
 	case MsgListShared:
-		d.sharedMu.RLock()
-		vals := make(map[string]string, len(d.sharedValues))
-		for k, v := range d.sharedValues {
-			vals[k] = v
-		}
-		d.sharedMu.RUnlock()
-		return NewResponseEnvelope(env.ID, &ListSharedResponse{Values: vals})
+		return d.handleListSharedEnvelope(env)
 
 	case MsgUsageTrends:
-		var p UsageTrendsPayload
-		if err := env.DecodePayload(&p); err != nil {
-			return nil, fmt.Errorf("decode usage_trends: %w", err)
-		}
-		since := time.Duration(p.SinceMinutes) * time.Minute
-		bucket := time.Duration(p.BucketMinutes) * time.Minute
-		now := time.Now()
-		requests := make([]usage.WorkspaceBinding, 0, len(p.Workspaces))
-		for _, req := range p.Workspaces {
-			requests = append(requests, usage.WorkspaceBinding{
-				Name: req.Workspace,
-				Dir:  req.Cwd,
-			})
-		}
-		trends, err := usage.QueryWorkspaceTrends(requests, now, since, bucket)
-		if err != nil {
-			return nil, fmt.Errorf("query usage_trends: %w", err)
-		}
-		return NewResponseEnvelope(env.ID, &UsageTrendsResponse{Trends: trends})
+		return d.handleUsageTrendsEnvelope(env)
 
 	case MsgCreateTask:
-		var p CreateTaskPayload
-		if err := env.DecodePayload(&p); err != nil {
-			return nil, fmt.Errorf("decode create_task: %w", err)
-		}
-		if *workspace == "" {
-			return nil, fmt.Errorf("not registered")
-		}
-		startMode := types.TaskStartMode(p.StartMode)
-		switch startMode {
-		case "", types.TaskStartDefault:
-			startMode = types.TaskStartDefault
-		case types.TaskStartFresh:
-		default:
-			return nil, fmt.Errorf("invalid task start mode %q", p.StartMode)
-		}
-		priority := types.TaskPriority(p.Priority)
-		switch priority {
-		case "", types.TaskPriorityNormal:
-			priority = types.TaskPriorityNormal
-		case types.TaskPriorityLow, types.TaskPriorityHigh, types.TaskPriorityUrgent:
-		default:
-			return nil, fmt.Errorf("invalid task priority %q", p.Priority)
-		}
-		task := d.taskStore.Create(p.Title, p.Description, p.Assignee, *workspace, startMode, priority, p.StaleAfterSeconds)
-		d.refreshTaskSnapshots()
-		task, _ = d.taskStore.Get(task.ID)
-		d.logger.Printf("task created: %s (assignee=%s, by=%s)", task.ID, task.Assignee, *workspace)
-		return NewResponseEnvelope(env.ID, &TaskResponse{Task: *task})
+		return d.handleCreateTaskEnvelope(env, *workspace)
 
 	case MsgUpdateTask:
-		var p UpdateTaskPayload
-		if err := env.DecodePayload(&p); err != nil {
-			return nil, fmt.Errorf("decode update_task: %w", err)
-		}
-		if *workspace == "" {
-			return nil, fmt.Errorf("not registered")
-		}
-		task, err := d.taskStore.Update(p.ID, p.Status, p.Result, p.Log, *workspace)
-		if err != nil {
-			return nil, err
-		}
-		d.refreshTaskSnapshots()
-		task, _ = d.taskStore.Get(task.ID)
-		d.logger.Printf("task updated: %s (status=%s)", task.ID, task.Status)
-		return NewResponseEnvelope(env.ID, &TaskResponse{Task: *task})
+		return d.handleUpdateTaskEnvelope(env, *workspace)
 
 	case MsgGetTask:
-		var p GetTaskPayload
-		if err := env.DecodePayload(&p); err != nil {
-			return nil, fmt.Errorf("decode get_task: %w", err)
-		}
-		task, found := d.taskStore.Get(p.ID)
-		if !found {
-			return nil, fmt.Errorf("task %q not found", p.ID)
-		}
-		enriched := d.enrichTask(*task)
-		return NewResponseEnvelope(env.ID, &TaskResponse{Task: enriched})
+		return d.handleGetTaskEnvelope(env)
 
 	case MsgListTasks:
-		var p ListTasksPayload
-		if err := env.DecodePayload(&p); err != nil {
-			return nil, fmt.Errorf("decode list_tasks: %w", err)
-		}
-		tasks := d.taskStore.List(p.Assignee, p.CreatedBy, p.Status)
-		for i := range tasks {
-			tasks[i] = d.enrichTask(tasks[i])
-		}
-		return NewResponseEnvelope(env.ID, &ListTasksResponse{Tasks: tasks})
+		return d.handleListTasksEnvelope(env)
 
 	case MsgGetTeamState:
-		var p GetTeamStatePayload
-		if err := env.DecodePayload(&p); err != nil {
-			return nil, fmt.Errorf("decode get_team_state: %w", err)
-		}
-		state, err := d.getTeamState(p.ConfigPath)
-		if err != nil {
-			return nil, err
-		}
-		return NewResponseEnvelope(env.ID, &TeamStateResponse{State: state})
+		return d.handleGetTeamStateEnvelope(env)
 
 	case MsgDryRunTeam:
-		var p TeamReconfigurePayload
-		if err := env.DecodePayload(&p); err != nil {
-			return nil, fmt.Errorf("decode dry_run_team_reconfigure: %w", err)
-		}
-		plan, err := d.dryRunTeamReconfigure(p.ConfigPath, p.ExpectedRevision, p.Changes)
-		if err != nil {
-			return nil, err
-		}
-		return NewResponseEnvelope(env.ID, &TeamPlanResponse{Plan: plan})
+		return d.handleDryRunTeamEnvelope(env)
 
 	case MsgApplyTeam:
-		var p TeamReconfigurePayload
-		if err := env.DecodePayload(&p); err != nil {
-			return nil, fmt.Errorf("decode apply_team_reconfigure: %w", err)
-		}
-		ticket, err := d.beginTeamReconfigureApply(p.ConfigPath, p.ExpectedRevision, p.Changes, p.ReconcileMode)
-		if err != nil {
-			return nil, err
-		}
-		return NewResponseEnvelope(env.ID, &TeamApplyResponse{Ticket: ticket})
+		return d.handleApplyTeamEnvelope(env)
 
 	case MsgFinishTeam:
-		var p FinishTeamReconfigurePayload
-		if err := env.DecodePayload(&p); err != nil {
-			return nil, fmt.Errorf("decode finish_team_reconfigure: %w", err)
-		}
-		state, err := d.finishTeamReconfigureApply(p.Token, p.Success, p.Error, p.Actions)
-		if err != nil {
-			return nil, err
-		}
-		return NewResponseEnvelope(env.ID, &TeamStateResponse{State: state})
+		return d.handleFinishTeamEnvelope(env)
 
 	default:
 		return nil, fmt.Errorf("unknown message type: %s", env.Type)
