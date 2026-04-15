@@ -60,12 +60,26 @@ func WriteInstructions(dir, workspace, runtime, instructions string) error {
 }
 
 func managedWorkspaceInstructions(instructions string) string {
-	sections := make([]string, 0, 2)
+	sections := make([]string, 0, 3)
 	if trimmed := strings.TrimSpace(instructions); trimmed != "" {
 		sections = append(sections, trimmed)
 	}
+	sections = append(sections, messageHandlingInstructionContract())
 	sections = append(sections, taskIntakeInstructionContract())
 	return strings.Join(sections, "\n\n")
+}
+
+func messageHandlingInstructionContract() string {
+	return strings.Join([]string{
+		"## Message Handling Contract",
+		"- 수신 작업을 처리할 때는 `read_messages`로 최신 메시지를 확인하고, 새 작업 요청, 명시적 질문, 새 사실, 요청한 증거가 있을 때만 회신하세요.",
+		"- 결과나 추가 정보가 필요할 때만 `send_message`로 회신하세요. 단순 ACK/수신 확인/감사/상태 핑만의 메시지는 보내지 마세요.",
+		"- 진행 상태 공유가 필요하면 `send_message` 대신 `set_status`를 사용하세요.",
+		"- 처리 결과는 현재 작업을 요청한 발신자에게만 보내고, 새 작업/새 사실/명시적 질문/요청한 증거가 없으면 침묵을 기본값으로 두세요.",
+		"- `read_messages`에서 받은 최신 메시지가 이전에 처리한 메시지와 실질적으로 동일하거나, 지금 보내려는 응답이 이전 응답과 실질적으로 동일하면 회신하지 마세요.",
+		"- `\"no new work\"`, `\"nothing to do\"`, `\"대기 중\"`, `\"진행 상황 없음\"`, `\"확인했습니다\"`, `\"thanks\"`, `\"ok\"` 같은 no-op 상태 메시지에는 회신하지 마세요.",
+		"- `request` 툴의 반환값은 새 메시지가 아닙니다. 그 결과를 받았다고 다시 `send_message`를 보내지 마세요.",
+	}, "\n")
 }
 
 func taskIntakeInstructionContract() string {

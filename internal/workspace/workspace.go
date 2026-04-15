@@ -43,12 +43,8 @@ func EnsureArtifacts(name string, ws config.Workspace, socketPath, configPath st
 	if err := WriteMCPConfig(ws.Dir, name, daemon.ExpandSocketPath(socketPath), configPath); err != nil {
 		return fmt.Errorf("write mcp config: %w", err)
 	}
-	if ws.Instructions != "" {
-		if err := WriteInstructions(ws.Dir, name, runtime, ws.Instructions); err != nil {
-			return fmt.Errorf("write instructions: %w", err)
-		}
-	} else {
-		RemoveInstructions(ws.Dir)
+	if err := WriteInstructions(ws.Dir, name, runtime, ws.Instructions); err != nil {
+		return fmt.Errorf("write instructions: %w", err)
 	}
 	if runtime == agent.RuntimeCodex {
 		if err := EnsureCodexConfig(ws.Dir, name, socketPath, configPath); err != nil {
