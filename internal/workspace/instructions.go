@@ -36,7 +36,7 @@ func WriteInstructions(dir, workspace, runtime, instructions string) error {
 ## ax workspace: %s
 
 %s
-%s`, axMarkerStart, workspace, strings.TrimSpace(instructions), axMarkerEnd)
+%s`, axMarkerStart, workspace, managedWorkspaceInstructions(instructions), axMarkerEnd)
 
 	existing, err := os.ReadFile(targetPath)
 	if err != nil {
@@ -57,6 +57,30 @@ func WriteInstructions(dir, workspace, runtime, instructions string) error {
 	}
 
 	return os.WriteFile(targetPath, []byte(content), 0o644)
+}
+
+func managedWorkspaceInstructions(instructions string) string {
+	sections := make([]string, 0, 2)
+	if trimmed := strings.TrimSpace(instructions); trimmed != "" {
+		sections = append(sections, trimmed)
+	}
+	sections = append(sections, taskIntakeInstructionContract())
+	return strings.Join(sections, "\n\n")
+}
+
+func taskIntakeInstructionContract() string {
+	return strings.Join([]string{
+		"## Task Intake Contract",
+		"- 메시지에 `Task ID:`가 있으면, 전달되었거나 `read_messages`로 읽었다는 사실만으로 task를 claim한 것으로 간주하지 마세요.",
+		"- 먼저 `get_task`로 task 문맥을 확인하세요.",
+		"- 그 직후 첫 task-flow action은 정확히 다음 4가지 중 하나여야 합니다:",
+		"  1. `update_task(..., status=\"in_progress\", log=\"mode=implementation|inspection; scope=<exact files/modules>; validation=<plan>\")`",
+		"  2. exact blocker 또는 owner mismatch 보고",
+		"  3. superseded/invalid/fail 명시 후 종료",
+		"  4. structured evidence와 함께 completion",
+		"- owner mismatch나 missing dependency가 보이면 fail fast 하세요. 다른 owner/API/file이 필요한지 구체적으로 적고 task를 오래 붙잡지 마세요.",
+		"- 같은 `Task ID:`에 대해 substantive result를 이미 보냈다면, 그 뒤 도착한 concise current-status re-ask에는 같은 요약을 반복하지 말고 새 delta가 있을 때만 회신하세요.",
+	}, "\n")
 }
 
 func RemoveInstructions(dir string) {

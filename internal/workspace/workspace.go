@@ -10,6 +10,15 @@ import (
 	"github.com/ashon/ax/internal/tmux"
 )
 
+var (
+	workspaceSessionExists               = tmux.SessionExists
+	workspaceCreateSessionWithEnv        = tmux.CreateSessionWithEnv
+	workspaceCreateSessionWithCommandEnv = tmux.CreateSessionWithCommandEnv
+	workspaceCreateSessionWithArgsEnv    = tmux.CreateSessionWithArgsEnv
+	workspaceCreateSessionWithArgs       = tmux.CreateSessionWithArgs
+	workspaceDestroySession              = tmux.DestroySession
+)
+
 type Manager struct {
 	socketPath string
 	configPath string
@@ -50,6 +59,10 @@ func EnsureArtifacts(name string, ws config.Workspace, socketPath, configPath st
 }
 
 func (m *Manager) Create(name string, ws config.Workspace) error {
+	return m.create(name, ws, false)
+}
+
+func (m *Manager) create(name string, ws config.Workspace, fresh bool) error {
 	runtime := agent.NormalizeRuntime(ws.Runtime)
 	if _, err := agent.Get(runtime); err != nil {
 		return err
@@ -60,18 +73,18 @@ func (m *Manager) Create(name string, ws config.Workspace) error {
 	}
 
 	// Create tmux session
-	if tmux.SessionExists(name) {
+	if workspaceSessionExists(name) {
 		return fmt.Errorf("tmux session %q already exists", tmux.SessionName(name))
 	}
 	// Use an explicit agent command when configured, otherwise dispatch through ax.
 	if ws.Agent != "" {
 		if ws.Agent == "none" {
-			if err := tmux.CreateSessionWithEnv(name, ws.Dir, ws.Shell, ws.Env); err != nil {
+			if err := workspaceCreateSessionWithEnv(name, ws.Dir, ws.Shell, ws.Env); err != nil {
 				return fmt.Errorf("create tmux session: %w", err)
 			}
 			return nil
 		}
-		if err := tmux.CreateSessionWithCommandEnv(name, ws.Dir, ws.Agent, ws.Env); err != nil {
+		if err := workspaceCreateSessionWithCommandEnv(name, ws.Dir, ws.Agent, ws.Env); err != nil {
 			return fmt.Errorf("create tmux session: %w", err)
 		}
 		return nil
@@ -81,20 +94,35 @@ func (m *Manager) Create(name string, ws config.Workspace) error {
 	if err != nil {
 		return fmt.Errorf("resolve ax binary: %w", err)
 	}
-	return tmux.CreateSessionWithArgsEnv(name, ws.Dir, []string{
+	return workspaceCreateSessionWithArgsEnv(name, ws.Dir, managedRunAgentArgs(axBin, runtime, name, m.socketPath, m.configPath, fresh), ws.Env)
+}
+
+func managedRunAgentArgs(axBin, runtime, workspace, socketPath, configPath string, fresh bool) []string {
+	args := []string{
 		axBin,
 		"run-agent",
 		"--runtime", runtime,
-		"--workspace", name,
-		"--socket", m.socketPath,
-		"--config", m.configPath,
-	}, ws.Env)
+		"--workspace", workspace,
+		"--socket", socketPath,
+		"--config", configPath,
+	}
+	if fresh {
+		args = append(args, "--fresh")
+	}
+	return args
+}
+
+func (m *Manager) Restart(name string, ws config.Workspace) error {
+	if err := CleanupWorkspaceState(name, ws.Dir); err != nil {
+		return fmt.Errorf("reset workspace state: %w", err)
+	}
+	return m.create(name, ws, true)
 }
 
 func (m *Manager) Destroy(name string, dir string) error {
 	// Kill tmux session
-	if tmux.SessionExists(name) {
-		if err := tmux.DestroySession(name); err != nil {
+	if workspaceSessionExists(name) {
+		if err := workspaceDestroySession(name); err != nil {
 			return fmt.Errorf("destroy tmux session: %w", err)
 		}
 	}
@@ -110,7 +138,7 @@ func (m *Manager) Destroy(name string, dir string) error {
 
 func (m *Manager) CreateAll(cfg *config.Config) error {
 	for name, ws := range cfg.Workspaces {
-		if tmux.SessionExists(name) {
+		if workspaceSessionExists(name) {
 			fmt.Printf("  %s: already running (skipped)\n", name)
 			continue
 		}
@@ -124,7 +152,7 @@ func (m *Manager) CreateAll(cfg *config.Config) error {
 
 func (m *Manager) DestroyAll(cfg *config.Config) error {
 	for name, ws := range cfg.Workspaces {
-		if !tmux.SessionExists(name) {
+		if !workspaceSessionExists(name) {
 			fmt.Printf("  %s: not running (skipped)\n", name)
 			continue
 		}

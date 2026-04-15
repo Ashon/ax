@@ -8,7 +8,6 @@ import (
 
 	"github.com/ashon/ax/internal/agent"
 	"github.com/ashon/ax/internal/config"
-	"github.com/ashon/ax/internal/tmux"
 )
 
 func RootOrchestratorDir() (string, error) {
@@ -65,12 +64,12 @@ func EnsureOrchestrator(node *config.ProjectNode, parentName, socketPath, config
 		return fmt.Errorf("write %s prompt: %w", selfName, err)
 	}
 
-	if !isRoot && startSession && !tmux.SessionExists(selfName) {
+	if !isRoot && startSession && !workspaceSessionExists(selfName) {
 		exe, err := os.Executable()
 		if err != nil {
 			return fmt.Errorf("resolve ax binary: %w", err)
 		}
-		if err := tmux.CreateSessionWithArgs(selfName, orchDir, []string{
+		if err := workspaceCreateSessionWithArgs(selfName, orchDir, []string{
 			exe,
 			"run-agent",
 			"--runtime", runtime,
@@ -100,8 +99,8 @@ func CleanupWorkspaceArtifacts(name, dir string) error {
 }
 
 func CleanupWorkspaceState(name, dir string) error {
-	if tmux.SessionExists(name) {
-		if err := tmux.DestroySession(name); err != nil {
+	if workspaceSessionExists(name) {
+		if err := workspaceDestroySession(name); err != nil {
 			return fmt.Errorf("destroy %s session: %w", name, err)
 		}
 	}
@@ -109,8 +108,8 @@ func CleanupWorkspaceState(name, dir string) error {
 }
 
 func CleanupOrchestratorState(name, orchDir string) error {
-	if tmux.SessionExists(name) {
-		if err := tmux.DestroySession(name); err != nil {
+	if workspaceSessionExists(name) {
+		if err := workspaceDestroySession(name); err != nil {
 			return fmt.Errorf("destroy %s session: %w", name, err)
 		}
 	}
