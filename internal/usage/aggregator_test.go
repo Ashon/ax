@@ -4,15 +4,16 @@ import "testing"
 
 const (
 	lineUser   = `{"type":"user","timestamp":"2026-04-11T05:45:25Z","sessionId":"sess-1","cwd":"/tmp/x","message":{"role":"user","content":"hi"}}`
+	lineMCPAtt = `{"type":"attachment","timestamp":"2026-04-11T05:45:26Z","sessionId":"sess-1","cwd":"/tmp/x","attachment":{"type":"mcp_instructions_delta","addedBlocks":["## ax\nYou are the \"ax.daemon\" workspace agent."]}}`
 	lineOpus1  = `{"type":"assistant","timestamp":"2026-04-11T05:45:28Z","sessionId":"sess-1","cwd":"/tmp/x","message":{"role":"assistant","model":"claude-opus-4-6","usage":{"input_tokens":3,"output_tokens":295,"cache_read_input_tokens":12253,"cache_creation_input_tokens":6448}}}`
 	lineOpus2  = `{"type":"assistant","timestamp":"2026-04-11T05:45:32Z","sessionId":"sess-1","cwd":"/tmp/x","message":{"role":"assistant","model":"claude-opus-4-6","usage":{"input_tokens":1,"output_tokens":777,"cache_read_input_tokens":182166,"cache_creation_input_tokens":983}}}`
-	lineSonnet = `{"type":"assistant","timestamp":"2026-04-11T05:45:35Z","sessionId":"sess-1","cwd":"/tmp/x","message":{"role":"assistant","model":"claude-sonnet-4-5","usage":{"input_tokens":5,"output_tokens":120,"cache_read_input_tokens":500,"cache_creation_input_tokens":100}}}`
+	lineSonnet = `{"type":"assistant","timestamp":"2026-04-11T05:45:35Z","sessionId":"sess-1","cwd":"/tmp/x","message":{"role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"tool_use","name":"mcp__ax__read_messages","input":{}}],"usage":{"input_tokens":5,"output_tokens":120,"cache_read_input_tokens":500,"cache_creation_input_tokens":100}}}`
 	lineBad    = `{not json`
 )
 
 func TestAggregator_Cumulative(t *testing.T) {
 	a := NewAggregator()
-	for _, l := range []string{lineUser, lineOpus1, lineOpus2, lineSonnet, lineBad} {
+	for _, l := range []string{lineUser, lineMCPAtt, lineOpus1, lineOpus2, lineSonnet, lineBad} {
 		a.IngestLine([]byte(l))
 	}
 	if a.Turns() != 3 {
@@ -30,6 +31,15 @@ func TestAggregator_Cumulative(t *testing.T) {
 	wantCurrent := Tokens{Input: 5, Output: 120, CacheRead: 500, CacheCreation: 100}
 	if snap.CurrentContext != wantCurrent {
 		t.Errorf("current=%+v, want %+v", snap.CurrentContext, wantCurrent)
+	}
+	if snap.CumulativeMCP.PromptSignals != 1 {
+		t.Fatalf("prompt signals=%d, want 1", snap.CumulativeMCP.PromptSignals)
+	}
+	if snap.CumulativeMCP.ToolUseTurns != 1 {
+		t.Fatalf("tool use turns=%d, want 1", snap.CumulativeMCP.ToolUseTurns)
+	}
+	if snap.CurrentMCP.ToolUseTokens != wantCurrent.Total() {
+		t.Fatalf("current MCP tool tokens=%d, want %d", snap.CurrentMCP.ToolUseTokens, wantCurrent.Total())
 	}
 	if snap.CurrentModel != "claude-sonnet-4-5" {
 		t.Errorf("current model=%q", snap.CurrentModel)

@@ -79,6 +79,12 @@ func TestQueryHistory_UsesWorkspaceHintAndSessionForAttribution(t *testing.T) {
 	if daemonWS.RecentBuckets[0].Total != (3 + 295 + 10 + 5 + 1 + 40 + 2 + 1) {
 		t.Fatalf("first bucket total=%d", daemonWS.RecentBuckets[0].Total)
 	}
+	if daemonWS.RecentBuckets[0].MCPProxy.PromptSignals != 1 {
+		t.Fatalf("first bucket MCP prompt signals=%d, want 1", daemonWS.RecentBuckets[0].MCPProxy.PromptSignals)
+	}
+	if daemonWS.CurrentSnapshot.CumulativeMCPProxy.PromptSignals != 1 {
+		t.Fatalf("workspace cumulative MCP prompt signals=%d, want 1", daemonWS.CurrentSnapshot.CumulativeMCPProxy.PromptSignals)
+	}
 	if daemonWS.CurrentSnapshot.CurrentTotal != (5 + 120 + 7 + 3 + 1 + 40 + 2 + 1) {
 		t.Fatalf("workspace current total=%d", daemonWS.CurrentSnapshot.CurrentTotal)
 	}

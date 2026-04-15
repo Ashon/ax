@@ -14,8 +14,10 @@ type Aggregator struct {
 	lastActivity *time.Time
 
 	cumulative    Tokens
+	cumulativeMCP MCPProxyMetrics
 	byModel       map[string]*ModelTotals
 	currentTokens Tokens
+	currentMCP    MCPProxyMetrics
 	currentModel  string
 	turns         int64
 
@@ -55,6 +57,10 @@ func (a *Aggregator) Ingest(r parsedRecord) bool {
 		}
 		tsCopy := ts
 		a.lastActivity = &tsCopy
+	}
+	if r.MCPProxy.Total > 0 {
+		a.cumulativeMCP = a.cumulativeMCP.Add(r.MCPProxy)
+		a.currentMCP = r.MCPProxy
 	}
 	if !r.HasUsage {
 		return false
@@ -101,8 +107,10 @@ func (a *Aggregator) Snapshot(workspace, transcriptPath string) WorkspaceUsage {
 		SessionStart:     a.sessionStart,
 		LastActivity:     a.lastActivity,
 		CumulativeTotals: a.cumulative,
+		CumulativeMCP:    a.cumulativeMCP,
 		ByModel:          models,
 		CurrentContext:   a.currentTokens,
+		CurrentMCP:       a.currentMCP,
 		CurrentModel:     a.currentModel,
 		Turns:            a.turns,
 		Available:        a.turns > 0 || a.sessionID != "",

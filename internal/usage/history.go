@@ -66,22 +66,25 @@ type AgentHistory struct {
 // CurrentSnapshot captures the latest session snapshot for an agent, or an
 // aggregate of the latest agent snapshots at workspace scope.
 type CurrentSnapshot struct {
-	LastActivity     *time.Time `json:"last_activity,omitempty"`
-	CurrentContext   Tokens     `json:"current_context"`
-	CurrentTotal     int64      `json:"current_total"`
-	CurrentModel     string     `json:"current_model,omitempty"`
-	CumulativeTotals Tokens     `json:"cumulative_totals"`
-	CumulativeTotal  int64      `json:"cumulative_total"`
-	Turns            int64      `json:"turns"`
+	LastActivity       *time.Time      `json:"last_activity,omitempty"`
+	CurrentContext     Tokens          `json:"current_context"`
+	CurrentTotal       int64           `json:"current_total"`
+	CurrentMCPProxy    MCPProxyMetrics `json:"current_mcp_proxy"`
+	CurrentModel       string          `json:"current_model,omitempty"`
+	CumulativeTotals   Tokens          `json:"cumulative_totals"`
+	CumulativeTotal    int64           `json:"cumulative_total"`
+	CumulativeMCPProxy MCPProxyMetrics `json:"cumulative_mcp_proxy"`
+	Turns              int64           `json:"turns"`
 }
 
 // Bucket is one fixed-size historical usage bucket.
 type Bucket struct {
-	Start  time.Time `json:"start"`
-	End    time.Time `json:"end"`
-	Tokens Tokens    `json:"tokens"`
-	Total  int64     `json:"total"`
-	Turns  int64     `json:"turns"`
+	Start    time.Time       `json:"start"`
+	End      time.Time       `json:"end"`
+	Tokens   Tokens          `json:"tokens"`
+	Total    int64           `json:"total"`
+	MCPProxy MCPProxyMetrics `json:"mcp_proxy"`
+	Turns    int64           `json:"turns"`
 }
 
 type transcriptSeries struct {
@@ -312,10 +315,11 @@ func scanTranscript(path string, q HistoryQuery) (*transcriptSeries, error) {
 		}
 
 		rec := parsedRecordFromRaw(raw)
-		if !agg.Ingest(rec) {
+		counted := agg.Ingest(rec)
+		if rec.Timestamp.IsZero() || rec.Timestamp.Before(q.Since) || !rec.Timestamp.Before(q.Until) {
 			continue
 		}
-		if rec.Timestamp.IsZero() || rec.Timestamp.Before(q.Since) || !rec.Timestamp.Before(q.Until) {
+		if !counted && rec.MCPProxy.Total == 0 {
 			continue
 		}
 		start := rec.Timestamp.UTC().Truncate(q.BucketSize)
@@ -327,9 +331,14 @@ func scanTranscript(path string, q HistoryQuery) (*transcriptSeries, error) {
 			}
 			buckets[start] = b
 		}
-		b.Tokens = b.Tokens.Add(rec.Tokens)
-		b.Total += rec.Tokens.Total()
-		b.Turns++
+		if counted {
+			b.Tokens = b.Tokens.Add(rec.Tokens)
+			b.Total += rec.Tokens.Total()
+			b.Turns++
+		}
+		if rec.MCPProxy.Total > 0 {
+			b.MCPProxy = b.MCPProxy.Add(rec.MCPProxy)
+		}
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
@@ -343,13 +352,15 @@ func scanTranscript(path string, q HistoryQuery) (*transcriptSeries, error) {
 		return nil, nil
 	}
 	series.current = CurrentSnapshot{
-		LastActivity:     snap.LastActivity,
-		CurrentContext:   snap.CurrentContext,
-		CurrentTotal:     snap.CurrentContext.Total(),
-		CurrentModel:     snap.CurrentModel,
-		CumulativeTotals: snap.CumulativeTotals,
-		CumulativeTotal:  snap.CumulativeTotals.Total(),
-		Turns:            snap.Turns,
+		LastActivity:       snap.LastActivity,
+		CurrentContext:     snap.CurrentContext,
+		CurrentTotal:       snap.CurrentContext.Total(),
+		CurrentMCPProxy:    snap.CurrentMCP,
+		CurrentModel:       snap.CurrentModel,
+		CumulativeTotals:   snap.CumulativeTotals,
+		CumulativeTotal:    snap.CumulativeTotals.Total(),
+		CumulativeMCPProxy: snap.CumulativeMCP,
+		Turns:              snap.Turns,
 	}
 	series.buckets = sortBuckets(buckets)
 	return series, nil
@@ -507,6 +518,7 @@ func aggregateBuckets(all [][]Bucket, bucketSize time.Duration) []Bucket {
 			}
 			entry.Tokens = entry.Tokens.Add(bucket.Tokens)
 			entry.Total += bucket.Total
+			entry.MCPProxy = entry.MCPProxy.Add(bucket.MCPProxy)
 			entry.Turns += bucket.Turns
 		}
 	}
@@ -518,8 +530,10 @@ func aggregateSnapshots(snaps []CurrentSnapshot) CurrentSnapshot {
 	for _, snap := range snaps {
 		current.CurrentContext = current.CurrentContext.Add(snap.CurrentContext)
 		current.CurrentTotal += snap.CurrentTotal
+		current.CurrentMCPProxy = current.CurrentMCPProxy.Add(snap.CurrentMCPProxy)
 		current.CumulativeTotals = current.CumulativeTotals.Add(snap.CumulativeTotals)
 		current.CumulativeTotal += snap.CumulativeTotal
+		current.CumulativeMCPProxy = current.CumulativeMCPProxy.Add(snap.CumulativeMCPProxy)
 		current.Turns += snap.Turns
 		if newerSnapshot(snap.LastActivity, current.LastActivity) {
 			current.LastActivity = snap.LastActivity

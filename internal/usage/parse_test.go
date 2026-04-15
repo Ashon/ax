@@ -71,3 +71,31 @@ func TestParseLine_PermissionMode(t *testing.T) {
 		t.Error("permission-mode line must not report usage")
 	}
 }
+
+func TestParseLine_TracksMCPInstructionProxy(t *testing.T) {
+	line := []byte(`{"type":"attachment","timestamp":"2026-04-11T05:45:20Z","sessionId":"sess-1","cwd":"/tmp/x","attachment":{"type":"mcp_instructions_delta","addedBlocks":["## ax\nYou are the \"ax.daemon\" workspace agent."]}}`)
+	rec, err := parseLine(line)
+	if err != nil {
+		t.Fatalf("parseLine: %v", err)
+	}
+	if rec.MCPProxy.PromptSignals != 1 {
+		t.Fatalf("prompt signals=%d, want 1", rec.MCPProxy.PromptSignals)
+	}
+	if rec.MCPProxy.PromptTokens == 0 || rec.MCPProxy.Total == 0 {
+		t.Fatalf("expected non-zero prompt proxy, got %+v", rec.MCPProxy)
+	}
+}
+
+func TestParseLine_TracksMCPToolUseTokens(t *testing.T) {
+	line := []byte(`{"type":"assistant","timestamp":"2026-04-11T05:45:28Z","sessionId":"sess-1","cwd":"/tmp/x","message":{"role":"assistant","model":"claude-opus-4-6","content":[{"type":"tool_use","name":"mcp__ax__read_messages","input":{}}],"usage":{"input_tokens":3,"output_tokens":7,"cache_read_input_tokens":11,"cache_creation_input_tokens":13}}}`)
+	rec, err := parseLine(line)
+	if err != nil {
+		t.Fatalf("parseLine: %v", err)
+	}
+	if rec.MCPProxy.ToolUseTurns != 1 {
+		t.Fatalf("tool_use_turns=%d, want 1", rec.MCPProxy.ToolUseTurns)
+	}
+	if rec.MCPProxy.ToolUseTokens != rec.Tokens.Total() {
+		t.Fatalf("tool_use_tokens=%d, want %d", rec.MCPProxy.ToolUseTokens, rec.Tokens.Total())
+	}
+}
