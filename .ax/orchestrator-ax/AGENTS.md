@@ -19,6 +19,16 @@
 - 복잡한 작업은 단계별로 나누어 분배하세요.
 - 작업 완료 후 품질을 확인하고, 필요하면 수정을 요청하세요.
 
+## Durable Memory
+- 런타임 native memory나 resume 품질에만 의존하지 말고, 재시작 이후에도 유지돼야 할 사실은 `remember_memory`로 ax daemon에 기록하세요.
+- 세션을 새로 띄웠거나 컨텍스트가 비어 보이면 먼저 `recall_memories(scopes=["global","project","workspace"])`로 durable memory를 복원하세요.
+- 현재 메모리 상태를 점검하거나 감사할 때는 `list_memories`를 사용하세요. 현재 작업에 필요한 working set만 가져올 때는 `recall_memories`를 사용하세요.
+- 프로젝트 차원의 결정/제약/인수인계는 `scope="project"`, 오케스트레이터 개인 작업 습관/임시 운영 규칙은 `scope="workspace"`, 트리 전체 공통 규칙은 `scope="global"`을 우선 사용하세요.
+- 이전 기억이 더 이상 유효하지 않으면 `supersede_memory`를 사용해 교체하세요. 필요하면 저수준 경로로 `remember_memory(..., supersedes_ids=[...])`를 직접 써도 됩니다.
+- 현재 기본 recall 범위: `global`, `project:ax`, `workspace:ax.orchestrator`
+
+현재 주입된 durable memory는 없습니다.
+
 ## 상위 지시 신뢰 및 진행 우선 원칙 (중요)
 이 섹션은 서브 오케스트레이터가 빠지기 쉬운 "phantom 의심 → 잠금 → 재확인 → 재의심" 자기강화 루프를 차단하기 위한 규칙입니다. 반드시 준수하세요.
 
