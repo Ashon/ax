@@ -46,17 +46,7 @@ func (d *Daemon) handleControlLifecycleEnvelope(env *Envelope, requester string)
 		return nil, err
 	}
 
-	var target types.LifecycleTarget
-	switch action {
-	case types.LifecycleActionStart:
-		target, err = controlStartNamedTarget(d.socketPath, configPath, targetName)
-	case types.LifecycleActionStop:
-		target, err = controlStopNamedTarget(d.socketPath, configPath, targetName)
-	case types.LifecycleActionRestart:
-		target, err = controlRestartNamedTarget(d.socketPath, configPath, targetName)
-	default:
-		err = fmt.Errorf("invalid lifecycle action %q", action)
-	}
+	target, err := d.sessionManager().control(configPath, targetName, action)
 	if err != nil {
 		return nil, err
 	}

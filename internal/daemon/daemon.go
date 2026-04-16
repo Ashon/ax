@@ -37,8 +37,11 @@ type Daemon struct {
 	sharedPath     string
 	sharedMu       sync.RWMutex
 	taskStore      *TaskStore
+	taskSnapshots  *taskSnapshotWriter
 	teamController *teamController
 	wakeScheduler  *WakeScheduler
+	sessionMgr     *sessionManager
+	sessionMgrOnce sync.Once
 	listener       net.Listener
 	logger         *log.Logger
 }
@@ -78,16 +81,29 @@ func New(socketPath string) *Daemon {
 		sharedValues:   sharedValues,
 		sharedPath:     sharedPath,
 		taskStore:      taskStore,
+		taskSnapshots:  newTaskSnapshotWriter(TasksFilePath(sp), defaultTaskSnapshotFlushInterval, logger),
 		teamController: newTeamController(stateDir, teamStore),
 		wakeScheduler:  NewWakeScheduler(queue, logger),
 		logger:         logger,
 	}
+	d.sessionMgr = newSessionManager(sp, d.registry, d.queue, d.taskStore, d.wakeScheduler, d.logger)
 	d.wakeScheduler.SetQueueRefiller(d.recoverRunnableTaskMessages)
+	d.wakeScheduler.SetMissingSessionEnsurer(d.sessionManager().ensurePendingWakeTarget)
 	d.wakeScheduler.SetRetryAfterSuccessfulWake(func(workspace string) bool {
 		_, ok := d.registry.Get(workspace)
 		return !ok
 	})
 	return d
+}
+
+func (d *Daemon) sessionManager() *sessionManager {
+	if d == nil {
+		return nil
+	}
+	d.sessionMgrOnce.Do(func() {
+		d.sessionMgr = newSessionManager(d.socketPath, d.registry, d.queue, d.taskStore, d.wakeScheduler, d.logger)
+	})
+	return d.sessionMgr
 }
 
 func (d *Daemon) Run(ctx context.Context) error {
@@ -116,6 +132,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 	go d.wakeScheduler.Run(ctx)
 	go d.runIdleSleepLoop(ctx)
+	go d.taskSnapshots.Run(ctx, d.buildTaskSnapshot)
+	d.refreshTaskSnapshots()
 
 	go func() {
 		<-ctx.Done()
@@ -385,7 +403,10 @@ func countTaskMessages(messages []types.Message, taskID string) int {
 }
 
 func (d *Daemon) refreshTaskSnapshots() {
-	d.taskStore.Refresh(d.enrichTaskWithSnapshot)
+	if d.taskSnapshots == nil {
+		return
+	}
+	d.taskSnapshots.MarkDirty()
 }
 
 func (d *Daemon) taskSnapshotsByID() map[string]types.Task {
@@ -397,8 +418,29 @@ func (d *Daemon) taskSnapshotsByID() map[string]types.Task {
 	return snapshot
 }
 
+func (d *Daemon) buildTaskSnapshot() []types.Task {
+	tasks := d.taskStore.Snapshot()
+	snapshot := make(map[string]types.Task, len(tasks))
+	for _, task := range tasks {
+		snapshot[task.ID] = task
+	}
+	for i := range tasks {
+		tasks[i] = d.enrichTaskWithSnapshot(tasks[i], snapshot)
+	}
+	return tasks
+}
+
 func (d *Daemon) enrichTask(task types.Task) types.Task {
 	return d.enrichTaskWithSnapshot(task, d.taskSnapshotsByID())
+}
+
+func (d *Daemon) enrichedTaskByID(id string) (*types.Task, bool) {
+	task, ok := d.taskStore.Get(id)
+	if !ok {
+		return nil, false
+	}
+	enriched := d.enrichTaskWithSnapshot(*task, d.taskSnapshotsByID())
+	return &enriched, true
 }
 
 func (d *Daemon) enrichTaskWithSnapshot(task types.Task, snapshot map[string]types.Task) types.Task {

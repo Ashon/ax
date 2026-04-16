@@ -92,3 +92,47 @@ func TestWakeSchedulerKeepsRetryingAfterSuccessfulWakeWhenPolicyAllows(t *testin
 		t.Fatalf("expected next retry in the future, got %v", state.NextRetry)
 	}
 }
+
+func TestWakeSchedulerEnsuresMissingSessionBeforeCancelling(t *testing.T) {
+	restoreWakeSchedulerStubs(t)
+
+	queue := NewMessageQueue()
+	queue.Enqueue("orch", "worker", "follow up")
+
+	scheduler := NewWakeScheduler(queue, log.New(io.Discard, "", 0))
+	scheduler.SetMissingSessionEnsurer(func(workspace, sender string) bool {
+		if workspace != "worker" {
+			t.Fatalf("unexpected workspace %q", workspace)
+		}
+		if sender != "orch" {
+			t.Fatalf("unexpected sender %q", sender)
+		}
+		return true
+	})
+	scheduler.SetRetryAfterSuccessfulWake(func(workspace string) bool { return true })
+
+	wakeSchedulerSessionExists = func(name string) bool { return false }
+	wakeSchedulerSessionIdle = func(name string) bool { return false }
+	wakeSchedulerWakeWorkspace = func(name, prompt string) error {
+		t.Fatal("wake should not be attempted until a session exists")
+		return nil
+	}
+
+	scheduler.Schedule("worker", "orch")
+	scheduler.mu.Lock()
+	scheduler.pending["worker"].NextRetry = time.Now().Add(-time.Second)
+	scheduler.mu.Unlock()
+
+	scheduler.process()
+
+	state, ok := scheduler.State("worker")
+	if !ok {
+		t.Fatal("expected ensured session to remain scheduled for follow-up nudges")
+	}
+	if state.Attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", state.Attempts)
+	}
+	if !state.NextRetry.After(time.Now()) {
+		t.Fatalf("expected next retry in the future, got %v", state.NextRetry)
+	}
+}

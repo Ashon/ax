@@ -35,7 +35,7 @@ func TestProcessIdleSleepStopsEligibleWorkspace(t *testing.T) {
 	idleSleepSessionIdle = func(name string) bool { return name == "worker" }
 
 	stopped := false
-	idleSleepStopTarget = func(socketPath, configPath, target string) (types.LifecycleTarget, error) {
+	controlStopNamedTarget = func(socketPath, configPath, target string) (types.LifecycleTarget, error) {
 		stopped = true
 		if socketPath != "/tmp/ax.sock" {
 			t.Fatalf("unexpected socket path %q", socketPath)
@@ -86,7 +86,7 @@ func TestProcessIdleSleepSkipsWorkspaceWithOpenTasks(t *testing.T) {
 
 	idleSleepSessionExists = func(name string) bool { return true }
 	idleSleepSessionIdle = func(name string) bool { return true }
-	idleSleepStopTarget = func(socketPath, configPath, target string) (types.LifecycleTarget, error) {
+	controlStopNamedTarget = func(socketPath, configPath, target string) (types.LifecycleTarget, error) {
 		t.Fatal("idle sleep should not stop a workspace with open tasks")
 		return types.LifecycleTarget{}, nil
 	}
@@ -117,8 +117,39 @@ func TestProcessIdleSleepSkipsRootOrchestrator(t *testing.T) {
 
 	idleSleepSessionExists = func(name string) bool { return true }
 	idleSleepSessionIdle = func(name string) bool { return true }
-	idleSleepStopTarget = func(socketPath, configPath, target string) (types.LifecycleTarget, error) {
+	controlStopNamedTarget = func(socketPath, configPath, target string) (types.LifecycleTarget, error) {
 		t.Fatal("root orchestrator should not be auto-slept")
+		return types.LifecycleTarget{}, nil
+	}
+
+	d.processIdleSleep(now)
+}
+
+func TestProcessIdleSleepSkipsChildOrchestrator(t *testing.T) {
+	restoreIdleSleepStubs(t)
+
+	stateDir := t.TempDir()
+	d := &Daemon{
+		socketPath:    "/tmp/ax.sock",
+		queue:         NewMessageQueue(),
+		registry:      NewRegistry(),
+		taskStore:     NewTaskStore(stateDir),
+		wakeScheduler: NewWakeScheduler(NewMessageQueue(), nil),
+		logger:        log.New(io.Discard, "", 0),
+	}
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+
+	entry, _ := d.registry.Register("team.orchestrator", "", "", "/tmp/project/.ax/config.yaml", 15*time.Minute, clientConn)
+	now := time.Now()
+	entry.lastActiveAt = now.Add(-20 * time.Minute)
+
+	idleSleepSessionExists = func(name string) bool { return true }
+	idleSleepSessionIdle = func(name string) bool { return true }
+	controlStopNamedTarget = func(socketPath, configPath, target string) (types.LifecycleTarget, error) {
+		t.Fatal("child orchestrator should not be auto-slept")
 		return types.LifecycleTarget{}, nil
 	}
 
@@ -130,10 +161,10 @@ func restoreIdleSleepStubs(t *testing.T) {
 
 	oldExists := idleSleepSessionExists
 	oldIdle := idleSleepSessionIdle
-	oldStop := idleSleepStopTarget
+	oldStop := controlStopNamedTarget
 	t.Cleanup(func() {
 		idleSleepSessionExists = oldExists
 		idleSleepSessionIdle = oldIdle
-		idleSleepStopTarget = oldStop
+		controlStopNamedTarget = oldStop
 	})
 }

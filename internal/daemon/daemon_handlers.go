@@ -275,7 +275,7 @@ func (d *Daemon) handleCreateTaskEnvelope(env *Envelope, workspace string) (*Env
 	}
 	d.registry.Touch(workspace)
 	d.refreshTaskSnapshots()
-	task, _ = d.taskStore.Get(task.ID)
+	task, _ = d.enrichedTaskByID(task.ID)
 	d.logger.Printf("task created: %s (assignee=%s, by=%s)", task.ID, task.Assignee, workspace)
 	return NewResponseEnvelope(env.ID, &TaskResponse{Task: *task})
 }
@@ -309,7 +309,7 @@ func (d *Daemon) handleStartTaskEnvelope(env *Envelope, workspace string) (*Enve
 	}
 	d.registry.Touch(workspace)
 	d.refreshTaskSnapshots()
-	task, _ = d.taskStore.Get(task.ID)
+	task, _ = d.enrichedTaskByID(task.ID)
 	d.logger.Printf("task started: %s (assignee=%s, by=%s, dispatch=%s)", task.ID, task.Assignee, workspace, dispatch.Status)
 	return NewResponseEnvelope(env.ID, &StartTaskResponse{
 		Task:     *task,
@@ -333,7 +333,7 @@ func (d *Daemon) handleUpdateTaskEnvelope(env *Envelope, workspace string) (*Env
 	d.registry.Touch(workspace)
 	d.releaseSerialWorkflowSuccessor(*task)
 	d.refreshTaskSnapshots()
-	task, _ = d.taskStore.Get(task.ID)
+	task, _ = d.enrichedTaskByID(task.ID)
 	d.logger.Printf("task updated: %s (status=%s)", task.ID, task.Status)
 	return NewResponseEnvelope(env.ID, &TaskResponse{Task: *task})
 }
@@ -344,13 +344,11 @@ func (d *Daemon) handleGetTaskEnvelope(env *Envelope) (*Envelope, error) {
 		return nil, fmt.Errorf("decode get_task: %w", err)
 	}
 
-	task, found := d.taskStore.Get(p.ID)
+	task, found := d.enrichedTaskByID(p.ID)
 	if !found {
 		return nil, fmt.Errorf("task %q not found", p.ID)
 	}
-	snapshot := d.taskSnapshotsByID()
-	enriched := d.enrichTaskWithSnapshot(*task, snapshot)
-	return NewResponseEnvelope(env.ID, &TaskResponse{Task: enriched})
+	return NewResponseEnvelope(env.ID, &TaskResponse{Task: *task})
 }
 
 func (d *Daemon) handleListTasksEnvelope(env *Envelope) (*Envelope, error) {
@@ -387,7 +385,7 @@ func (d *Daemon) handleCancelTaskEnvelope(env *Envelope, workspace string) (*Env
 	}
 	d.releaseSerialWorkflowSuccessor(*task)
 	d.refreshTaskSnapshots()
-	task, _ = d.taskStore.Get(task.ID)
+	task, _ = d.enrichedTaskByID(task.ID)
 	d.logger.Printf("task cancelled: %s (dropped_messages=%d)", task.ID, dropped)
 	return NewResponseEnvelope(env.ID, &TaskResponse{Task: *task})
 }
@@ -411,7 +409,7 @@ func (d *Daemon) handleRemoveTaskEnvelope(env *Envelope, workspace string) (*Env
 		d.wakeScheduler.Cancel(task.Assignee)
 	}
 	d.refreshTaskSnapshots()
-	task, _ = d.taskStore.Get(task.ID)
+	task, _ = d.enrichedTaskByID(task.ID)
 	d.logger.Printf("task removed: %s", task.ID)
 	return NewResponseEnvelope(env.ID, &TaskResponse{Task: *task})
 }
@@ -474,12 +472,12 @@ func (d *Daemon) handleInterveneTaskEnvelope(env *Envelope, workspace string) (*
 		}
 		d.wakeScheduler.Schedule(task.Assignee, workspace)
 		if strings.TrimSpace(retried.DispatchConfigPath) != "" {
-			if err := daemonDispatchRunnableWork(d.socketPath, retried.DispatchConfigPath, task.Assignee, workspace, false); err != nil {
+			if err := d.sessionManager().ensureRunnable(retried.DispatchConfigPath, task.Assignee, workspace, false); err != nil {
 				return nil, fmt.Errorf("retry dispatch task %s: %w", task.ID, err)
 			}
 		}
 		d.refreshTaskSnapshots()
-		refreshed, _ := d.taskStore.Get(task.ID)
+		refreshed, _ := d.enrichedTaskByID(task.ID)
 		resp.Task = *refreshed
 		resp.Status = "queued"
 		resp.MessageID = msg.ID
@@ -643,7 +641,7 @@ func (d *Daemon) dispatchTaskStart(task types.Task) (TaskDispatch, error) {
 	if strings.TrimSpace(task.DispatchConfigPath) == "" {
 		return dispatch, nil
 	}
-	if err := daemonDispatchRunnableWork(d.socketPath, task.DispatchConfigPath, task.Assignee, task.CreatedBy, task.StartMode == types.TaskStartFresh); err != nil {
+	if err := d.sessionManager().ensureRunnable(task.DispatchConfigPath, task.Assignee, task.CreatedBy, task.StartMode == types.TaskStartFresh); err != nil {
 		return dispatch, fmt.Errorf("dispatch task %s: %w", task.ID, err)
 	}
 	return dispatch, nil

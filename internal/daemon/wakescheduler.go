@@ -25,6 +25,7 @@ type WakeScheduler struct {
 	logger                   *log.Logger
 	notify                   chan struct{} // signals the run loop to check immediately
 	refill                   func(workspace string) int
+	ensureSession            func(workspace, sender string) bool
 	retryAfterSuccessfulWake func(workspace string) bool
 }
 
@@ -82,6 +83,15 @@ func (s *WakeScheduler) SetQueueRefiller(refill func(workspace string) int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.refill = refill
+}
+
+// SetMissingSessionEnsurer installs an optional callback that can recreate a
+// managed target when wake processing finds pending work but no live tmux
+// session for the workspace.
+func (s *WakeScheduler) SetMissingSessionEnsurer(fn func(workspace, sender string) bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensureSession = fn
 }
 
 // SetRetryAfterSuccessfulWake installs an optional policy hook that decides
@@ -184,9 +194,40 @@ func (s *WakeScheduler) process() {
 			continue
 		}
 
-		// Check if session exists
 		if !wakeSchedulerSessionExists(pw.Workspace) {
-			s.Cancel(pw.Workspace)
+			ensured := false
+			if s.ensureSession != nil {
+				ensured = s.ensureSession(pw.Workspace, pw.Sender)
+			}
+			if !ensured {
+				s.Cancel(pw.Workspace)
+				continue
+			}
+
+			s.mu.Lock()
+			if entry, ok := s.pending[pw.Workspace]; ok {
+				entry.Attempts++
+				keepRetrying := true
+				if s.retryAfterSuccessfulWake != nil {
+					keepRetrying = s.retryAfterSuccessfulWake(pw.Workspace)
+				}
+				if entry.Attempts >= wakeMaxAttempts || !keepRetrying {
+					delete(s.pending, pw.Workspace)
+					if s.logger != nil {
+						if !keepRetrying {
+							s.logger.Printf("wake %q ensured a session and retry policy cleared further nudges", pw.Workspace)
+						} else {
+							s.logger.Printf("wake %q max attempts reached (%d)", pw.Workspace, entry.Attempts)
+						}
+					}
+				} else {
+					entry.NextRetry = time.Now().Add(wakeBackoff(entry.Attempts))
+					if s.logger != nil {
+						s.logger.Printf("wake %q ensured a session, next retry in %v", pw.Workspace, wakeBackoff(entry.Attempts))
+					}
+				}
+			}
+			s.mu.Unlock()
 			continue
 		}
 
