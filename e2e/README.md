@@ -1,27 +1,18 @@
 # Live Codex E2E
 
-This package contains an opt-in live end-to-end test for the `ax` orchestration
-stack using the real `codex` CLI, `tmux`, and an isolated toy-project fixture.
+이 디렉터리는 `ax` live orchestration E2E harness를 포함합니다.
 
-The harness:
+canonical 설명은 [docs/testing.md](../docs/testing.md)에 두고, 이 파일은 패키지 로컬 안내만 유지합니다.
 
-1. Builds the current `ax` binary from the checkout.
-2. Copies a toy `tasknote` fixture into a temporary sandbox.
-3. Uses isolated `HOME`, `XDG_STATE_HOME`, `TMUX_TMPDIR`, and daemon socket paths.
-4. Runs `ax up` against the fixture.
-5. Starts a root `codex` orchestrator in a dedicated tmux session.
-6. Sends a single user prompt and waits for delegated work to complete.
-7. Verifies `go test ./...` in both workspace modules plus `go build ./cmd/tasknote` in `cli`.
-
-Run it locally with:
+실행:
 
 ```bash
 AX_E2E_LIVE=1 go test ./e2e -run TestCodexOrchestratorBuildsTasknoteFixture -v -timeout 45m
 ```
 
-Requirements:
+요구 사항:
 
-- `tmux` installed
-- `codex` installed and already authenticated
-- network access for the live Codex runtime
-- enough local time budget for a real multi-agent build
+- `tmux`
+- `codex`
+- Codex 인증 완료 상태
+- 실제 multi-agent build를 돌릴 수 있는 로컬 환경
