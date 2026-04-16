@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"syscall"
 	"time"
@@ -143,8 +144,8 @@ func isDaemonRunning(socketPath string) bool {
 		return false
 	}
 
-	// Quick signal check via PID file
-	pidPath := socketPath[:len(socketPath)-len("daemon.sock")] + "daemon.pid"
+	// Quick signal check via the daemon pid file in the socket directory.
+	pidPath := filepath.Join(filepath.Dir(socketPath), "daemon.pid")
 	data, err := os.ReadFile(pidPath)
 	if err != nil {
 		return false
