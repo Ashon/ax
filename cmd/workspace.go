@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/ashon/ax/internal/config"
 	"github.com/ashon/ax/internal/daemon"
@@ -17,6 +18,11 @@ var workspaceCmd = &cobra.Command{
 	Aliases: []string{"ws"},
 	Short:   "Manage workspaces",
 }
+
+var (
+	wsSessionExists = tmux.SessionExists
+	wsAttachSession = tmux.AttachSession
+)
 
 var wsCreateDir string
 var wsListInternal bool
@@ -145,14 +151,16 @@ var wsListCmd = &cobra.Command{
 
 var wsAttachCmd = &cobra.Command{
 	Use:   "attach <name>",
-	Short: "Attach to a workspace tmux session",
+	Short: "Attach to a workspace or project orchestrator tmux session",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
-		if !tmux.SessionExists(name) {
-			return fmt.Errorf("workspace %q not found (no tmux session %s)", name, tmux.SessionName(name))
+		target := resolveWorkspaceAttachTarget(name)
+		if target == "" {
+			orchestratorName := workspace.OrchestratorName(strings.TrimSpace(name))
+			return fmt.Errorf("workspace %q not found (no tmux session %s; tried project orchestrator %q -> %s)", name, tmux.SessionName(name), orchestratorName, tmux.SessionName(orchestratorName))
 		}
-		return tmux.AttachSession(name)
+		return wsAttachSession(target)
 	},
 }
 
@@ -163,7 +171,7 @@ var wsInterruptCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
-		if !tmux.SessionExists(name) {
+		if !wsSessionExists(name) {
 			return fmt.Errorf("workspace %q not found (no tmux session %s)", name, tmux.SessionName(name))
 		}
 		if err := tmux.InterruptWorkspace(name); err != nil {
@@ -179,4 +187,19 @@ func init() {
 	wsListCmd.Flags().BoolVar(&wsListInternal, "internal", false, "include internal daemon-only identities such as _cli")
 	workspaceCmd.AddCommand(wsCreateCmd, wsDestroyCmd, wsListCmd, wsAttachCmd, wsInterruptCmd)
 	rootCmd.AddCommand(workspaceCmd)
+}
+
+func resolveWorkspaceAttachTarget(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	if wsSessionExists(name) {
+		return name
+	}
+	orchestratorName := workspace.OrchestratorName(name)
+	if orchestratorName != name && wsSessionExists(orchestratorName) {
+		return orchestratorName
+	}
+	return ""
 }
