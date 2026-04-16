@@ -11,10 +11,20 @@ import (
 )
 
 var (
-	orchSessionExists     = tmux.SessionExists
-	orchCreateEphemeral   = tmux.CreateEphemeralSession
-	orchAttachSession     = tmux.AttachSession
+	orchSessionExists   = tmux.SessionExists
+	orchCreateEphemeral = tmux.CreateEphemeralSession
+	orchAttachSession   = tmux.AttachSession
 )
+
+const rootOrchestratorFailureHoldScript = `"$@"
+status=$?
+if [ "$status" -ne 0 ] && [ "$status" -ne 130 ] && [ "$status" -ne 143 ]; then
+  printf '\n[ax] Root orchestrator process exited unexpectedly with status %s.\n' "$status"
+  printf '[ax] Common causes: runtime binary not found, auth/config issues, or a CLI crash.\n'
+  printf '[ax] Press Enter to close this tmux session.\n'
+  IFS= read -r _
+fi
+exit "$status"`
 
 // runRootOrchestrator prepares the root orchestrator workspace directory
 // (instruction file + MCP config + sub-orchestrator sessions) and then
@@ -97,12 +107,22 @@ func runRootOrchestrator(runtime string, runtimeArgs []string) error {
 		argv = append(argv, runtimeArgs...)
 	}
 
-	// Create an ephemeral tmux session (no remain-on-exit). When the user
-	// exits the agent CLI the session is destroyed automatically.
-	if err := orchCreateEphemeral(selfName, orchDir, argv); err != nil {
+	// Create an ephemeral tmux session. Successful exits still tear the session
+	// down immediately, but unexpected failures keep it open long enough for the
+	// user to see the exit status instead of a disappearing [exited] pane.
+	if err := orchCreateEphemeral(selfName, orchDir, wrapRootOrchestratorEphemeralArgv(argv)); err != nil {
 		return fmt.Errorf("create orchestrator session: %w", err)
 	}
 
 	// Attach blocks until the user exits the agent and the session dies.
 	return orchAttachSession(selfName)
+}
+
+func wrapRootOrchestratorEphemeralArgv(argv []string) []string {
+	if len(argv) == 0 {
+		return nil
+	}
+	wrapped := []string{"sh", "-lc", rootOrchestratorFailureHoldScript, "ax-root-orchestrator"}
+	wrapped = append(wrapped, argv...)
+	return wrapped
 }
