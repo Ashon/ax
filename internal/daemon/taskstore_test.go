@@ -1,6 +1,10 @@
 package daemon
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -236,6 +240,92 @@ func TestTaskStoreRetryResetsBlockedTaskForNextAttempt(t *testing.T) {
 	}
 	if claimedAgain.AttemptCount != 2 {
 		t.Fatalf("attempt_count=%d, want 2 after next claim", claimedAgain.AttemptCount)
+	}
+}
+
+func TestTaskStorePersistOmitsDerivedObservabilityFields(t *testing.T) {
+	dir := t.TempDir()
+	store := NewTaskStore(dir)
+
+	task, err := store.Create("title", "desc", "worker", "orch", "", "", "", 0)
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+
+	store.mu.Lock()
+	live := store.tasks[task.ID]
+	live.Rollup = &types.TaskRollup{TotalChildren: 1, PendingChildren: 1}
+	live.Sequence = &types.TaskSequenceInfo{
+		Mode:     types.TaskWorkflowSerial,
+		State:    types.TaskSequenceWaitingTurn,
+		Position: 2,
+	}
+	live.StaleInfo = &types.TaskStaleInfo{
+		IsStale: true,
+		Reason:  "stale",
+	}
+	store.persist()
+	store.mu.Unlock()
+
+	data, err := os.ReadFile(filepath.Join(dir, taskStateFileName))
+	if err != nil {
+		t.Fatalf("read persisted task state: %v", err)
+	}
+	body := string(data)
+	if strings.Contains(body, "\"sequence\"") {
+		t.Fatalf("expected durable task state to omit sequence, got %s", body)
+	}
+	if strings.Contains(body, "\"stale_info\"") {
+		t.Fatalf("expected durable task state to omit stale_info, got %s", body)
+	}
+	if !strings.Contains(body, "\"rollup\"") {
+		t.Fatalf("expected durable task state to keep rollup, got %s", body)
+	}
+}
+
+func TestTaskStoreLoadFallsBackToLegacyTasksSnapshotAndClearsDerivedFields(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+	legacy := []types.Task{{
+		ID:        "task-1",
+		Title:     "legacy",
+		Assignee:  "worker",
+		CreatedBy: "orch",
+		Status:    types.TaskPending,
+		Sequence: &types.TaskSequenceInfo{
+			Mode:     types.TaskWorkflowSerial,
+			State:    types.TaskSequenceWaitingTurn,
+			Position: 1,
+		},
+		StaleInfo: &types.TaskStaleInfo{
+			IsStale: true,
+			Reason:  "legacy stale",
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}}
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatalf("marshal legacy tasks: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, taskSnapshotFileName), data, 0o600); err != nil {
+		t.Fatalf("write legacy task snapshot: %v", err)
+	}
+
+	store := NewTaskStore(dir)
+	if err := store.Load(); err != nil {
+		t.Fatalf("load task store: %v", err)
+	}
+
+	got, ok := store.Get("task-1")
+	if !ok {
+		t.Fatal("expected legacy task to load")
+	}
+	if got.Sequence != nil {
+		t.Fatalf("expected sequence to be recomputed at read time, got %+v", got.Sequence)
+	}
+	if got.StaleInfo != nil {
+		t.Fatalf("expected stale_info to be recomputed at read time, got %+v", got.StaleInfo)
 	}
 }
 

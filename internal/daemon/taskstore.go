@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -21,16 +22,24 @@ type TaskStore struct {
 	mu       sync.RWMutex
 	tasks    map[string]*types.Task
 	filePath string
+	legacy   string
 }
 
-const operatorWorkspaceName = "_cli"
+const (
+	operatorWorkspaceName = "_cli"
+	taskStateFileName     = "tasks-state.json"
+	taskSnapshotFileName  = "tasks.json"
+)
 
 // NewTaskStore creates a persistent task store rooted in the daemon state dir.
-// Tasks are serialized to tasks.json under that directory.
+// Durable task state is serialized to tasks-state.json under that directory.
+// The legacy tasks.json path is still accepted on load so existing daemon state
+// continues to work after upgrades.
 func NewTaskStore(stateDir string) *TaskStore {
 	return &TaskStore{
 		tasks:    make(map[string]*types.Task),
-		filePath: filepath.Join(stateDir, "tasks.json"),
+		filePath: filepath.Join(stateDir, taskStateFileName),
+		legacy:   filepath.Join(stateDir, taskSnapshotFileName),
 	}
 }
 
@@ -44,6 +53,9 @@ func (s *TaskStore) Load() error {
 		return nil
 	}
 	data, err := os.ReadFile(s.filePath)
+	if err != nil && os.IsNotExist(err) && s.legacy != "" && s.legacy != s.filePath {
+		data, err = os.ReadFile(s.legacy)
+	}
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -60,18 +72,18 @@ func (s *TaskStore) Load() error {
 	}
 	loaded := make(map[string]*types.Task, len(tasks))
 	for _, task := range tasks {
-		cp := task
-		cp.Logs = make([]types.TaskLog, len(task.Logs))
-		copy(cp.Logs, task.Logs)
-		loaded[task.ID] = &cp
+		cp := copyTask(&task)
+		clearDerivedTaskFields(cp)
+		loaded[task.ID] = cp
 	}
 	s.tasks = loaded
 	return nil
 }
 
-// TasksFilePath returns the path to the tasks file for external readers (watch).
+// TasksFilePath returns the path to the materialized task snapshot file used by
+// external readers such as watch.
 func TasksFilePath(socketPath string) string {
-	return filepath.Join(filepath.Dir(ExpandSocketPath(socketPath)), "tasks.json")
+	return filepath.Join(filepath.Dir(ExpandSocketPath(socketPath)), taskSnapshotFileName)
 }
 
 // Create inserts a new pending task, applying default start mode and priority
@@ -391,8 +403,13 @@ func (s *TaskStore) persist() {
 	}
 	tasks := make([]types.Task, 0, len(s.tasks))
 	for _, t := range s.tasks {
-		tasks = append(tasks, *t)
+		persisted := copyTask(t)
+		clearDerivedTaskFields(persisted)
+		tasks = append(tasks, *persisted)
 	}
+	sort.Slice(tasks, func(i, j int) bool {
+		return tasks[i].ID < tasks[j].ID
+	})
 	data, err := json.Marshal(tasks)
 	if err != nil {
 		return
@@ -411,42 +428,6 @@ func (s *TaskStore) Snapshot() []types.Task {
 		result = append(result, *copyTask(task))
 	}
 	return result
-}
-
-// Refresh rewrites every stored task through transform and persists the updated
-// snapshots. Daemon observability fields are refreshed through this hook.
-func (s *TaskStore) Refresh(transform func(types.Task, map[string]types.Task) types.Task) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	snapshots := make(map[string]types.Task, len(s.tasks))
-	for id, task := range s.tasks {
-		snapshots[id] = snapshotTask(task)
-	}
-	for id, task := range snapshots {
-		s.tasks[id] = taskFromSnapshot(transform(task, snapshots))
-	}
-	s.persist()
-}
-
-func snapshotTask(task *types.Task) types.Task {
-	cp := *task
-	cp.ChildTaskIDs = append([]string(nil), task.ChildTaskIDs...)
-	cp.Logs = make([]types.TaskLog, len(task.Logs))
-	copy(cp.Logs, task.Logs)
-	cp.Rollup = copyTaskRollup(task.Rollup)
-	cp.Sequence = copyTaskSequence(task.Sequence)
-	return cp
-}
-
-func taskFromSnapshot(task types.Task) *types.Task {
-	cp := task
-	cp.ChildTaskIDs = append([]string(nil), task.ChildTaskIDs...)
-	cp.Logs = make([]types.TaskLog, len(task.Logs))
-	copy(cp.Logs, task.Logs)
-	cp.Rollup = copyTaskRollup(task.Rollup)
-	cp.Sequence = copyTaskSequence(task.Sequence)
-	return &cp
 }
 
 func hasTaskAction(status *types.TaskStatus, result *string, logMsg *string) bool {
@@ -713,6 +694,14 @@ func copyTask(task *types.Task) *types.Task {
 	cp.Rollup = copyTaskRollup(task.Rollup)
 	cp.Sequence = copyTaskSequence(task.Sequence)
 	return &cp
+}
+
+func clearDerivedTaskFields(task *types.Task) {
+	if task == nil {
+		return
+	}
+	task.Sequence = nil
+	task.StaleInfo = nil
 }
 
 func copyTaskRollup(rollup *types.TaskRollup) *types.TaskRollup {
