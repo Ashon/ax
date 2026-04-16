@@ -78,6 +78,46 @@ func TestTaskOperatorHintPrefersRecoverySignal(t *testing.T) {
 	}
 }
 
+func TestSortTasksForDisplayUsesDeterministicTieBreakers(t *testing.T) {
+	baseUpdated := time.Unix(2000, 0)
+	olderCreated := time.Unix(1500, 0)
+	newerCreated := time.Unix(1600, 0)
+
+	tasks := []types.Task{
+		{
+			ID:        "ccc",
+			Status:    types.TaskPending,
+			Priority:  types.TaskPriorityHigh,
+			UpdatedAt: baseUpdated,
+			CreatedAt: olderCreated,
+		},
+		{
+			ID:        "aaa",
+			Status:    types.TaskPending,
+			Priority:  types.TaskPriorityHigh,
+			UpdatedAt: baseUpdated,
+			CreatedAt: olderCreated,
+		},
+		{
+			ID:        "bbb",
+			Status:    types.TaskPending,
+			Priority:  types.TaskPriorityHigh,
+			UpdatedAt: baseUpdated,
+			CreatedAt: newerCreated,
+		},
+	}
+
+	sortTasksForDisplay(tasks)
+
+	got := []string{tasks[0].ID, tasks[1].ID, tasks[2].ID}
+	want := []string{"bbb", "aaa", "ccc"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("sorted IDs = %v, want %v", got, want)
+		}
+	}
+}
+
 func TestFormatTaskSummaryIncludesAttentionHints(t *testing.T) {
 	text := formatTaskSummary(taskSummary{
 		Total:          4,

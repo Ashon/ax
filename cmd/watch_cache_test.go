@@ -31,6 +31,12 @@ func resetWatchCaches(t *testing.T) {
 	sidebarCacheMu.Lock()
 	sidebarCache = sidebarCacheState{}
 	sidebarCacheMu.Unlock()
+
+	captureCacheMu.Lock()
+	captureCache = map[string]captureCacheEntry{}
+	captureCacheMu.Unlock()
+
+	watchCapturePane = capturePane
 }
 
 func writeHistoryFile(t *testing.T, path string, entries []daemon.HistoryEntry) {
@@ -159,6 +165,49 @@ func TestReadTasksFileCacheAndVersion(t *testing.T) {
 	}
 }
 
+func TestReadTasksFileSortsWithDeterministicTieBreakers(t *testing.T) {
+	resetWatchCaches(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tasks.json")
+
+	updated := time.Unix(2000, 0)
+	writeTasksFile(t, path, []types.Task{
+		{
+			ID:        "ccc",
+			Status:    types.TaskPending,
+			Priority:  types.TaskPriorityHigh,
+			UpdatedAt: updated,
+			CreatedAt: time.Unix(1500, 0),
+		},
+		{
+			ID:        "aaa",
+			Status:    types.TaskPending,
+			Priority:  types.TaskPriorityHigh,
+			UpdatedAt: updated,
+			CreatedAt: time.Unix(1500, 0),
+		},
+		{
+			ID:        "bbb",
+			Status:    types.TaskPending,
+			Priority:  types.TaskPriorityHigh,
+			UpdatedAt: updated,
+			CreatedAt: time.Unix(1600, 0),
+		},
+	})
+
+	got := readTasksFile(path)
+	if len(got) != 3 {
+		t.Fatalf("expected 3 tasks, got %d", len(got))
+	}
+
+	want := []string{"bbb", "aaa", "ccc"}
+	for i, id := range want {
+		if got[i].ID != id {
+			t.Fatalf("task order = [%s %s %s], want %v", got[0].ID, got[1].ID, got[2].ID, want)
+		}
+	}
+}
+
 func TestFilterTasksCachedReusesResultOnStableVersion(t *testing.T) {
 	resetWatchCaches(t)
 	tasks := []types.Task{
@@ -242,5 +291,62 @@ func TestClampIndex(t *testing.T) {
 				t.Fatalf("clampIndex(%d, %d) = %d, want %d", tc.current, tc.n, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestCapturePaneThrottledReusesCachedBackgroundCapture(t *testing.T) {
+	resetWatchCaches(t)
+
+	callCount := 0
+	watchCapturePane = func(sessionName string) string {
+		callCount++
+		return sessionName + "-capture"
+	}
+
+	now := time.Unix(1000, 0)
+	first := capturePaneThrottled("ax-worker", 2*time.Second, now)
+	second := capturePaneThrottled("ax-worker", 2*time.Second, now.Add(time.Second))
+	third := capturePaneThrottled("ax-worker", 2*time.Second, now.Add(3*time.Second))
+
+	if first != "ax-worker-capture" || second != first || third != first {
+		t.Fatalf("unexpected captures: first=%q second=%q third=%q", first, second, third)
+	}
+	if callCount != 2 {
+		t.Fatalf("capture call count = %d, want 2", callCount)
+	}
+}
+
+func TestRefreshSessionCapturesSkipsTokenReparseWhenCaptureUnchanged(t *testing.T) {
+	resetWatchCaches(t)
+
+	callCount := 0
+	watchCapturePane = func(sessionName string) string {
+		callCount++
+		return "status line\n↑ 12 tokens\n"
+	}
+
+	targets := []tmux.SessionInfo{{Name: "ax-worker", Workspace: "worker"}}
+	focused := map[string]bool{}
+	captures := map[string]string{}
+	prevCaps := map[string]string{}
+	activity := map[string]time.Time{}
+	sidebarStates := map[string]string{}
+	tokenData := map[string]agentTokens{}
+	now := time.Unix(1000, 0)
+
+	refreshSessionCaptures(targets, focused, captures, prevCaps, activity, sidebarStates, tokenData, now)
+	firstTokens := tokenData["worker"]
+	tokenData["worker"] = agentTokens{Workspace: "worker", Up: "manual"}
+
+	refreshSessionCaptures(targets, focused, captures, prevCaps, activity, sidebarStates, tokenData, now.Add(time.Second))
+
+	if callCount != 1 {
+		t.Fatalf("capture call count = %d, want 1", callCount)
+	}
+	if got := tokenData["worker"].Up; got != "manual" {
+		t.Fatalf("expected unchanged capture to skip token reparse, got %q", got)
+	}
+	if firstTokens.Up == "" {
+		t.Fatalf("expected initial token parse, got %+v", firstTokens)
 	}
 }

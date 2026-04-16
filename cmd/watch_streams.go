@@ -719,20 +719,7 @@ func readTasksFileUncached(path string) []types.Task {
 	if json.Unmarshal(data, &tasks) != nil {
 		return nil
 	}
-	// Sort: in_progress first, then pending, then completed/failed
-	sort.Slice(tasks, func(i, j int) bool {
-		oi := taskSortOrder(tasks[i].Status)
-		oj := taskSortOrder(tasks[j].Status)
-		if oi != oj {
-			return oi < oj
-		}
-		pi := taskPriorityOrder(tasks[i].Priority)
-		pj := taskPriorityOrder(tasks[j].Priority)
-		if pi != pj {
-			return pi < pj
-		}
-		return tasks[i].UpdatedAt.After(tasks[j].UpdatedAt)
-	})
+	sortTasksForDisplay(tasks)
 	return tasks
 }
 

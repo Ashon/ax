@@ -97,20 +97,40 @@ func filterTasks(tasks []types.Task, filter taskFilterMode) []types.Task {
 		}
 		filtered = append(filtered, task)
 	}
-	sort.Slice(filtered, func(i, j int) bool {
-		oi := taskSortOrder(filtered[i].Status)
-		oj := taskSortOrder(filtered[j].Status)
-		if oi != oj {
-			return oi < oj
-		}
-		pi := taskPriorityOrder(filtered[i].Priority)
-		pj := taskPriorityOrder(filtered[j].Priority)
-		if pi != pj {
-			return pi < pj
-		}
-		return filtered[i].UpdatedAt.After(filtered[j].UpdatedAt)
-	})
+	sortTasksForDisplay(filtered)
 	return filtered
+}
+
+// sortTasksForDisplay keeps task lists deterministic across refreshes even
+// when upstream task snapshots arrive in arbitrary order (for example from map
+// iteration). It preserves the existing primary sort semantics, then breaks
+// ties by creation time and finally task ID.
+func sortTasksForDisplay(tasks []types.Task) {
+	sort.Slice(tasks, func(i, j int) bool {
+		return taskLessForDisplay(tasks[i], tasks[j])
+	})
+}
+
+func taskLessForDisplay(a, b types.Task) bool {
+	oa := taskSortOrder(a.Status)
+	ob := taskSortOrder(b.Status)
+	if oa != ob {
+		return oa < ob
+	}
+
+	pa := taskPriorityOrder(a.Priority)
+	pb := taskPriorityOrder(b.Priority)
+	if pa != pb {
+		return pa < pb
+	}
+
+	if !a.UpdatedAt.Equal(b.UpdatedAt) {
+		return a.UpdatedAt.After(b.UpdatedAt)
+	}
+	if !a.CreatedAt.Equal(b.CreatedAt) {
+		return a.CreatedAt.After(b.CreatedAt)
+	}
+	return a.ID < b.ID
 }
 
 func clampTaskSelection(current int, tasks []types.Task, filter taskFilterMode) int {

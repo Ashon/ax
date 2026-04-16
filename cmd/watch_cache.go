@@ -252,8 +252,9 @@ type captureCacheEntry struct {
 }
 
 var (
-	captureCacheMu sync.Mutex
-	captureCache   = map[string]captureCacheEntry{}
+	captureCacheMu   sync.Mutex
+	captureCache     = map[string]captureCacheEntry{}
+	watchCapturePane = capturePane
 )
 
 // capturePaneThrottled returns the tmux capture-pane output for sessionName,
@@ -261,10 +262,13 @@ var (
 // bypasses the cache and always fetches fresh content. The cache is
 // populated on every call (including bypass calls) so cache hits remain
 // consistent across callers.
-func capturePaneThrottled(sessionName string, maxAge time.Duration) string {
+func capturePaneThrottled(sessionName string, maxAge time.Duration, now time.Time) string {
+	if now.IsZero() {
+		now = time.Now()
+	}
 	if maxAge > 0 {
 		captureCacheMu.Lock()
-		if e, ok := captureCache[sessionName]; ok && time.Since(e.fetched) < maxAge {
+		if e, ok := captureCache[sessionName]; ok && now.Sub(e.fetched) < maxAge {
 			content := e.content
 			captureCacheMu.Unlock()
 			return content
@@ -272,12 +276,12 @@ func capturePaneThrottled(sessionName string, maxAge time.Duration) string {
 		captureCacheMu.Unlock()
 	}
 
-	content := capturePane(sessionName)
+	content := watchCapturePane(sessionName)
 
 	captureCacheMu.Lock()
 	captureCache[sessionName] = captureCacheEntry{
 		content: content,
-		fetched: time.Now(),
+		fetched: now,
 	}
 	captureCacheMu.Unlock()
 	return content

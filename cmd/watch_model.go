@@ -67,16 +67,17 @@ var (
 
 type tickMsg time.Time
 
-const watchFPS = 60
+const watchFPS = 12
 const watchMessagePaneMinHeight = 6
 const watchSidebarWidth = 34
 const watchDataRefreshInterval = 250 * time.Millisecond
 const watchSessionRefreshInterval = time.Second
-const watchBackgroundCaptureBatchSize = 4
+const watchBackgroundCaptureBatchSize = 2
 const watchWorkspaceRefreshInterval = time.Second
 const watchTrendRefreshInterval = 15 * time.Second
 const watchTrendWindowMinutes = 24 * 60
 const watchTrendBucketMinutes = 3 * 60
+const watchBackgroundCaptureMaxAge = 2 * time.Second
 
 type watchModel struct {
 	width                  int
@@ -246,9 +247,10 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		targets, nextCursor := planCaptureTargets(m.sessions, watchFocusedWorkspaces(m.sessions, m.selected), m.captureCursor, watchBackgroundCaptureBatchSize)
+		focused := watchFocusedWorkspaces(m.sessions, m.selected)
+		targets, nextCursor := planCaptureTargets(m.sessions, focused, m.captureCursor, watchBackgroundCaptureBatchSize)
 		m.captureCursor = nextCursor
-		refreshSessionCaptures(targets, m.captures, m.prevCaps, m.activity, m.sidebarStates, m.tokenData, now)
+		refreshSessionCaptures(targets, focused, m.captures, m.prevCaps, m.activity, m.sidebarStates, m.tokenData, now)
 
 		m.msgHistory, m.historyFileModTime = readHistoryFileIfChanged(m.histPath, m.historyFileModTime, m.msgHistory, 50)
 		m.tasks, m.tasksFileModTime = readTasksFileIfChanged(m.tasksPath, m.tasksFileModTime, m.tasks)
@@ -335,9 +337,13 @@ func planCaptureTargets(sessions []tmux.SessionInfo, focused map[string]bool, cu
 	return targets, (cursor + count) % len(background)
 }
 
-func refreshSessionCaptures(targets []tmux.SessionInfo, captures, prevCaps map[string]string, activity map[string]time.Time, sidebarStates map[string]string, tokenData map[string]agentTokens, now time.Time) {
+func refreshSessionCaptures(targets []tmux.SessionInfo, focused map[string]bool, captures, prevCaps map[string]string, activity map[string]time.Time, sidebarStates map[string]string, tokenData map[string]agentTokens, now time.Time) {
 	for _, session := range targets {
-		content := capturePane(session.Name)
+		maxAge := watchBackgroundCaptureMaxAge
+		if focused[session.Workspace] {
+			maxAge = 0
+		}
+		content := capturePaneThrottled(session.Name, maxAge, now)
 		previous := captures[session.Workspace]
 		if previous != "" && previous != content {
 			activity[session.Workspace] = now
@@ -345,14 +351,19 @@ func refreshSessionCaptures(targets []tmux.SessionInfo, captures, prevCaps map[s
 		prevCaps[session.Workspace] = previous
 		captures[session.Workspace] = content
 		sidebarStates[session.Workspace] = deriveSidebarAgentState(content, activity[session.Workspace], now)
+		if previous == content {
+			continue
+		}
 		if tokens := parseAgentTokens(session.Workspace, content); tokens.Up != "" || tokens.Down != "" || tokens.Total != "" || tokens.Cost != "" {
 			tokenData[session.Workspace] = tokens
+		} else {
+			delete(tokenData, session.Workspace)
 		}
 	}
 }
 
 func orderedLeafSessionIndices(sessions []tmux.SessionInfo) []int {
-	entries := buildSidebarEntries(sessions)
+	entries := buildSidebarEntriesCached(sessions)
 	indices := make([]int, 0, len(sessions))
 	for _, entry := range entries {
 		if !entry.group && entry.sessionIndex >= 0 {

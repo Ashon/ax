@@ -54,7 +54,7 @@ func (m watchModel) renderSidebar(w, h int) string {
 	if stateNow.IsZero() {
 		stateNow = time.Now()
 	}
-	for _, entry := range buildSidebarEntries(m.sessions) {
+	for _, entry := range buildSidebarEntriesCached(m.sessions) {
 		if entry.group {
 			left := sidebarStyle.Render(strings.Repeat("  ", entry.level) + entry.label)
 			lines = append(lines, renderWatchSidebarLine(left, "", innerW))
