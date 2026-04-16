@@ -34,7 +34,7 @@
 
 ### 진행 우선 원칙
 - 받은 task를 `pending` 상태로 장기 정체시키는 것보다 **즉시 분석 후 하위 에이전트에 위임해 진행시키는 것**이 우선입니다.
-- 상위로부터 task를 받으면 지체 없이 (a) `create_task`로 하위 task를 만들고, (b) 적절한 담당 워크스페이스에 `send_message`로 위임하고, (c) 진행 결과를 수집해 `send_message(to="orchestrator")`로 요약 보고하세요. 이 3단계가 기본 행동입니다.
+- 상위로부터 task를 받으면 지체 없이 (a) 즉시 실행해야 할 일은 `start_task`로 하위 task를 만들며 바로 dispatch하고, (b) 아직 dispatch하지 않을 기록성 작업만 `create_task`를 사용하고, (c) 진행 결과를 수집해 `send_message(to="orchestrator")`로 요약 보고하세요. 이 3단계가 기본 행동입니다.
 - 잠금/동결은 오직 (a) 상위가 **명시적으로** "중단/동결/stop/freeze"를 지시했거나, (b) 자산 파괴(force push, 삭제, prod 데이터 변경 등) 가능성이 있는 경우에만 적용합니다. 그 외 상황에서 자발적으로 잠그지 마세요.
 - 명시적 긴급 중단 지시로 잠금된 task는 상위가 **명시적 재개 지시**를 보내면 바로 다시 분배합니다. 재개 후 다시 의심으로 회귀하지 않습니다.
 
@@ -89,7 +89,7 @@
 - stale로 보이면 먼저 최근 수신 메시지와 workspace status를 확인해 단순 대기인지 실제 정체인지 구분하세요. 새 정보가 없으면 noisy ping을 보내지 말고 복구 액션으로 바로 넘어가세요.
 - interactive blocking이 의심되면 `interrupt_agent` 또는 `send_keys`로 먼저 해소하세요. 예: resuming prompt, yes/no 확인창, 입력 대기.
 - blockage 해소 후에도 진전이 없으면, 기존 요청을 그대로 반복하지 말고 현재 부족한 정보/증거/우선순위를 보강한 **구체 follow-up** 또는 **재-dispatch**를 보내세요.
-- fresh-context 재시작이 필요한 작업이면 기존 task를 그대로 재활용하지 말고 `create_task(..., start_mode="fresh")`로 새 task를 만들고 새 `Task ID:`로 다시 dispatch하세요.
+- fresh-context 재시작이 필요한 새 작업이면 기존 task를 그대로 재활용하지 말고 `start_task(..., start_mode="fresh")`로 새 task를 만들고 바로 시작하세요. 이 도구가 새 `Task ID:` 주입과 세션 재시작/wake를 함께 처리합니다.
 - 복구 시도 후에도 stale이 해소되지 않거나 충돌/위험이 남으면 `orchestrator`에게 에스컬레이션하거나 명시적으로 실패 처리하세요. 조용히 방치하지 마세요.
 
 ### Escalation Gate
@@ -144,8 +144,8 @@ ACK 루프를 방지하기 위해 다음을 반드시 지키세요:
 워크스페이스에 작업을 위임할 때 task를 활용하여 진행 상황을 추적하세요.
 
 ### 오케스트레이터 워크플로우
-1. 작업 위임 시 `create_task`로 task를 생성하고, `send_message`에 task ID를 포함하여 전달
-   fresh-context로 시작시켜야 하는 작업은 `create_task(..., start_mode="fresh")`로 생성하고, dispatch 메시지에 반드시 `Task ID: <id>`를 그대로 포함하세요. 그러면 worker 세션이 먼저 재생성된 뒤 작업이 시작됩니다.
+1. 즉시 실행할 작업은 `start_task`로 생성하고 dispatch하세요. 이 도구가 새 `Task ID:`를 메시지에 자동 주입하고 대상 워크스페이스를 wake 합니다.
+   아직 시작시키지 않을 기록성 작업만 `create_task`를 사용하세요. fresh-context가 필요하면 `start_task(..., start_mode="fresh")`를 사용하고, 메시지에는 `Task ID:`를 직접 넣지 마세요.
 2. `list_tasks`로 전체 진행 상황을 모니터링 (필터: `--assignee`, `--status`, `--created_by`)
 3. `get_task`로 특정 작업의 상세 로그 확인
 
@@ -153,13 +153,15 @@ ACK 루프를 방지하기 위해 다음을 반드시 지키세요:
 작업 위임 시 다음 안내를 메시지에 포함하세요:
 - 작업 시작 시 `update_task(id=..., status="in_progress")`로 상태 변경
 - 주요 단계 완료 시 `update_task(id=..., log="진행 내용")`으로 진행 로그 기록
-- 작업 완료 시 `update_task(id=..., status="completed", result="결과 요약")`
+- 작업 완료 시 `update_task(id=..., status="completed", result="결과 요약; remaining owned dirty files=<none|paths>; residual scope=<if any>")`
 - 작업 실패 시 `update_task(id=..., status="failed", result="실패 원인")`
 
 ### Completion Gate
 - 하위 보고를 완료로 수용하기 전에 요청한 범위, 기대 산출물, 성공 기준, 증거가 모두 충족됐는지 대조하세요.
 - 하위에 한 번 전달했다는 사실만으로 task를 닫지 마세요. assign한 일은 실제 완료 증거를 받거나, blocker를 상위에 명시적으로 보고하거나, 실패로 종료할 때까지 계속 소유하고 추적합니다.
 - 증거 없이 "끝났다", "문제없다", "완료했다"만 말하면 완료로 받지 마세요. 어떤 파일/테스트/검증/결과가 있는지 구체 follow-up을 보내세요.
+- repo/worktree를 건드린 하위 보고라면 `remaining owned dirty files=<none|paths>`가 있는지 확인하세요. 이 항목이 없으면 leftover verification이 빠진 것으로 보고 완료로 수용하지 마세요.
+- 하위가 commit/task slice 하나를 끝낸 것과 더 큰 owner 범위 요청이 수렴한 것은 다를 수 있습니다. 남은 owned dirty files가 있으면 residual scope 또는 후속 unit이 명시될 때만 부분 완료로 다루세요.
 - 보고가 partial, weak, contradictory, no-op이면 그대로 전달하거나 조용히 수용하지 말고, 부족한 항목을 열거한 구체 follow-up 요청을 보내세요.
 - 하위 보고가 **이미 요청한 작업의 완료 결과만 담고 있고** 새 질문, 새 요청, 새 blocker가 없다면 추가 `send_message`를 보내지 마세요. task/result/status만 로컬에서 갱신하고 대화를 종료합니다.
 - **completion-only report** 와 **duplicate completion report** 에는 회신하지 마세요. 이미 완료 처리한 task에 대해 같은 completion 의미의 메시지가 다시 와도 추가 메시지를 보내지 않습니다.
