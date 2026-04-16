@@ -24,6 +24,7 @@ func registerTools(srv *server.MCPServer, client *DaemonClient, configPath strin
 	registerMessageTools(srv, client, configPath)
 	registerWorkspaceTools(srv, client)
 	registerSharedTools(srv, client)
+	registerMemoryTools(srv, client, configPath)
 	registerUsageTools(srv, client, configPath)
 	registerTaskTools(srv, client, configPath)
 

@@ -8,6 +8,7 @@ import (
 
 	"github.com/ashon/ax/internal/agent"
 	"github.com/ashon/ax/internal/config"
+	axmemory "github.com/ashon/ax/internal/memory"
 )
 
 func TestWriteOrchestratorPromptDistinguishesAliasAndProjectName(t *testing.T) {
@@ -26,7 +27,7 @@ func TestWriteOrchestratorPromptDistinguishesAliasAndProjectName(t *testing.T) {
 	}
 
 	subDir := t.TempDir()
-	if err := WriteOrchestratorPrompt(subDir, child, child.Prefix, "orchestrator", "claude"); err != nil {
+	if err := WriteOrchestratorPrompt(subDir, child, child.Prefix, "orchestrator", "claude", "/tmp/ax.sock"); err != nil {
 		t.Fatalf("write sub prompt: %v", err)
 	}
 	subPrompt, err := os.ReadFile(filepath.Join(subDir, instructionFile))
@@ -53,7 +54,7 @@ func TestWriteOrchestratorPromptDistinguishesAliasAndProjectName(t *testing.T) {
 	}
 
 	rootDir := t.TempDir()
-	if err := WriteOrchestratorPrompt(rootDir, root, "", "", "claude"); err != nil {
+	if err := WriteOrchestratorPrompt(rootDir, root, "", "", "claude", "/tmp/ax.sock"); err != nil {
 		t.Fatalf("write root prompt: %v", err)
 	}
 	rootPrompt, err := os.ReadFile(filepath.Join(rootDir, instructionFile))
@@ -89,6 +90,47 @@ func TestOrchestratorPromptRequiresTrackingAssignedWorkToClosure(t *testing.T) {
 	} {
 		if !strings.Contains(subPrompt, want) {
 			t.Fatalf("expected sub prompt to contain %q\n%s", want, subPrompt)
+		}
+	}
+}
+
+func TestWriteOrchestratorPromptIncludesDurableMemorySection(t *testing.T) {
+	stateDir := t.TempDir()
+	socketPath := filepath.Join(stateDir, "daemon.sock")
+	store := axmemory.NewStore(stateDir)
+	if _, err := store.Remember(axmemory.ProjectScope("alpha"), "decision", "Auth", "Use the shared gateway for API authentication.", []string{"auth"}, "alpha.orchestrator", nil); err != nil {
+		t.Fatalf("remember project memory: %v", err)
+	}
+
+	instructionFile, err := agent.InstructionFile("claude")
+	if err != nil {
+		t.Fatalf("instruction file: %v", err)
+	}
+
+	child := &config.ProjectNode{
+		Name:   "shared",
+		Alias:  "alpha",
+		Prefix: "alpha",
+	}
+	subDir := t.TempDir()
+	if err := WriteOrchestratorPrompt(subDir, child, child.Prefix, "orchestrator", "claude", socketPath); err != nil {
+		t.Fatalf("write sub prompt: %v", err)
+	}
+	subPrompt, err := os.ReadFile(filepath.Join(subDir, instructionFile))
+	if err != nil {
+		t.Fatalf("read sub prompt: %v", err)
+	}
+	text := string(subPrompt)
+	for _, want := range []string{
+		"## Durable Memory",
+		"`global`, `project:alpha`, `workspace:alpha.orchestrator`",
+		"Use the shared gateway for API authentication.",
+		"[decision] `project:alpha` Auth:",
+		"`list_memories`",
+		"`supersede_memory`",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected durable memory prompt section to contain %q\n%s", want, text)
 		}
 	}
 }

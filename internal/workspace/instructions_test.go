@@ -27,6 +27,12 @@ func TestWriteInstructionsAppendsManagedContracts(t *testing.T) {
 	text := string(content)
 	for _, want := range []string{
 		"Follow local ownership rules.",
+		"## Durable Memory Contract",
+		"`remember_memory`",
+		"`recall_memories(scopes=[\"global\",\"project\",\"workspace\"])`",
+		"`list_memories`",
+		"`supersede_memory`",
+		"`scope=\"project\"`",
 		"## Message Handling Contract",
 		"단순 ACK/수신 확인/감사/상태 핑만의 메시지는 보내지 마세요.",
 		"`set_status`",
@@ -65,6 +71,8 @@ func TestWriteInstructionsWritesManagedContractsWithoutCustomBody(t *testing.T) 
 	text := string(content)
 	for _, want := range []string{
 		"## ax workspace: ax.runtime",
+		"## Durable Memory Contract",
+		"`list_memories`",
 		"## Message Handling Contract",
 		"## Task Intake Contract",
 		"## Completion Reporting Contract",
@@ -103,6 +111,9 @@ func TestWriteInstructionsReplacesManagedSectionWithoutDuplicatingContract(t *te
 	}
 	if strings.Count(text, "## Message Handling Contract") != 1 {
 		t.Fatalf("expected one message handling section, got %d\n%s", strings.Count(text, "## Message Handling Contract"), text)
+	}
+	if strings.Count(text, "## Durable Memory Contract") != 1 {
+		t.Fatalf("expected one durable memory section, got %d\n%s", strings.Count(text, "## Durable Memory Contract"), text)
 	}
 	if strings.Count(text, "## Task Intake Contract") != 1 {
 		t.Fatalf("expected one task contract section, got %d\n%s", strings.Count(text, "## Task Intake Contract"), text)

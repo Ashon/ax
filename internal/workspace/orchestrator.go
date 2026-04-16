@@ -8,6 +8,8 @@ import (
 
 	"github.com/ashon/ax/internal/agent"
 	"github.com/ashon/ax/internal/config"
+	axmemory "github.com/ashon/ax/internal/memory"
+	"github.com/ashon/ax/internal/types"
 )
 
 // OrchestratorName is the fully-qualified identity of an orchestrator given
@@ -27,10 +29,18 @@ func OrchestratorPrompt(node *config.ProjectNode, prefix, parentName string) str
 	return buildOrchestratorPromptContent(node, prefix, parentName)
 }
 
+func buildOrchestratorPromptArtifact(node *config.ProjectNode, prefix, parentName, socketPath string) string {
+	memories, err := promptMemoriesForOrchestrator(prefix, socketPath)
+	if err != nil {
+		memories = nil
+	}
+	return buildOrchestratorPromptContentWithMemories(node, prefix, parentName, memories)
+}
+
 // WriteOrchestratorPrompt generates a scope-specific instruction file for
 // the orchestrator of a project.
-func WriteOrchestratorPrompt(orchDir string, node *config.ProjectNode, prefix, parentName, runtime string) error {
-	content := buildOrchestratorPromptContent(node, prefix, parentName)
+func WriteOrchestratorPrompt(orchDir string, node *config.ProjectNode, prefix, parentName, runtime, socketPath string) error {
+	content := buildOrchestratorPromptArtifact(node, prefix, parentName, socketPath)
 	instructionFile, err := agent.InstructionFile(runtime)
 	if err != nil {
 		return err
@@ -50,6 +60,10 @@ func WriteOrchestratorPrompt(orchDir string, node *config.ProjectNode, prefix, p
 }
 
 func buildOrchestratorPromptContent(node *config.ProjectNode, prefix, parentName string) string {
+	return buildOrchestratorPromptContentWithMemories(node, prefix, parentName, nil)
+}
+
+func buildOrchestratorPromptContentWithMemories(node *config.ProjectNode, prefix, parentName string, memories []types.Memory) string {
 	var sb strings.Builder
 
 	selfName := OrchestratorName(prefix)
@@ -95,6 +109,7 @@ func buildOrchestratorPromptContent(node *config.ProjectNode, prefix, parentName
 	}
 	sb.WriteString("- 복잡한 작업은 단계별로 나누어 분배하세요.\n")
 	sb.WriteString("- 작업 완료 후 품질을 확인하고, 필요하면 수정을 요청하세요.\n\n")
+	appendDurableMemorySection(&sb, prefix, selfName, memories)
 
 	if !isRoot {
 		sb.WriteString("## 상위 지시 신뢰 및 진행 우선 원칙 (중요)\n")
@@ -285,6 +300,50 @@ func buildOrchestratorPromptContent(node *config.ProjectNode, prefix, parentName
 	}
 
 	return sb.String()
+}
+
+func promptMemoriesForOrchestrator(prefix, socketPath string) ([]types.Memory, error) {
+	scopes := []string{
+		axmemory.GlobalScope,
+		axmemory.ProjectScope(prefix),
+		axmemory.WorkspaceScope(OrchestratorName(prefix)),
+	}
+	return axmemory.LoadPromptMemories(socketPath, scopes, axmemory.DefaultPromptN)
+}
+
+func appendDurableMemorySection(sb *strings.Builder, prefix, selfName string, memories []types.Memory) {
+	sb.WriteString("## Durable Memory\n")
+	sb.WriteString("- 런타임 native memory나 resume 품질에만 의존하지 말고, 재시작 이후에도 유지돼야 할 사실은 `remember_memory`로 ax daemon에 기록하세요.\n")
+	sb.WriteString("- 세션을 새로 띄웠거나 컨텍스트가 비어 보이면 먼저 `recall_memories(scopes=[\"global\",\"project\",\"workspace\"])`로 durable memory를 복원하세요.\n")
+	sb.WriteString("- 현재 메모리 상태를 점검하거나 감사할 때는 `list_memories`를 사용하세요. 현재 작업에 필요한 working set만 가져올 때는 `recall_memories`를 사용하세요.\n")
+	sb.WriteString("- 프로젝트 차원의 결정/제약/인수인계는 `scope=\"project\"`, 오케스트레이터 개인 작업 습관/임시 운영 규칙은 `scope=\"workspace\"`, 트리 전체 공통 규칙은 `scope=\"global\"`을 우선 사용하세요.\n")
+	sb.WriteString("- 이전 기억이 더 이상 유효하지 않으면 `supersede_memory`를 사용해 교체하세요. 필요하면 저수준 경로로 `remember_memory(..., supersedes_ids=[...])`를 직접 써도 됩니다.\n")
+	sb.WriteString(fmt.Sprintf("- 현재 기본 recall 범위: `%s`, `%s`, `%s`\n\n", axmemory.GlobalScope, axmemory.ProjectScope(prefix), axmemory.WorkspaceScope(selfName)))
+
+	if len(memories) == 0 {
+		sb.WriteString("현재 주입된 durable memory는 없습니다.\n\n")
+		return
+	}
+
+	sb.WriteString("현재 관련 durable memory:\n")
+	for _, entry := range memories {
+		sb.WriteString("- ")
+		if entry.Kind != "" {
+			sb.WriteString("[" + entry.Kind + "] ")
+		}
+		if entry.Scope != "" {
+			sb.WriteString("`" + entry.Scope + "` ")
+		}
+		if entry.Subject != "" {
+			sb.WriteString(entry.Subject + ": ")
+		}
+		sb.WriteString(entry.Content)
+		if len(entry.Tags) > 0 {
+			sb.WriteString(" (tags: " + strings.Join(entry.Tags, ", ") + ")")
+		}
+		sb.WriteString("\n")
+	}
+	sb.WriteString("\n")
 }
 
 func summarizeWorkspaces(node *config.ProjectNode) string {

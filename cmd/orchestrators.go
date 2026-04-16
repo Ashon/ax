@@ -148,7 +148,7 @@ func writeOrchestratorPromptsOnly(node *config.ProjectNode, parentName string, s
 			return err
 		}
 		runtime := agent.NormalizeRuntime(node.OrchestratorRuntime)
-		if err := workspace.WriteOrchestratorPrompt(orchDir, node, node.Prefix, parentName, runtime); err != nil {
+		if err := workspace.WriteOrchestratorPrompt(orchDir, node, node.Prefix, parentName, runtime, socketPath); err != nil {
 			return err
 		}
 	}

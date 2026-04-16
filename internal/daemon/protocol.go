@@ -22,6 +22,8 @@ const (
 	MsgSetShared        MessageType = "set_shared"
 	MsgGetShared        MessageType = "get_shared"
 	MsgListShared       MessageType = "list_shared"
+	MsgRememberMemory   MessageType = "remember_memory"
+	MsgRecallMemories   MessageType = "recall_memories"
 	MsgUsageTrends      MessageType = "usage_trends"
 	MsgCreateTask       MessageType = "create_task"
 	MsgStartTask        MessageType = "start_task"
@@ -89,6 +91,23 @@ type SetSharedPayload struct {
 
 type GetSharedPayload struct {
 	Key string `json:"key"`
+}
+
+type RememberMemoryPayload struct {
+	Scope      string   `json:"scope"`
+	Kind       string   `json:"kind,omitempty"`
+	Subject    string   `json:"subject,omitempty"`
+	Content    string   `json:"content"`
+	Tags       []string `json:"tags,omitempty"`
+	Supersedes []string `json:"supersedes_ids,omitempty"`
+}
+
+type RecallMemoriesPayload struct {
+	Scopes            []string `json:"scopes,omitempty"`
+	Kind              string   `json:"kind,omitempty"`
+	Tags              []string `json:"tags,omitempty"`
+	IncludeSuperseded bool     `json:"include_superseded,omitempty"`
+	Limit             int      `json:"limit,omitempty"`
 }
 
 type UsageTrendWorkspace struct {
@@ -214,6 +233,14 @@ type GetSharedResponse struct {
 
 type ListSharedResponse struct {
 	Values map[string]string `json:"values"`
+}
+
+type MemoryResponse struct {
+	Memory types.Memory `json:"memory"`
+}
+
+type RecallMemoriesResponse struct {
+	Memories []types.Memory `json:"memories"`
 }
 
 type UsageTrendsResponse struct {

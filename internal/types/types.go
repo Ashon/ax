@@ -287,3 +287,18 @@ type TaskStaleInfo struct {
 	StateDivergence     bool       `json:"state_divergence,omitempty"`
 	StateDivergenceNote string     `json:"state_divergence_note,omitempty"`
 }
+
+type Memory struct {
+	ID           string     `json:"id"`
+	Scope        string     `json:"scope"`
+	Kind         string     `json:"kind"`
+	Subject      string     `json:"subject,omitempty"`
+	Content      string     `json:"content"`
+	Tags         []string   `json:"tags,omitempty"`
+	CreatedBy    string     `json:"created_by"`
+	Supersedes   []string   `json:"supersedes,omitempty"`
+	SupersededBy string     `json:"superseded_by,omitempty"`
+	SupersededAt *time.Time `json:"superseded_at,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+}

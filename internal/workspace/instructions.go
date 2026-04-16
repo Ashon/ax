@@ -60,14 +60,27 @@ func WriteInstructions(dir, workspace, runtime, instructions string) error {
 }
 
 func managedWorkspaceInstructions(instructions string) string {
-	sections := make([]string, 0, 4)
+	sections := make([]string, 0, 5)
 	if trimmed := strings.TrimSpace(instructions); trimmed != "" {
 		sections = append(sections, trimmed)
 	}
+	sections = append(sections, durableMemoryInstructionContract())
 	sections = append(sections, messageHandlingInstructionContract())
 	sections = append(sections, taskIntakeInstructionContract())
 	sections = append(sections, completionReportingInstructionContract())
 	return strings.Join(sections, "\n\n")
+}
+
+func durableMemoryInstructionContract() string {
+	return strings.Join([]string{
+		"## Durable Memory Contract",
+		"- 런타임 native memory나 resume 품질에만 의존하지 말고, 재시작 이후에도 유지돼야 할 사실은 `remember_memory`로 ax daemon에 기록하세요.",
+		"- 세션이 fresh/restart 되었거나 컨텍스트가 비어 보이면 먼저 `recall_memories(scopes=[\"global\",\"project\",\"workspace\"])`로 durable memory를 복원하세요.",
+		"- 현재 durable memory 상태를 점검하거나 감사할 때는 `list_memories`를 사용하고, 현재 작업에 필요한 working set만 가져올 때는 `recall_memories`를 사용하세요.",
+		"- 팀 전체 공통 규칙은 `scope=\"global\"`, 현재 프로젝트 결정/제약/핸드오프는 `scope=\"project\"`, 현재 워크스페이스 로컬 운영 메모는 `scope=\"workspace\"`를 우선 사용하세요.",
+		"- 이미 저장한 기억이 더 이상 유효하지 않으면 `supersede_memory`를 사용해 교체하세요. 필요하면 저수준 경로로 `remember_memory(..., supersedes_ids=[...])`를 직접 써도 됩니다.",
+		"- 매 응답 전에 무조건 메모리를 읽을 필요는 없습니다. fresh start, owner handoff, 설계 결정 확인, 반복되는 사용자 선호 복원처럼 실제로 가치가 있을 때만 recall 하세요.",
+	}, "\n")
 }
 
 func messageHandlingInstructionContract() string {

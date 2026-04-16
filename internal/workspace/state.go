@@ -60,7 +60,7 @@ func EnsureOrchestrator(node *config.ProjectNode, parentName, socketPath, config
 			return fmt.Errorf("write %s codex config: %w", selfName, err)
 		}
 	}
-	if err := WriteOrchestratorPrompt(orchDir, node, node.Prefix, parentName, runtime); err != nil {
+	if err := WriteOrchestratorPrompt(orchDir, node, node.Prefix, parentName, runtime, socketPath); err != nil {
 		return fmt.Errorf("write %s prompt: %w", selfName, err)
 	}
 

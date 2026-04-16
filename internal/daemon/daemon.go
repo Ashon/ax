@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ashon/ax/internal/daemonutil"
+	"github.com/ashon/ax/internal/memory"
 	"github.com/ashon/ax/internal/types"
 )
 
@@ -36,6 +37,7 @@ type Daemon struct {
 	sharedValues   map[string]string
 	sharedPath     string
 	sharedMu       sync.RWMutex
+	memoryStore    *memory.Store
 	taskStore      *TaskStore
 	taskSnapshots  *taskSnapshotWriter
 	teamController *teamController
@@ -73,6 +75,10 @@ func New(socketPath string) *Daemon {
 		logger.Printf("load shared values: %v", err)
 		sharedValues = make(map[string]string)
 	}
+	memoryStore := memory.NewStore(stateDir)
+	if err := memoryStore.Load(); err != nil {
+		logger.Printf("load memory state: %v", err)
+	}
 	d := &Daemon{
 		socketPath:     sp,
 		registry:       NewRegistry(),
@@ -80,6 +86,7 @@ func New(socketPath string) *Daemon {
 		history:        history,
 		sharedValues:   sharedValues,
 		sharedPath:     sharedPath,
+		memoryStore:    memoryStore,
 		taskStore:      taskStore,
 		taskSnapshots:  newTaskSnapshotWriter(TasksFilePath(sp), defaultTaskSnapshotFlushInterval, logger),
 		teamController: newTeamController(stateDir, teamStore),
@@ -245,6 +252,12 @@ func (d *Daemon) handleEnvelope(conn net.Conn, env *Envelope, workspace *string)
 
 	case MsgListShared:
 		return d.handleListSharedEnvelope(env)
+
+	case MsgRememberMemory:
+		return d.handleRememberMemoryEnvelope(env, *workspace)
+
+	case MsgRecallMemories:
+		return d.handleRecallMemoriesEnvelope(env, *workspace)
 
 	case MsgUsageTrends:
 		return d.handleUsageTrendsEnvelope(env)

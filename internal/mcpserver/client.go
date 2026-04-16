@@ -461,6 +461,43 @@ func (c *DaemonClient) ListSharedValues() (map[string]string, error) {
 	return result.Values, nil
 }
 
+func (c *DaemonClient) RememberMemory(scope, kind, subject, content string, tags, supersedes []string) (*types.Memory, error) {
+	resp, err := c.sendRequest(daemon.MsgRememberMemory, &daemon.RememberMemoryPayload{
+		Scope:      scope,
+		Kind:       kind,
+		Subject:    subject,
+		Content:    content,
+		Tags:       tags,
+		Supersedes: supersedes,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var result daemon.MemoryResponse
+	if err := decodeResponseData(resp, &result); err != nil {
+		return nil, fmt.Errorf("decode remember_memory response: %w", err)
+	}
+	return &result.Memory, nil
+}
+
+func (c *DaemonClient) RecallMemories(scopes []string, kind string, tags []string, includeSuperseded bool, limit int) ([]types.Memory, error) {
+	resp, err := c.sendRequest(daemon.MsgRecallMemories, &daemon.RecallMemoriesPayload{
+		Scopes:            scopes,
+		Kind:              kind,
+		Tags:              tags,
+		IncludeSuperseded: includeSuperseded,
+		Limit:             limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var result daemon.RecallMemoriesResponse
+	if err := decodeResponseData(resp, &result); err != nil {
+		return nil, fmt.Errorf("decode recall_memories response: %w", err)
+	}
+	return result.Memories, nil
+}
+
 func (c *DaemonClient) GetUsageTrends(workspaces []daemon.UsageTrendWorkspace, sinceMinutes, bucketMinutes int) ([]usage.WorkspaceTrend, error) {
 	resp, err := c.sendRequest(daemon.MsgUsageTrends, &daemon.UsageTrendsPayload{
 		Workspaces:    workspaces,
