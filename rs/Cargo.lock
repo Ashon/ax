@@ -93,6 +93,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ax-mcp-server"
+version = "0.1.0"
+dependencies = [
+ "ax-daemon",
+ "ax-proto",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "ax-proto"
 version = "0.1.0"
 dependencies = [

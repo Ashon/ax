@@ -5,6 +5,7 @@ members = [
     "crates/ax-agent",
     "crates/ax-config",
     "crates/ax-daemon",
+    "crates/ax-mcp-server",
     "crates/ax-proto",
     "crates/ax-tmux",
     "crates/ax-usage",
