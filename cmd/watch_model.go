@@ -47,6 +47,16 @@ const (
 
 const streamViewCount = 4
 
+// watchViewMode selects the top-level layout. Grid shows the agent cards; the
+// tmux capture is only displayed when an operator explicitly chooses to
+// monitor one agent via the Stream quick action.
+type watchViewMode int
+
+const (
+	viewModeGrid watchViewMode = iota
+	viewModeStream
+)
+
 type agentTokens struct {
 	Workspace string
 	Up        string // raw string like "123.4k"
@@ -116,6 +126,7 @@ type watchModel struct {
 	noticeUntil            time.Time
 	stream                 streamView
 	streamOnly             bool
+	viewMode               watchViewMode
 	mainResize             tmuxResizeState
 }
 
@@ -209,14 +220,25 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		switch msg.String() {
+		case "esc":
+			if m.viewMode == viewModeStream {
+				m.viewMode = viewModeGrid
+				m.forceDataRefresh = true
+			}
 		case "up", "k":
 			m.selected = moveSelection(m.selected, m.sessions, -1)
 			m.forceDataRefresh = true
 		case "down", "j":
 			m.selected = moveSelection(m.selected, m.sessions, 1)
 			m.forceDataRefresh = true
+		case "left", "h":
+			m.selected = moveSelection(m.selected, m.sessions, -1)
+			m.forceDataRefresh = true
+		case "right", "l":
+			m.selected = moveSelection(m.selected, m.sessions, 1)
+			m.forceDataRefresh = true
 		case "enter":
-			if !m.streamOnly {
+			if !m.streamOnly && m.viewMode == viewModeGrid {
 				m.openQuickActions()
 			}
 		case "tab":
@@ -264,12 +286,14 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.clearExpiredNotice(now)
 
-		// Resize selected session's tmux window to match main panel
-		if !m.streamOnly && m.selected < len(m.sessions) && m.width > 0 {
-			sideW := watchSidebarWidth
-			mainW := m.width - sideW - 2 // inner content width
+		// Resize selected session's tmux window only when the stream
+		// monitor is the active view; the card grid doesn't display the
+		// tmux capture, so reshaping the real tmux window for every tick
+		// would jitter the agent's UI unnecessarily.
+		if !m.streamOnly && m.viewMode == viewModeStream && m.selected < len(m.sessions) && m.width > 0 {
 			streamH := streamPaneHeight(m.height, m.stream)
-			mainH := m.height - streamH - 3 // inner content height
+			mainW := m.width - 2
+			mainH := m.height - streamH - 3
 			if mainW > 10 && mainH > 5 {
 				selected := m.sessions[m.selected]
 				resizeTmuxWindowIfNeeded(&m.mainResize, selected.Name, mainW, mainH)

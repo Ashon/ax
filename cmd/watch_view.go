@@ -54,29 +54,21 @@ func (m watchModel) View() string {
 		return lipgloss.JoinVertical(lipgloss.Left, m.renderSelectedStream(m.width, contentH), footer)
 	}
 
-	// Layout: sidebar outerW + main outerW = total width
-	sideW := watchSidebarWidth
-	mainW := m.width - sideW
-	if mainW < 20 {
-		mainW = 20
-	}
-
 	streamH := streamPaneHeight(m.height, m.stream)
 	contentH := m.height - streamH - lipgloss.Height(footer)
-
-	// === Sidebar ===
-	sidebar := m.renderSidebar(sideW, contentH)
-
-	// === Main pane ===
-	var mainContent string
-	if m.selected < len(m.sessions) {
-		ws := m.sessions[m.selected].Workspace
-		content := m.captures[ws]
-		mainContent = m.renderMain(ws, content, mainW, contentH)
+	if contentH < watchMessagePaneMinHeight {
+		contentH = watchMessagePaneMinHeight
 	}
 
-	// Join sidebar + main
-	top := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, mainContent)
+	// Top area: either the agent card grid (default) or a full-width tmux
+	// stream monitor triggered by the Stream quick action.
+	var top string
+	switch m.viewMode {
+	case viewModeStream:
+		top = m.renderStreamMonitor(m.width, contentH)
+	default:
+		top = m.renderAgentGrid(m.width, contentH)
+	}
 
 	// === Stream pane (messages, tasks, or tokens) ===
 	stream := m.renderSelectedStream(m.width, streamH)
@@ -88,6 +80,68 @@ func (m watchModel) View() string {
 	parts = append(parts, footer)
 
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+}
+
+// renderStreamMonitor shows the focused agent's tmux capture in full width so
+// operators can attach to one workspace for real-time monitoring without
+// losing the rest of the TUI (footer + optional stream pane remain).
+func (m watchModel) renderStreamMonitor(w, h int) string {
+	if m.selected < 0 || m.selected >= len(m.sessions) {
+		return m.renderAgentGrid(w, h)
+	}
+	session := m.sessions[m.selected]
+	title := headerStyle.Render(fmt.Sprintf(" %s · streaming ", session.Workspace))
+	innerW := w - 2
+	innerH := h - 2
+	topLine := renderPanelTopBorder(borderClr, title, innerW, watchStreamMonitorHelpCandidates()...)
+	body := m.renderMainBody(m.captures[session.Workspace], innerW, innerH)
+	botLine := borderClr.Render("╰" + strings.Repeat("─", innerW) + "╯")
+	all := []string{topLine}
+	all = append(all, body...)
+	all = append(all, botLine)
+	return strings.Join(all, "\n")
+}
+
+func watchStreamMonitorHelpCandidates() []string {
+	return []string{
+		"esc back · ↑↓ agent · x interrupt · tab stream · q quit",
+		"esc back · ↑↓ · x · tab · q",
+		"esc back",
+	}
+}
+
+// renderMainBody extracts the bounded body-rendering of renderMain so the
+// stream monitor can reuse it without duplicating the padding/truncation
+// logic.
+func (m watchModel) renderMainBody(content string, innerW, innerH int) []string {
+	lines := strings.Split(content, "\n")
+	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+		lines = lines[:len(lines)-1]
+	}
+	for i := range lines {
+		lines[i] = sanitizeDisplayLine(lines[i])
+	}
+	if len(lines) > innerH {
+		lines = lines[len(lines)-innerH:]
+	}
+	body := make([]string, 0, innerH)
+	for i := 0; i < innerH; i++ {
+		line := ""
+		if i < len(lines) {
+			line = lines[i]
+		}
+		visW := lipgloss.Width(line)
+		if visW > innerW {
+			line = xansi.Truncate(line, innerW, "")
+			visW = lipgloss.Width(line)
+		}
+		padding := innerW - visW
+		if padding < 0 {
+			padding = 0
+		}
+		body = append(body, borderClr.Render("│")+line+strings.Repeat(" ", padding)+borderClr.Render("│"))
+	}
+	return body
 }
 
 func (m watchModel) renderFooter(totalW int) string {

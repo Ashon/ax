@@ -133,14 +133,14 @@ func TestWatchViewStreamOnlyHidesAgentsPane(t *testing.T) {
 	}
 }
 
-func TestWatchViewDefaultSplitKeepsAgentsPane(t *testing.T) {
+func TestWatchViewDefaultGridRendersCardsWithoutTmuxPane(t *testing.T) {
 	oldConfigPath := configPath
 	configPath = filepath.Join(t.TempDir(), "missing.yaml")
 	defer func() { configPath = oldConfigPath }()
 
 	m := watchModel{
 		width:      96,
-		height:     18,
+		height:     24,
 		stream:     streamTasks,
 		streamOnly: false,
 		sessions: []tmux.SessionInfo{
@@ -155,7 +155,7 @@ func TestWatchViewDefaultSplitKeepsAgentsPane(t *testing.T) {
 		tasks: []types.Task{
 			{
 				ID:        "task-1",
-				Title:     "Watch split view should keep agent pane",
+				Title:     "Grid view should not embed tmux capture",
 				Assignee:  "ax.cli",
 				Status:    types.TaskPending,
 				UpdatedAt: time.Now(),
@@ -167,11 +167,97 @@ func TestWatchViewDefaultSplitKeepsAgentsPane(t *testing.T) {
 	}
 
 	view := xansi.Strip(m.View())
-	if !strings.Contains(view, "SELECTED PANE CONTENT") {
-		t.Fatalf("expected selected session pane content in split view %q", view)
+	if strings.Contains(view, "SELECTED PANE CONTENT") {
+		t.Fatalf("default grid view must not embed tmux capture; use Stream quick action instead: %q", view)
 	}
 	if !strings.Contains(view, " agents ") {
-		t.Fatalf("expected agents sidebar in split view %q", view)
+		t.Fatalf("expected agents panel title in grid view %q", view)
+	}
+	if !strings.Contains(view, "cli") {
+		t.Fatalf("expected agent card label in grid view %q", view)
+	}
+}
+
+func TestWatchStreamModeEmbedsTmuxCapture(t *testing.T) {
+	oldConfigPath := configPath
+	configPath = filepath.Join(t.TempDir(), "missing.yaml")
+	defer func() { configPath = oldConfigPath }()
+
+	m := watchModel{
+		width:      96,
+		height:     24,
+		stream:     streamHidden,
+		streamOnly: false,
+		viewMode:   viewModeStream,
+		sessions: []tmux.SessionInfo{
+			{Name: "ax-ax_cli", Workspace: "ax.cli"},
+		},
+		captures: map[string]string{
+			"ax.cli": "SELECTED PANE CONTENT",
+		},
+		runtimes: map[string]string{
+			"ax.cli": "codex",
+		},
+		workspaceInfos: map[string]types.WorkspaceInfo{
+			"ax.cli": {Name: "ax.cli", Status: types.StatusOnline},
+		},
+	}
+
+	view := xansi.Strip(m.View())
+	if !strings.Contains(view, "SELECTED PANE CONTENT") {
+		t.Fatalf("stream monitor must show selected agent's tmux capture: %q", view)
+	}
+	if !strings.Contains(view, "streaming") {
+		t.Fatalf("expected streaming title in stream monitor view %q", view)
+	}
+	if !strings.Contains(view, "esc back") {
+		t.Fatalf("expected esc-back hint in stream monitor header %q", view)
+	}
+}
+
+func TestWatchEscReturnsToGridFromStreamMode(t *testing.T) {
+	m := watchModel{
+		viewMode: viewModeStream,
+		sessions: []tmux.SessionInfo{
+			{Name: "ax-ax_cli", Workspace: "ax.cli"},
+		},
+	}
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	got := next.(watchModel)
+	if got.viewMode != viewModeGrid {
+		t.Fatalf("expected esc to return to grid view, got %v", got.viewMode)
+	}
+}
+
+func TestWatchQuickActionStreamOpensMonitor(t *testing.T) {
+	oldLifecycleSupported := watchLifecycleSupported
+	oldConfigPath := configPath
+	watchLifecycleSupported = func(string) bool { return false }
+	configPath = filepath.Join(t.TempDir(), "missing.yaml")
+	defer func() {
+		watchLifecycleSupported = oldLifecycleSupported
+		configPath = oldConfigPath
+	}()
+
+	m := watchModel{
+		selected: 0,
+		sessions: []tmux.SessionInfo{
+			{Name: "ax-ax_cli", Workspace: "ax.cli"},
+		},
+	}
+	// Enter → open quick actions, first action is Stream tmux, Enter → run.
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	got := next.(watchModel)
+	if !got.quickActionsOpen {
+		t.Fatal("expected quick actions to open on first enter")
+	}
+	next, _ = got.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	got = next.(watchModel)
+	if got.viewMode != viewModeStream {
+		t.Fatalf("expected Stream action to switch viewMode to stream, got %v", got.viewMode)
+	}
+	if got.quickActionsOpen {
+		t.Fatal("expected quick actions to close after Stream action")
 	}
 }
 
@@ -232,7 +318,7 @@ func TestWatchEnterOpensQuickActionsSurface(t *testing.T) {
 	}
 
 	view := xansi.Strip(got.View())
-	for _, want := range []string{"actions 1/6", "Inspect", "Open tasks", "Open messages", "enter run", "esc close"} {
+	for _, want := range []string{"actions 1/6", "Stream tmux", "Open tasks", "Open messages", "enter run", "esc close"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected %q in quick-actions view %q", want, view)
 		}
@@ -252,7 +338,7 @@ func TestRenderSidebarAnchorsQuickActionsBelowSelectedAgent(t *testing.T) {
 		quickActionsOpen:    true,
 		quickActionSelected: 0,
 		quickActions: []watchQuickAction{
-			{ID: watchQuickActionInspect, Label: "Inspect"},
+			{ID: watchQuickActionStream, Label: "Stream tmux"},
 			{ID: watchQuickActionTasks, Label: "Open tasks"},
 			{ID: watchQuickActionMessages, Label: "Open messages"},
 			{ID: watchQuickActionInterrupt, Label: "Interrupt"},
@@ -316,7 +402,7 @@ func TestRenderSidebarClipsQuickActionsOverlayInShortPane(t *testing.T) {
 		quickActionsOpen:    true,
 		quickActionSelected: 0,
 		quickActions: []watchQuickAction{
-			{ID: watchQuickActionInspect, Label: "Inspect"},
+			{ID: watchQuickActionStream, Label: "Stream tmux"},
 			{ID: watchQuickActionTasks, Label: "Open tasks"},
 			{ID: watchQuickActionMessages, Label: "Open messages"},
 			{ID: watchQuickActionInterrupt, Label: "Interrupt"},

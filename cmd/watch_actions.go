@@ -17,7 +17,7 @@ import (
 type watchQuickActionID string
 
 const (
-	watchQuickActionInspect   watchQuickActionID = "inspect"
+	watchQuickActionStream    watchQuickActionID = "stream"
 	watchQuickActionTasks     watchQuickActionID = "tasks"
 	watchQuickActionMessages  watchQuickActionID = "messages"
 	watchQuickActionInterrupt watchQuickActionID = "interrupt"
@@ -108,7 +108,7 @@ func (m *watchModel) openQuickActions() {
 
 func buildWatchQuickActions(workspaceName string) []watchQuickAction {
 	actions := []watchQuickAction{
-		{ID: watchQuickActionInspect, Label: "Inspect"},
+		{ID: watchQuickActionStream, Label: "Stream tmux"},
 		{ID: watchQuickActionTasks, Label: "Open tasks"},
 		{ID: watchQuickActionMessages, Label: "Open messages"},
 		{ID: watchQuickActionInterrupt, Label: "Interrupt"},
@@ -163,7 +163,8 @@ func (m *watchModel) runSelectedQuickAction() {
 	}
 
 	switch action.ID {
-	case watchQuickActionInspect:
+	case watchQuickActionStream:
+		m.viewMode = viewModeStream
 		m.stream = streamHidden
 		m.closeQuickActions()
 	case watchQuickActionTasks:
