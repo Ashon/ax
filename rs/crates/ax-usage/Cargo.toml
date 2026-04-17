@@ -1,0 +1,22 @@
+[package]
+name = "ax-usage"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Transcript parsing and usage aggregation (Rust port of internal/usage)"
+
+[dependencies]
+ax-proto = { path = "../ax-proto" }
+ax-agent = { path = "../ax-agent" }
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

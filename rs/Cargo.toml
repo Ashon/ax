@@ -5,6 +5,7 @@ members = [
     "crates/ax-config",
     "crates/ax-proto",
     "crates/ax-tmux",
+    "crates/ax-usage",
 ]
 
 [workspace.package]

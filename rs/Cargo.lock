@@ -61,6 +61,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ax-usage"
+version = "0.1.0"
+dependencies = [
+ "ax-agent",
+ "ax-proto",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "bitflags"
 version = "2.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
