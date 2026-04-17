@@ -1,0 +1,21 @@
+project: demo
+orchestrator_runtime: codex
+codex_model_reasoning_effort: xhigh
+idle_timeout_minutes: 30
+children:
+    sub:
+        dir: ./subproject
+        prefix: sub
+workspaces:
+    main:
+        dir: .
+        description: Main workspace
+        runtime: codex
+        codex_model_reasoning_effort: xhigh
+    worker:
+        dir: ./worker
+        description: Worker agent
+        runtime: codex
+        env:
+            BAZ: qux
+            FOO: bar
