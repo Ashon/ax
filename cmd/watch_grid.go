@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	xansi "github.com/charmbracelet/x/ansi"
 )
 
 // Agent cards replace the old narrow sidebar list. A card bundles the agent
@@ -427,27 +428,27 @@ func spliceRowsAtColumn(lines, overlay []string, rowStart, colStart, width int) 
 	return lines
 }
 
-// overwriteAtColumn replaces the [colStart, colStart+width) rune range of
-// base with overlay, padding/truncating overlay to exactly width. base must
-// be wide enough to contain the range; otherwise it is returned unchanged.
+// overwriteAtColumn replaces the [colStart, colStart+width) *display column*
+// range of base with overlay. Both base and overlay may contain ANSI escape
+// sequences and wide characters; we rely on xansi.Cut so the splice never
+// breaks a color sequence or mid-grapheme, which would corrupt the rest of
+// the row. If base is narrower than the target range we leave it untouched
+// to keep the grid borders intact.
 func overwriteAtColumn(base, overlay string, colStart, width int) string {
-	baseRunes := []rune(base)
-	if colStart+width > len(baseRunes) {
+	baseW := lipgloss.Width(base)
+	if colStart < 0 || colStart+width > baseW {
 		return base
 	}
-	// Normalise overlay to exactly the target rune width, trimming or padding
-	// as required so we never disturb the border column on the right.
+	// Normalise overlay to exactly `width` display columns.
 	if lipgloss.Width(overlay) > width {
 		overlay = fitDisplayText(overlay, width)
 	}
 	if pad := width - lipgloss.Width(overlay); pad > 0 {
 		overlay += strings.Repeat(" ", pad)
 	}
-	out := make([]rune, 0, len(baseRunes))
-	out = append(out, baseRunes[:colStart]...)
-	out = append(out, []rune(overlay)...)
-	out = append(out, baseRunes[colStart+width:]...)
-	return string(out)
+	left := xansi.Cut(base, 0, colStart)
+	right := xansi.Cut(base, colStart+width, baseW)
+	return left + overlay + right
 }
 
 func (m watchModel) renderGridQuickActionOverlay(width int) []string {
