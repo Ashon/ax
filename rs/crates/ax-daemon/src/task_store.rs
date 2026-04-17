@@ -224,6 +224,32 @@ impl TaskStore {
             .expect("task just inserted must exist"))
     }
 
+    /// Look up `id`, validate that `workspace` may operate on it, and
+    /// confirm the task is still in a state where intervention is
+    /// meaningful (pending / `in_progress` / blocked). Mirrors the
+    /// guard Go's `handleInterveneTaskEnvelope` runs before dispatching
+    /// on the `action` string.
+    pub fn get_for_intervention(
+        &self,
+        id: &str,
+        workspace: &str,
+        expected_version: Option<i64>,
+    ) -> Result<Task, TaskStoreError> {
+        let inner = self.inner.lock().expect("task store poisoned");
+        let task = inner
+            .get(id)
+            .ok_or_else(|| TaskStoreError::NotFound(id.to_owned()))?
+            .clone();
+        validate_task_control(&task, workspace, expected_version, true)?;
+        if !matches!(
+            task.status,
+            TaskStatus::Pending | TaskStatus::InProgress | TaskStatus::Blocked
+        ) {
+            return Err(TaskStoreError::NotRetryable(id.to_owned()));
+        }
+        Ok(task)
+    }
+
     pub fn get(&self, id: &str) -> Option<Task> {
         self.inner
             .lock()

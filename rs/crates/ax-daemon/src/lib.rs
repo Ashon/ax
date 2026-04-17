@@ -15,6 +15,7 @@ mod memory;
 mod queue;
 mod registry;
 mod server;
+mod session_manager;
 mod shared_values;
 mod socket_path;
 mod task_helpers;
@@ -29,6 +30,7 @@ pub use history::{History, HistoryEntry, HistoryError, DEFAULT_HISTORY_MAX_SIZE}
 pub use queue::{FlusherHandle, MessageQueue, QueueError, DEFAULT_MAX_QUEUE_PER_WORKSPACE};
 pub use registry::Registry;
 pub use server::{Daemon, DaemonError, DaemonHandle};
+pub use session_manager::{SessionManager, SessionManagerError};
 pub use socket_path::{expand_socket_path, DEFAULT_SOCKET_PATH};
 pub use task_store::{CreateTaskInput, TaskStore, TaskStoreError};
 pub use team_reconfigure::{TeamController, TeamError};

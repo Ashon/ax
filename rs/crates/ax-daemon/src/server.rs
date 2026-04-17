@@ -19,11 +19,13 @@ use crate::history::{History, DEFAULT_HISTORY_MAX_SIZE};
 use crate::memory::Store as MemoryStore;
 use crate::queue::{FlusherHandle, MessageQueue};
 use crate::registry::Registry;
+use crate::session_manager::SessionManager;
 use crate::shared_values::SharedValues;
 use crate::task_store::TaskStore;
 use crate::team_reconfigure::TeamController;
 use crate::team_state_store::TeamStateStore;
 use crate::wake_scheduler::{RealWakeBackend, WakeLoopHandle, WakeScheduler};
+use ax_workspace::RealTmux;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DaemonError {
@@ -49,6 +51,7 @@ pub struct Daemon {
     pub team_controller: Arc<TeamController>,
     pub history: Arc<History>,
     pub wake_scheduler: Arc<WakeScheduler<RealWakeBackend>>,
+    pub session_manager: Arc<SessionManager<RealTmux>>,
 }
 
 impl Daemon {
@@ -65,16 +68,28 @@ impl Daemon {
         let team_controller = TeamController::new(state_dir, team_store, shared_values.clone());
         let queue = MessageQueue::new();
         let wake_scheduler = WakeScheduler::new(queue.clone(), RealWakeBackend);
+        let registry = Registry::new();
+        let task_store = TaskStore::in_memory();
+        let ax_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ax"));
+        let session_manager = SessionManager::new(
+            socket_path.clone(),
+            ax_bin,
+            registry.clone(),
+            task_store.clone(),
+            RealTmux,
+        );
+        attach_session_manager(&wake_scheduler, &session_manager);
         Self {
             socket_path,
-            registry: Registry::new(),
+            registry,
             queue,
             shared_values,
             memory_store: MemoryStore::in_memory(),
-            task_store: TaskStore::in_memory(),
+            task_store,
             team_controller,
             history: History::in_memory(DEFAULT_HISTORY_MAX_SIZE),
             wake_scheduler,
+            session_manager,
         }
     }
 
@@ -101,6 +116,15 @@ impl Daemon {
         self.history = History::load(state_dir, DEFAULT_HISTORY_MAX_SIZE)
             .map_err(|e| DaemonError::LoadState(e.to_string()))?;
         self.wake_scheduler = WakeScheduler::new(self.queue.clone(), RealWakeBackend);
+        let ax_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ax"));
+        self.session_manager = SessionManager::new(
+            self.socket_path.clone(),
+            ax_bin,
+            self.registry.clone(),
+            self.task_store.clone(),
+            RealTmux,
+        );
+        attach_session_manager(&self.wake_scheduler, &self.session_manager);
         Ok(self)
     }
 
@@ -136,18 +160,22 @@ impl Daemon {
         let team_controller = self.team_controller.clone();
         let history = self.history.clone();
         let wake_scheduler = self.wake_scheduler.clone();
+        let session_manager = self.session_manager.clone();
         let flusher = queue.spawn_flusher();
         let wake_loop = wake_scheduler.clone().spawn();
         let join = tokio::spawn(run_accept_loop(
             listener,
-            registry,
-            queue,
-            shared,
-            memory,
-            task_store,
-            team_controller,
-            history,
-            wake_scheduler,
+            AcceptLoopCtx {
+                registry,
+                queue,
+                shared,
+                memory,
+                task_store,
+                team_controller,
+                history,
+                wake_scheduler,
+                session_manager,
+            },
             shutdown_rx,
             socket_path.clone(),
         ));
@@ -161,9 +189,21 @@ impl Daemon {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn run_accept_loop(
-    listener: UnixListener,
+/// Hook the session manager into the wake scheduler's missing-session
+/// ensurer so retry paths can recreate managed workspaces from a
+/// runnable task's stored dispatch config. Extracted so both
+/// `Daemon::new` and `Daemon::with_state_dir` can re-use the wiring.
+fn attach_session_manager(
+    wake_scheduler: &Arc<WakeScheduler<RealWakeBackend>>,
+    session_manager: &Arc<SessionManager<RealTmux>>,
+) {
+    let sm = session_manager.clone();
+    wake_scheduler.set_missing_session_ensurer(Box::new(move |workspace, sender| {
+        sm.ensure_pending_wake_target(workspace, sender)
+    }));
+}
+
+struct AcceptLoopCtx {
     registry: Arc<Registry>,
     queue: Arc<MessageQueue>,
     shared: Arc<SharedValues>,
@@ -172,6 +212,12 @@ async fn run_accept_loop(
     team_controller: Arc<TeamController>,
     history: Arc<History>,
     wake_scheduler: Arc<WakeScheduler<RealWakeBackend>>,
+    session_manager: Arc<SessionManager<RealTmux>>,
+}
+
+async fn run_accept_loop(
+    listener: UnixListener,
+    loop_ctx: AcceptLoopCtx,
     mut shutdown: tokio::sync::oneshot::Receiver<()>,
     socket_path: PathBuf,
 ) {
@@ -182,14 +228,15 @@ async fn run_accept_loop(
                 Ok((conn, _)) => {
                     let ctx = HandlerCtx {
                         socket_path: socket_path.clone(),
-                        registry: registry.clone(),
-                        queue: queue.clone(),
-                        shared: shared.clone(),
-                        memory: memory.clone(),
-                        task_store: task_store.clone(),
-                        team_controller: team_controller.clone(),
-                        history: history.clone(),
-                        wake_scheduler: wake_scheduler.clone(),
+                        registry: loop_ctx.registry.clone(),
+                        queue: loop_ctx.queue.clone(),
+                        shared: loop_ctx.shared.clone(),
+                        memory: loop_ctx.memory.clone(),
+                        task_store: loop_ctx.task_store.clone(),
+                        team_controller: loop_ctx.team_controller.clone(),
+                        history: loop_ctx.history.clone(),
+                        wake_scheduler: loop_ctx.wake_scheduler.clone(),
+                        session_manager: loop_ctx.session_manager.clone(),
                     };
                     tokio::spawn(handle_connection(conn, ctx));
                 }

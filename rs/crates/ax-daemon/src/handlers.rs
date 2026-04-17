@@ -15,17 +15,19 @@ use uuid::Uuid;
 use ax_proto::payloads::{
     AgentLifecyclePayload, BroadcastPayload, CancelTaskPayload, ControlLifecyclePayload,
     CreateTaskPayload, FinishTeamReconfigurePayload, GetSharedPayload, GetTaskPayload,
-    GetTeamStatePayload, ListTasksPayload, ReadMessagesPayload, RecallMemoriesPayload,
-    RegisterPayload, RememberMemoryPayload, RemoveTaskPayload, SendMessagePayload,
-    SetSharedPayload, SetStatusPayload, TeamReconfigurePayload, UpdateTaskPayload,
+    GetTeamStatePayload, InterveneTaskPayload, ListTasksPayload, ReadMessagesPayload,
+    RecallMemoriesPayload, RegisterPayload, RememberMemoryPayload, RemoveTaskPayload,
+    SendMessagePayload, SetSharedPayload, SetStatusPayload, StartTaskPayload,
+    TeamReconfigurePayload, UpdateTaskPayload,
 };
 use ax_proto::responses::{
     AgentLifecycleResponse, BroadcastResponse, ControlLifecycleResponse, GetSharedResponse,
-    ListSharedResponse, ListTasksResponse, ListWorkspacesResponse, MemoryResponse,
-    ReadMessagesResponse, RecallMemoriesResponse, SendMessageResponse, StatusResponse,
-    TaskResponse, TeamApplyResponse, TeamPlanResponse, TeamStateResponse,
+    InterveneTaskResponse, ListSharedResponse, ListTasksResponse, ListWorkspacesResponse,
+    MemoryResponse, ReadMessagesResponse, RecallMemoriesResponse, SendMessageResponse,
+    StartTaskResponse, StatusResponse, TaskDispatch, TaskResponse, TeamApplyResponse,
+    TeamPlanResponse, TeamStateResponse,
 };
-use ax_proto::types::{LifecycleAction, Message};
+use ax_proto::types::{LifecycleAction, Message, Task};
 use ax_proto::{Envelope, ErrorPayload, MessageType, ResponsePayload};
 use ax_workspace::{
     cleanup_orchestrator_state, dispatch_runnable_work, ensure_orchestrator,
@@ -33,12 +35,17 @@ use ax_workspace::{
     DesiredOrchestrator, DesiredWorkspace, DispatchBackend, Manager, RealTmux, TmuxBackend,
 };
 
+use crate::daemonutil::wake_prompt;
 use crate::history::History;
 use crate::memory::{Query as MemoryQuery, Store as MemoryStore};
 use crate::queue::MessageQueue;
 use crate::registry::{Entry, RegisterOutcome, Registry};
+use crate::session_manager::SessionManager;
 use crate::shared_values::SharedValues;
-use crate::task_helpers::parse_task_lifecycle_options;
+use crate::task_helpers::{
+    build_task_reminder_message, normalize_task_dispatch_body, parse_task_lifecycle_options,
+    task_aware_message,
+};
 use crate::task_store::{CreateTaskInput, TaskStore};
 use crate::team_reconfigure::TeamController;
 use crate::wake_scheduler::{RealWakeBackend, WakeScheduler};
@@ -54,6 +61,7 @@ pub(crate) struct HandlerCtx {
     pub team_controller: Arc<TeamController>,
     pub history: Arc<History>,
     pub wake_scheduler: Arc<WakeScheduler<RealWakeBackend>>,
+    pub session_manager: Arc<SessionManager<RealTmux>>,
 }
 
 pub(crate) struct RegisterHandled {
@@ -392,6 +400,195 @@ pub(crate) fn handle_recall_memories(
     });
     ctx.registry.touch(workspace, Utc::now());
     response(&env.id, &RecallMemoriesResponse { memories })
+}
+
+pub(crate) fn handle_start_task(
+    ctx: &HandlerCtx,
+    env: &Envelope,
+    workspace: &str,
+) -> Result<Envelope, HandlerError> {
+    let payload: StartTaskPayload = env
+        .decode_payload()
+        .map_err(|e| HandlerError::DecodePayload("start_task", e))?;
+    require_registered(workspace)?;
+    let (start_mode, workflow_mode, priority) = parse_task_lifecycle_options(
+        &payload.start_mode,
+        &payload.workflow_mode,
+        &payload.priority,
+    )
+    .map_err(|e| HandlerError::Logic(e.to_string()))?;
+    let dispatch_body = normalize_task_dispatch_body(&payload.message)
+        .map_err(|e| HandlerError::Logic(e.to_string()))?;
+    let dispatch_config_path = dispatch_config_path_for_workspace(ctx, workspace);
+    let task = ctx
+        .task_store
+        .create(CreateTaskInput {
+            title: payload.title,
+            description: payload.description,
+            assignee: payload.assignee,
+            created_by: workspace.to_owned(),
+            parent_task_id: payload.parent_task_id,
+            start_mode,
+            workflow_mode,
+            priority,
+            stale_after_seconds: payload.stale_after_seconds,
+            dispatch_body,
+            dispatch_config_path,
+        })
+        .map_err(|e| HandlerError::Logic(e.to_string()))?;
+
+    let dispatch = dispatch_task_start(ctx, &task, workspace)?;
+    ctx.registry.touch(workspace, Utc::now());
+    let refreshed = ctx.task_store.get(&task.id).unwrap_or(task);
+    response(
+        &env.id,
+        &StartTaskResponse {
+            task: refreshed,
+            dispatch,
+        },
+    )
+}
+
+fn dispatch_task_start(
+    ctx: &HandlerCtx,
+    task: &Task,
+    _workspace: &str,
+) -> Result<TaskDispatch, HandlerError> {
+    if task.dispatch_message.trim().is_empty() {
+        return Ok(TaskDispatch {
+            message_id: String::new(),
+            status: "waiting_for_input".into(),
+        });
+    }
+    let msg = task_aware_message(&task.created_by, &task.assignee, &task.dispatch_message);
+    let msg = ctx.queue.enqueue(msg);
+    ctx.task_store
+        .record_dispatch(&task.id, &msg.to, msg.created_at);
+    ctx.history.append_message(&msg);
+    push_if_registered(ctx, &task.assignee, &msg);
+    ctx.wake_scheduler
+        .schedule(&task.assignee, &task.created_by);
+    let config_path = task.dispatch_config_path.trim();
+    if !config_path.is_empty() {
+        ctx.session_manager
+            .ensure_runnable(config_path, &task.assignee, &task.created_by, false)
+            .map_err(|e| {
+                HandlerError::Logic(format!(
+                    "dispatch task {} -> {}: {e}",
+                    task.id, task.assignee
+                ))
+            })?;
+    }
+    Ok(TaskDispatch {
+        message_id: msg.id,
+        status: "queued".into(),
+    })
+}
+
+fn dispatch_config_path_for_workspace(ctx: &HandlerCtx, workspace: &str) -> String {
+    ctx.registry
+        .get(workspace.trim())
+        .map(|entry| entry.config_path.trim().to_owned())
+        .unwrap_or_default()
+}
+
+/// Do whatever it takes to get an idle `task.assignee` to pick up the
+/// pending inbox. Prefers the task's stored dispatch config (goes
+/// through the session-manager so missing sessions get recreated);
+/// falls back to a direct tmux wake when no config is available and
+/// the session already exists.
+fn dispatch_task_wake(ctx: &HandlerCtx, task: &Task, sender: &str) -> Result<(), HandlerError> {
+    let config_path = task.dispatch_config_path.trim();
+    if !config_path.is_empty() {
+        return ctx
+            .session_manager
+            .ensure_runnable(config_path, &task.assignee, sender, false)
+            .map_err(|e| HandlerError::Logic(format!("wake task {}: {e}", task.id)));
+    }
+    let tmux = ctx.session_manager.tmux();
+    if !tmux.session_exists(&task.assignee) {
+        return Err(HandlerError::Logic(format!(
+            "workspace {:?} is not running",
+            task.assignee
+        )));
+    }
+    tmux.wake_workspace(&task.assignee, &wake_prompt(sender, false))
+        .map_err(|e| HandlerError::Logic(e.to_string()))
+}
+
+pub(crate) fn handle_intervene_task(
+    ctx: &HandlerCtx,
+    env: &Envelope,
+    workspace: &str,
+) -> Result<Envelope, HandlerError> {
+    let payload: InterveneTaskPayload = env
+        .decode_payload()
+        .map_err(|e| HandlerError::DecodePayload("intervene_task", e))?;
+    require_registered(workspace)?;
+    let task = ctx
+        .task_store
+        .get_for_intervention(&payload.id, workspace, payload.expected_version)
+        .map_err(|e| HandlerError::Logic(e.to_string()))?;
+
+    let mut resp = InterveneTaskResponse {
+        task: task.clone(),
+        action: payload.action.clone(),
+        status: "noop".into(),
+        message_id: String::new(),
+    };
+
+    match payload.action.as_str() {
+        "wake" => {
+            dispatch_task_wake(ctx, &task, workspace)?;
+            "woken".clone_into(&mut resp.status);
+        }
+        "interrupt" => {
+            let tmux = ctx.session_manager.tmux();
+            if !tmux.session_exists(&task.assignee) {
+                return Err(HandlerError::Logic(format!(
+                    "workspace {:?} is not running",
+                    task.assignee
+                )));
+            }
+            ax_tmux::interrupt_workspace(&task.assignee)
+                .map_err(|e| HandlerError::Logic(e.to_string()))?;
+            "interrupted".clone_into(&mut resp.status);
+        }
+        "retry" => {
+            let retried = ctx
+                .task_store
+                .retry(&task.id, &payload.note, workspace, payload.expected_version)
+                .map_err(|e| HandlerError::Logic(e.to_string()))?;
+            ctx.queue.remove_task_messages(&task.assignee, &task.id);
+            let reminder = build_task_reminder_message(&retried, payload.note.trim());
+            let msg = task_aware_message(workspace, &task.assignee, &reminder);
+            let msg = ctx.queue.enqueue(msg);
+            ctx.task_store
+                .record_dispatch(&task.id, &msg.to, msg.created_at);
+            ctx.history.append_message(&msg);
+            push_if_registered(ctx, &task.assignee, &msg);
+            ctx.wake_scheduler.schedule(&task.assignee, workspace);
+            let config_path = retried.dispatch_config_path.trim();
+            if !config_path.is_empty() {
+                ctx.session_manager
+                    .ensure_runnable(config_path, &task.assignee, workspace, false)
+                    .map_err(|e| {
+                        HandlerError::Logic(format!("retry dispatch task {}: {e}", task.id))
+                    })?;
+            }
+            let refreshed = ctx.task_store.get(&task.id).unwrap_or(retried);
+            resp.task = refreshed;
+            "queued".clone_into(&mut resp.status);
+            resp.message_id = msg.id;
+        }
+        other => {
+            return Err(HandlerError::Logic(format!(
+                "invalid intervene_task action {other:?}"
+            )));
+        }
+    }
+    ctx.registry.touch(workspace, Utc::now());
+    response(&env.id, &resp)
 }
 
 pub(crate) fn handle_create_task(
@@ -1078,6 +1275,14 @@ pub(crate) fn handle_envelope(
             handle_create_task(ctx, env, workspace)
                 .unwrap_or_else(|e| error_envelope(&env.id, e.to_string())),
         ),
+        MessageType::StartTask => HandlerOutput::Response(
+            handle_start_task(ctx, env, workspace)
+                .unwrap_or_else(|e| error_envelope(&env.id, e.to_string())),
+        ),
+        MessageType::InterveneTask => HandlerOutput::Response(
+            handle_intervene_task(ctx, env, workspace)
+                .unwrap_or_else(|e| error_envelope(&env.id, e.to_string())),
+        ),
         MessageType::GetTask => HandlerOutput::Response(
             handle_get_task(ctx, env).unwrap_or_else(|e| error_envelope(&env.id, e.to_string())),
         ),
@@ -1234,16 +1439,26 @@ mod tests {
         );
         let queue = MessageQueue::new();
         let wake_scheduler = WakeScheduler::new(queue.clone(), RealWakeBackend);
+        let registry = Registry::new();
+        let task_store = TaskStore::in_memory();
+        let session_manager = SessionManager::new(
+            socket_path.clone(),
+            std::path::PathBuf::from("/tmp/ax-rs"),
+            registry.clone(),
+            task_store.clone(),
+            RealTmux,
+        );
         HandlerCtx {
             socket_path,
-            registry: Registry::new(),
+            registry,
             queue,
             shared,
             memory: MemoryStore::in_memory(),
-            task_store: TaskStore::in_memory(),
+            task_store,
             team_controller,
             history: History::in_memory(crate::history::DEFAULT_HISTORY_MAX_SIZE),
             wake_scheduler,
+            session_manager,
         }
     }
 

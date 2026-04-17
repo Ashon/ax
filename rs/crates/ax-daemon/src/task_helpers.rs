@@ -5,9 +5,10 @@
 use std::sync::LazyLock;
 use std::time::Duration;
 
+use chrono::Utc;
 use regex::Regex;
 
-use ax_proto::types::{TaskPriority, TaskStartMode, TaskWorkflowMode};
+use ax_proto::types::{Message, Task, TaskPriority, TaskStartMode, TaskStatus, TaskWorkflowMode};
 
 /// Duplicate status/log messages from the same workspace are suppressed
 /// when they repeat a no-op update within this window. Mirrors
@@ -125,6 +126,80 @@ pub(crate) enum TaskLifecycleError {
     WorkflowMode(String),
     #[error("invalid task priority {0:?}")]
     Priority(String),
+}
+
+/// Build the reminder text dispatch paths send when a task needs a
+/// follow-up nudge (retry / rehydrate). Mirrors Go's
+/// `buildTaskReminderMessage` down to the Operator note suffix so the
+/// downstream agent sees a byte-identical prompt regardless of which
+/// binary produced it.
+#[must_use]
+pub(crate) fn build_task_reminder_message(task: &Task, note: &str) -> String {
+    let title = task.title.trim();
+    let description = task.description.trim();
+    let status = status_label(&task.status);
+    let base = if description.is_empty() {
+        format!(
+            "Task ID: {id}\n\nTask: {title}\nCurrent task status: {status}\nThe daemon task registry still shows this task as runnable. Call get_task for the latest structured context, then continue or report a blocker.",
+            id = task.id,
+            title = title,
+            status = status,
+        )
+    } else {
+        format!(
+            "Task ID: {id}\n\nTask: {title}\nDescription: {description}\nCurrent task status: {status}\nThe daemon task registry still shows this task as runnable. Call get_task for the latest structured context, then continue or report a blocker.",
+            id = task.id,
+            title = title,
+            description = description,
+            status = status,
+        )
+    };
+    if note.is_empty() {
+        base
+    } else {
+        format!("{base}\n\nOperator note: {note}")
+    }
+}
+
+/// Pick the dispatch body used when re-hydrating a runnable task.
+/// Matches Go's `taskDispatchContent`: prefer the stored
+/// `dispatch_message` when it's present and the operator note is
+/// empty; otherwise fall back to the reminder template. Exposed
+/// ahead of the runnable-rehydrate slice that will consume it.
+#[must_use]
+#[allow(dead_code)]
+pub(crate) fn task_dispatch_content(task: &Task, note: &str) -> String {
+    if note.is_empty() && !task.dispatch_message.trim().is_empty() {
+        return task.dispatch_message.clone();
+    }
+    build_task_reminder_message(task, note)
+}
+
+/// Build a `Message` whose `task_id` field is populated from the body
+/// when present. Mirrors Go's `taskAwareMessage` — the daemon stamps
+/// the id + `created_at` when the message lands in the queue, so
+/// callers leave those blank.
+#[must_use]
+pub(crate) fn task_aware_message(from: &str, to: &str, content: &str) -> Message {
+    Message {
+        id: String::new(),
+        from: from.to_owned(),
+        to: to.to_owned(),
+        content: content.to_owned(),
+        task_id: extract_task_id(content),
+        created_at: Utc::now(),
+    }
+}
+
+fn status_label(status: &TaskStatus) -> &'static str {
+    match status {
+        TaskStatus::Pending => "pending",
+        TaskStatus::InProgress => "in_progress",
+        TaskStatus::Blocked => "blocked",
+        TaskStatus::Completed => "completed",
+        TaskStatus::Failed => "failed",
+        TaskStatus::Cancelled => "cancelled",
+    }
 }
 
 /// Validate and default task lifecycle options. Mirrors Go's
