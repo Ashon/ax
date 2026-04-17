@@ -9,6 +9,7 @@
 
 mod paths;
 mod schema;
+mod tree;
 
 pub use paths::{
     config_path_in_dir, default_config_path, find_config_file, legacy_config_path, ConfigRoot,
@@ -18,3 +19,4 @@ pub use schema::{
     default_idle_timeout_minutes, Child, Config, LoadError, Workspace,
     DEFAULT_CODEX_REASONING_EFFORT, DEFAULT_IDLE_TIMEOUT_MINUTES,
 };
+pub use tree::{ProjectNode, TreeError, WorkspaceRef};
