@@ -298,6 +298,7 @@ impl fmt::Display for RootOrchestratorCliError {
         match self {
             Self::UnsupportedRuntime(runtime) => write!(f, "unsupported runtime {runtime:?}"),
             Self::LoadTree(source) => write!(f, "load config tree: {source}"),
+            #[allow(clippy::match_same_arms)]
             Self::PrepareOrchestrators(source) => write!(f, "{source}"),
             Self::ResolveRootDir(source) => write!(f, "{source}"),
             Self::StartDaemon(source) => write!(f, "start daemon: {source}"),
@@ -349,17 +350,17 @@ impl fmt::Display for DaemonCliError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::MissingStateDir { socket_path } => {
-                write!(f, "resolve daemon state dir from socket {:?}", socket_path)
+                write!(f, "resolve daemon state dir from socket {socket_path:?}")
             }
             Self::BuildRuntime { source } => write!(f, "build tokio runtime: {source}"),
             Self::LoadState { state_dir, source } => {
-                write!(f, "load daemon state from {:?}: {source}", state_dir)
+                write!(f, "load daemon state from {state_dir:?}: {source}")
             }
             Self::Bind(source) => write!(f, "{source}"),
             Self::SignalSetup { source } => write!(f, "install shutdown signal handler: {source}"),
             Self::SignalWait { source } => write!(f, "wait for shutdown signal: {source}"),
-            Self::WritePid { path, source } => write!(f, "write pid file {:?}: {source}", path),
-            Self::ReadPid { path, source } => write!(f, "read pid file {:?}: {source}", path),
+            Self::WritePid { path, source } => write!(f, "write pid file {path:?}: {source}"),
+            Self::ReadPid { path, source } => write!(f, "read pid file {path:?}: {source}"),
             Self::MissingPidFile => f.write_str("daemon not running (no pid file)"),
             Self::InvalidPidFile => f.write_str("invalid pid file"),
             Self::SignalCommand { signal, source } => write!(f, "signal {signal}: {source}"),
@@ -550,7 +551,7 @@ where
                 &sender,
                 fresh,
             )?;
-            println!("dispatched {:?} from {:?}", target, sender);
+            println!("dispatched {target:?} from {sender:?}");
             Ok(ExitCode::SUCCESS)
         }
         ParsedCommand::RunAgent {
@@ -582,11 +583,11 @@ fn parse_args<I>(args: I, cwd: &Path, current_exe: &Path) -> Result<ParsedComman
 where
     I: IntoIterator<Item = OsString>,
 {
-    let mut argv: Vec<OsString> = args.into_iter().collect();
-    if !argv.is_empty() {
-        let _ = argv.remove(0);
+    let mut tail: Vec<OsString> = args.into_iter().collect();
+    if !tail.is_empty() {
+        let _ = tail.remove(0);
     }
-    let Some(first) = argv.first() else {
+    let Some(first) = tail.first() else {
         return Ok(ParsedCommand::Help);
     };
 
@@ -595,28 +596,28 @@ where
         return Ok(ParsedCommand::Help);
     }
     if command == "daemon" {
-        return parse_daemon_args(&argv);
+        return parse_daemon_args(&tail);
     }
     if command == "up" {
-        return parse_up_args(&argv, cwd, current_exe);
+        return parse_up_args(&tail, cwd, current_exe);
     }
     if command == "down" {
-        return parse_down_args(&argv, cwd, current_exe);
+        return parse_down_args(&tail, cwd, current_exe);
     }
     if matches!(command.as_str(), "claude" | "codex") {
-        return parse_root_orchestrator_args(&command, &argv, cwd, current_exe);
+        return parse_root_orchestrator_args(&command, &tail, cwd, current_exe);
     }
     if command == "send" {
-        return parse_send_args(&argv, cwd);
+        return parse_send_args(&tail, cwd);
     }
     if matches!(command.as_str(), "messages" | "messages-json" | "msg") {
-        return parse_messages_args(&argv, matches!(command.as_str(), "messages-json"));
+        return parse_messages_args(&tail, matches!(command.as_str(), "messages-json"));
     }
     if command == "run-agent" {
-        return parse_run_agent_args(&argv, cwd);
+        return parse_run_agent_args(&tail, cwd);
     }
     if command == "mcp-server" {
-        return Ok(ParsedCommand::Delegate { argv });
+        return Ok(ParsedCommand::Delegate { argv: tail });
     }
 
     let action = match command.as_str() {
@@ -639,21 +640,21 @@ where
     let mut ax_bin_override: Option<PathBuf> = None;
 
     let mut i = 1;
-    while i < argv.len() {
-        let arg = &argv[i];
+    while i < tail.len() {
+        let arg = &tail[i];
         match arg.to_string_lossy().as_ref() {
             "-h" | "--help" => return Ok(ParsedCommand::Help),
             "--socket" => {
                 i += 1;
-                socket_override = Some(parse_socket_path(argv.get(i), "--socket")?);
+                socket_override = Some(parse_socket_path(tail.get(i), "--socket")?);
             }
             "--config" => {
                 i += 1;
-                config_override = Some(parse_path_arg(argv.get(i), "--config", cwd)?);
+                config_override = Some(parse_path_arg(tail.get(i), "--config", cwd)?);
             }
             "--ax-bin" => {
                 i += 1;
-                ax_bin_override = Some(parse_path_arg(argv.get(i), "--ax-bin", cwd)?);
+                ax_bin_override = Some(parse_path_arg(tail.get(i), "--ax-bin", cwd)?);
             }
             "--sender" => {
                 if action.is_some() {
@@ -662,7 +663,7 @@ where
                     )));
                 }
                 i += 1;
-                sender = Some(parse_string_arg(argv.get(i), "--sender")?);
+                sender = Some(parse_string_arg(tail.get(i), "--sender")?);
             }
             "--fresh" => {
                 if action.is_some() {
@@ -1132,7 +1133,7 @@ fn run_send(
         .map_err(SendCliError::Send)?;
 
     println!("Message sent to {:?} (id: {})", to, result.message_id);
-    println!("Agent {:?} readied for queued work.", to);
+    println!("Agent {to:?} readied for queued work.");
     Ok(ExitCode::SUCCESS)
 }
 
@@ -1302,7 +1303,7 @@ fn run_root_orchestrator(
             .map_err(RootOrchestratorCliError::PrepareOrchestrators)?;
     }
 
-    tree.orchestrator_runtime = runtime.as_str().to_owned();
+    runtime.as_str().clone_into(&mut tree.orchestrator_runtime);
     ensure_daemon_running(&options.socket_path, current_exe)
         .map_err(|err| RootOrchestratorCliError::StartDaemon(err.to_string()))?;
     ensure_orchestrator_tree(
@@ -1384,8 +1385,8 @@ fn normalize_claude_passthrough_args(args: &[String]) -> Vec<String> {
     }
     let mut normalized = args.to_vec();
     match normalized.first().map(String::as_str) {
-        Some("resume") => normalized[0] = "--resume".to_owned(),
-        Some("continue") => normalized[0] = "--continue".to_owned(),
+        Some("resume") => "--resume".clone_into(&mut normalized[0]),
+        Some("continue") => "--continue".clone_into(&mut normalized[0]),
         _ => {}
     }
     normalized
@@ -1497,7 +1498,7 @@ async fn run_daemon_until_signal(socket_path: PathBuf) -> Result<(), DaemonCliEr
     handle.shutdown().await;
     if let Err(source) = fs::remove_file(&pid_path) {
         if source.kind() != io::ErrorKind::NotFound {
-            eprintln!("remove pid file {:?}: {source}", pid_path);
+            eprintln!("remove pid file {pid_path:?}: {source}");
         }
     }
     wait_result

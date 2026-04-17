@@ -54,7 +54,7 @@ pub enum ReconcileError {
     Tmux(#[from] ax_tmux::TmuxError),
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct ReconcileOptions {
     pub daemon_running: bool,
     pub allow_disruptive_changes: bool,
@@ -296,8 +296,7 @@ impl<B: TmuxBackend + Clone> Reconciler<B> {
 
             let cleanup_dir = prev_record
                 .as_ref()
-                .map(|prev| prev.dir.as_str())
-                .unwrap_or(record.dir.as_str());
+                .map_or(record.dir.as_str(), |prev| prev.dir.as_str());
             cleanup_workspace_state(&self.tmux, &name, cleanup_dir)?;
             ensure_artifacts(
                 &name,
@@ -448,8 +447,9 @@ impl<B: TmuxBackend + Clone> Reconciler<B> {
 
             let cleanup_dir = prev_record
                 .as_ref()
-                .map(|prev| prev.artifact_dir.as_str())
-                .unwrap_or(record.artifact_dir.as_str());
+                .map_or(record.artifact_dir.as_str(), |prev| {
+                    prev.artifact_dir.as_str()
+                });
             cleanup_orchestrator_state(&self.tmux, &name, Path::new(cleanup_dir))?;
             ensure_orchestrator(
                 &self.tmux,
@@ -723,20 +723,12 @@ fn reconcile_state_path(config_path: &Path) -> PathBuf {
 }
 
 fn desired_session_names(previous: &RuntimeState, desired: &DesiredState) -> Vec<String> {
-    let mut names = BTreeMap::new();
-    for name in previous.workspaces.keys() {
-        names.insert(name.clone(), ());
-    }
-    for name in previous.orchestrators.keys() {
-        names.insert(name.clone(), ());
-    }
-    for name in desired.workspaces.keys() {
-        names.insert(name.clone(), ());
-    }
-    for name in desired.orchestrators.keys() {
-        names.insert(name.clone(), ());
-    }
-    names.into_keys().collect()
+    let mut names = std::collections::BTreeSet::new();
+    names.extend(previous.workspaces.keys().cloned());
+    names.extend(previous.orchestrators.keys().cloned());
+    names.extend(desired.workspaces.keys().cloned());
+    names.extend(desired.orchestrators.keys().cloned());
+    names.into_iter().collect()
 }
 
 fn load_session_snapshots<B: TmuxBackend>(

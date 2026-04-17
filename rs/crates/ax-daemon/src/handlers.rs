@@ -13,14 +13,16 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use ax_proto::payloads::{
-    AgentLifecyclePayload, BroadcastPayload, ControlLifecyclePayload, GetSharedPayload,
-    ReadMessagesPayload, RecallMemoriesPayload, RegisterPayload, RememberMemoryPayload,
-    SendMessagePayload, SetSharedPayload, SetStatusPayload,
+    AgentLifecyclePayload, BroadcastPayload, CancelTaskPayload, ControlLifecyclePayload,
+    CreateTaskPayload, GetSharedPayload, GetTaskPayload, ListTasksPayload, ReadMessagesPayload,
+    RecallMemoriesPayload, RegisterPayload, RememberMemoryPayload, RemoveTaskPayload,
+    SendMessagePayload, SetSharedPayload, SetStatusPayload, UpdateTaskPayload,
 };
 use ax_proto::responses::{
     AgentLifecycleResponse, BroadcastResponse, ControlLifecycleResponse, GetSharedResponse,
-    ListSharedResponse, ListWorkspacesResponse, MemoryResponse, ReadMessagesResponse,
-    RecallMemoriesResponse, SendMessageResponse, StatusResponse,
+    ListSharedResponse, ListTasksResponse, ListWorkspacesResponse, MemoryResponse,
+    ReadMessagesResponse, RecallMemoriesResponse, SendMessageResponse, StatusResponse,
+    TaskResponse,
 };
 use ax_proto::types::{LifecycleAction, Message};
 use ax_proto::{Envelope, ErrorPayload, MessageType, ResponsePayload};
@@ -34,6 +36,8 @@ use crate::memory::{Query as MemoryQuery, Store as MemoryStore};
 use crate::queue::MessageQueue;
 use crate::registry::{Entry, RegisterOutcome, Registry};
 use crate::shared_values::SharedValues;
+use crate::task_helpers::parse_task_lifecycle_options;
+use crate::task_store::{CreateTaskInput, TaskStore};
 
 /// Context shared across handlers for one connected client.
 pub(crate) struct HandlerCtx {
@@ -42,6 +46,7 @@ pub(crate) struct HandlerCtx {
     pub queue: Arc<MessageQueue>,
     pub shared: Arc<SharedValues>,
     pub memory: Arc<MemoryStore>,
+    pub task_store: Arc<TaskStore>,
 }
 
 pub(crate) struct RegisterHandled {
@@ -375,6 +380,136 @@ pub(crate) fn handle_recall_memories(
     response(&env.id, &RecallMemoriesResponse { memories })
 }
 
+pub(crate) fn handle_create_task(
+    ctx: &HandlerCtx,
+    env: &Envelope,
+    workspace: &str,
+) -> Result<Envelope, HandlerError> {
+    let payload: CreateTaskPayload = env
+        .decode_payload()
+        .map_err(|e| HandlerError::DecodePayload("create_task", e))?;
+    require_registered(workspace)?;
+    let (start_mode, workflow_mode, priority) = parse_task_lifecycle_options(
+        &payload.start_mode,
+        &payload.workflow_mode,
+        &payload.priority,
+    )
+    .map_err(|e| HandlerError::Logic(e.to_string()))?;
+    let task = ctx
+        .task_store
+        .create(CreateTaskInput {
+            title: payload.title,
+            description: payload.description,
+            assignee: payload.assignee,
+            created_by: workspace.to_owned(),
+            parent_task_id: payload.parent_task_id,
+            start_mode,
+            workflow_mode,
+            priority,
+            stale_after_seconds: payload.stale_after_seconds,
+            dispatch_body: String::new(),
+            dispatch_config_path: String::new(),
+        })
+        .map_err(|e| HandlerError::Logic(e.to_string()))?;
+    ctx.registry.touch(workspace, Utc::now());
+    response(&env.id, &TaskResponse { task })
+}
+
+pub(crate) fn handle_get_task(ctx: &HandlerCtx, env: &Envelope) -> Result<Envelope, HandlerError> {
+    let payload: GetTaskPayload = env
+        .decode_payload()
+        .map_err(|e| HandlerError::DecodePayload("get_task", e))?;
+    let task = ctx
+        .task_store
+        .get(&payload.id)
+        .ok_or_else(|| HandlerError::Logic(format!("task {:?} not found", payload.id)))?;
+    response(&env.id, &TaskResponse { task })
+}
+
+pub(crate) fn handle_list_tasks(
+    ctx: &HandlerCtx,
+    env: &Envelope,
+) -> Result<Envelope, HandlerError> {
+    let payload: ListTasksPayload = env
+        .decode_payload()
+        .map_err(|e| HandlerError::DecodePayload("list_tasks", e))?;
+    let tasks = ctx.task_store.list(
+        &payload.assignee,
+        &payload.created_by,
+        payload.status.as_ref(),
+    );
+    response(&env.id, &ListTasksResponse { tasks })
+}
+
+pub(crate) fn handle_update_task(
+    ctx: &HandlerCtx,
+    env: &Envelope,
+    workspace: &str,
+) -> Result<Envelope, HandlerError> {
+    let payload: UpdateTaskPayload = env
+        .decode_payload()
+        .map_err(|e| HandlerError::DecodePayload("update_task", e))?;
+    require_registered(workspace)?;
+    let task = ctx
+        .task_store
+        .update(
+            &payload.id,
+            payload.status,
+            payload.result,
+            payload.log,
+            workspace,
+        )
+        .map_err(|e| HandlerError::Logic(e.to_string()))?;
+    ctx.registry.touch(workspace, Utc::now());
+    response(&env.id, &TaskResponse { task })
+}
+
+pub(crate) fn handle_cancel_task(
+    ctx: &HandlerCtx,
+    env: &Envelope,
+    workspace: &str,
+) -> Result<Envelope, HandlerError> {
+    let payload: CancelTaskPayload = env
+        .decode_payload()
+        .map_err(|e| HandlerError::DecodePayload("cancel_task", e))?;
+    require_registered(workspace)?;
+    let task = ctx
+        .task_store
+        .cancel(
+            &payload.id,
+            &payload.reason,
+            workspace,
+            payload.expected_version,
+        )
+        .map_err(|e| HandlerError::Logic(e.to_string()))?;
+    ctx.registry.touch(workspace, Utc::now());
+    ctx.queue.remove_task_messages(&task.assignee, &task.id);
+    response(&env.id, &TaskResponse { task })
+}
+
+pub(crate) fn handle_remove_task(
+    ctx: &HandlerCtx,
+    env: &Envelope,
+    workspace: &str,
+) -> Result<Envelope, HandlerError> {
+    let payload: RemoveTaskPayload = env
+        .decode_payload()
+        .map_err(|e| HandlerError::DecodePayload("remove_task", e))?;
+    require_registered(workspace)?;
+    let task = ctx
+        .task_store
+        .remove(
+            &payload.id,
+            &payload.reason,
+            workspace,
+            payload.expected_version,
+        )
+        .map_err(|e| HandlerError::Logic(e.to_string()))?;
+    ctx.registry.touch(workspace, Utc::now());
+    ctx.queue.remove_task_messages(&task.assignee, &task.id);
+    response(&env.id, &TaskResponse { task })
+}
+
 // ---------- helpers ----------
 
 fn push_if_registered(ctx: &HandlerCtx, target: &str, msg: &Message) {
@@ -490,7 +625,7 @@ fn handle_agent_lifecycle_with_tmux<B: TmuxBackend + Clone>(
         &ctx.socket_path,
         Path::new(config_path),
         ax_bin,
-        target,
+        &target,
         &payload.action,
     )?;
     ctx.registry.touch(workspace, Utc::now());
@@ -546,7 +681,7 @@ fn apply_agent_lifecycle_action<B: TmuxBackend + Clone>(
     socket_path: &Path,
     config_path: &Path,
     ax_bin: &Path,
-    target: ResolvedAgentLifecycleTarget,
+    target: &ResolvedAgentLifecycleTarget,
     action: &LifecycleAction,
 ) -> Result<AgentLifecycleResponse, HandlerError> {
     if let Some(limit) = target.limit.as_deref() {
@@ -582,7 +717,7 @@ fn apply_agent_lifecycle_action<B: TmuxBackend + Clone>(
             match action {
                 LifecycleAction::Start => {
                     if existed_before {
-                        result.status = "already_running".to_owned();
+                        "already_running".clone_into(&mut result.status);
                     } else {
                         manager
                             .create(&target.name, &workspace.workspace)
@@ -592,7 +727,7 @@ fn apply_agent_lifecycle_action<B: TmuxBackend + Clone>(
                                     target.name, e
                                 ))
                             })?;
-                        result.status = "started".to_owned();
+                        "started".clone_into(&mut result.status);
                     }
                 }
                 LifecycleAction::Stop => {
@@ -616,7 +751,7 @@ fn apply_agent_lifecycle_action<B: TmuxBackend + Clone>(
                                 target.name, e
                             ))
                         })?;
-                    result.status = "restarted".to_owned();
+                    "restarted".clone_into(&mut result.status);
                 }
             }
         }
@@ -625,7 +760,7 @@ fn apply_agent_lifecycle_action<B: TmuxBackend + Clone>(
             match action {
                 LifecycleAction::Start => {
                     if existed_before {
-                        result.status = "already_running".to_owned();
+                        "already_running".clone_into(&mut result.status);
                     } else {
                         ensure_orchestrator(
                             tmux,
@@ -642,7 +777,7 @@ fn apply_agent_lifecycle_action<B: TmuxBackend + Clone>(
                                 target.name, e
                             ))
                         })?;
-                        result.status = "started".to_owned();
+                        "started".clone_into(&mut result.status);
                     }
                 }
                 LifecycleAction::Stop => {
@@ -682,7 +817,7 @@ fn apply_agent_lifecycle_action<B: TmuxBackend + Clone>(
                             target.name, e
                         ))
                     })?;
-                    result.status = "restarted".to_owned();
+                    "restarted".clone_into(&mut result.status);
                 }
             }
         }
@@ -849,6 +984,28 @@ pub(crate) fn handle_envelope(
             handle_recall_memories(ctx, env, workspace)
                 .unwrap_or_else(|e| error_envelope(&env.id, e.to_string())),
         ),
+        MessageType::CreateTask => HandlerOutput::Response(
+            handle_create_task(ctx, env, workspace)
+                .unwrap_or_else(|e| error_envelope(&env.id, e.to_string())),
+        ),
+        MessageType::GetTask => HandlerOutput::Response(
+            handle_get_task(ctx, env).unwrap_or_else(|e| error_envelope(&env.id, e.to_string())),
+        ),
+        MessageType::ListTasks => HandlerOutput::Response(
+            handle_list_tasks(ctx, env).unwrap_or_else(|e| error_envelope(&env.id, e.to_string())),
+        ),
+        MessageType::UpdateTask => HandlerOutput::Response(
+            handle_update_task(ctx, env, workspace)
+                .unwrap_or_else(|e| error_envelope(&env.id, e.to_string())),
+        ),
+        MessageType::CancelTask => HandlerOutput::Response(
+            handle_cancel_task(ctx, env, workspace)
+                .unwrap_or_else(|e| error_envelope(&env.id, e.to_string())),
+        ),
+        MessageType::RemoveTask => HandlerOutput::Response(
+            handle_remove_task(ctx, env, workspace)
+                .unwrap_or_else(|e| error_envelope(&env.id, e.to_string())),
+        ),
         _ => HandlerOutput::Response(error_envelope(
             &env.id,
             format!("unknown message type: {:?}", env.r#type),
@@ -967,6 +1124,7 @@ mod tests {
             queue: MessageQueue::new(),
             shared: SharedValues::in_memory(),
             memory: MemoryStore::in_memory(),
+            task_store: TaskStore::in_memory(),
         }
     }
 

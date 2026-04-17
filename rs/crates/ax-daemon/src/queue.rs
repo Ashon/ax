@@ -16,6 +16,8 @@ use uuid::Uuid;
 
 use ax_proto::types::Message;
 
+use crate::task_helpers::extract_task_id;
+
 #[derive(Debug, Default)]
 pub struct MessageQueue {
     inner: Mutex<Inner>,
@@ -91,4 +93,44 @@ impl MessageQueue {
         let inner = self.inner.lock().expect("queue poisoned");
         inner.by_workspace.get(workspace).map_or(0, VecDeque::len)
     }
+
+    /// Drop every pending message linked to `task_id` for `workspace`.
+    /// Mirrors Go's `MessageQueue.RemoveTaskMessages`; returns the
+    /// number of dropped messages so callers can log the cleanup.
+    pub fn remove_task_messages(&self, workspace: &str, task_id: &str) -> usize {
+        let task_id = task_id.trim();
+        if task_id.is_empty() {
+            return 0;
+        }
+        let mut inner = self.inner.lock().expect("queue poisoned");
+        let Some(queue) = inner.by_workspace.get_mut(workspace) else {
+            return 0;
+        };
+        let before = queue.len();
+        queue.retain(|msg| message_task_id(msg) != task_id);
+        before - queue.len()
+    }
+
+    /// Return true when `workspace` has at least one pending message
+    /// tagged with `task_id`.
+    #[must_use]
+    pub fn has_task_message(&self, workspace: &str, task_id: &str) -> bool {
+        let task_id = task_id.trim();
+        if task_id.is_empty() {
+            return false;
+        }
+        let inner = self.inner.lock().expect("queue poisoned");
+        inner
+            .by_workspace
+            .get(workspace)
+            .is_some_and(|queue| queue.iter().any(|msg| message_task_id(msg) == task_id))
+    }
+}
+
+fn message_task_id(msg: &Message) -> String {
+    let trimmed = msg.task_id.trim();
+    if !trimmed.is_empty() {
+        return trimmed.to_owned();
+    }
+    extract_task_id(&msg.content)
 }

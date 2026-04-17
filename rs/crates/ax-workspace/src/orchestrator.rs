@@ -187,6 +187,7 @@ pub fn ensure_orchestrator_tree<B: TmuxBackend>(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn ensure_orchestrator_tree_node<B: TmuxBackend>(
     tmux: &B,
     node: &ProjectNode,

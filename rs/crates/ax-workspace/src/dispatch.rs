@@ -93,6 +93,7 @@ pub fn dispatch_runnable_work<B: DispatchBackend + Clone>(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn dispatch_runnable_work_with_options<B: DispatchBackend + Clone>(
     tmux: &B,
     socket_path: &Path,

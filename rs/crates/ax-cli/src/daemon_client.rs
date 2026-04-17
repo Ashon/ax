@@ -39,7 +39,7 @@ impl fmt::Display for DaemonClientError {
                 socket_path,
                 source,
             } => {
-                write!(f, "connect {:?}: {source}", socket_path)
+                write!(f, "connect {socket_path:?}: {source}")
             }
             Self::ResolveCurrentDir(source) => write!(f, "resolve current dir: {source}"),
             Self::EncodeEnvelope(source) => write!(f, "encode envelope: {source}"),
@@ -49,7 +49,7 @@ impl fmt::Display for DaemonClientError {
             Self::DecodeEnvelope(source) => write!(f, "decode envelope: {source}"),
             Self::DecodeResponse(source) => write!(f, "decode response: {source}"),
             Self::Daemon(message) => write!(f, "daemon error: {message}"),
-            Self::UnexpectedEnvelope(kind) => write!(f, "unexpected envelope {:?}", kind),
+            Self::UnexpectedEnvelope(kind) => write!(f, "unexpected envelope {kind:?}"),
         }
     }
 }
@@ -128,6 +128,7 @@ impl DaemonClient {
         Ok(response.messages)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn list_workspaces(&mut self) -> Result<Vec<WorkspaceInfo>, DaemonClientError> {
         let response: ListWorkspacesResponse =
             self.request(MessageType::ListWorkspaces, &serde_json::json!({}))?;

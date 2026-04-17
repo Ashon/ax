@@ -111,10 +111,10 @@ fn control_named_target<B: TmuxBackend + Clone>(
     let target = resolve_lifecycle_target(socket_path, config_path, target_name)?;
     match &target.target.kind {
         LifecycleTargetKind::Workspace => {
-            control_workspace_target(tmux, socket_path, config_path, ax_bin, &target, action)?
+            control_workspace_target(tmux, socket_path, config_path, ax_bin, &target, action)?;
         }
         LifecycleTargetKind::Orchestrator => {
-            control_orchestrator_target(tmux, socket_path, config_path, ax_bin, &target, action)?
+            control_orchestrator_target(tmux, socket_path, config_path, ax_bin, &target, action)?;
         }
     }
     Ok(target.target)
@@ -164,6 +164,7 @@ fn resolve_lifecycle_target(
     }
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn control_workspace_target<B: TmuxBackend + Clone>(
     tmux: &B,
     socket_path: &Path,
@@ -199,6 +200,7 @@ fn control_workspace_target<B: TmuxBackend + Clone>(
     }
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn control_orchestrator_target<B: TmuxBackend + Clone>(
     tmux: &B,
     socket_path: &Path,

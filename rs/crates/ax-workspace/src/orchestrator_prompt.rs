@@ -358,7 +358,7 @@ fn render_orchestrator_prompt(
                 out.push('\n');
             }
             if !ws.instructions.is_empty() {
-                for line in ws.instructions.trim().split('\n') {
+                for line in ws.instructions.trim().lines() {
                     out.push_str("  ");
                     out.push_str(line.trim());
                     out.push('\n');
@@ -477,7 +477,7 @@ fn load_prompt_memories(
         entry.superseded_at.is_none()
             && (scopes.is_empty() || scopes.iter().any(|s| s == &entry.scope))
     });
-    memories.sort_by(|left, right| compare_memory_for_prompt(left, right));
+    memories.sort_by(compare_memory_for_prompt);
     let limit = if limit == 0 { DEFAULT_PROMPT_N } else { limit };
     if memories.len() > limit {
         memories.truncate(limit);
@@ -507,9 +507,7 @@ fn expand_socket_path(path: &Path) -> PathBuf {
         return path.to_path_buf();
     };
     if raw == "~" {
-        return std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("~"));
+        return std::env::var_os("HOME").map_or_else(|| PathBuf::from("~"), PathBuf::from);
     }
     if let Some(rest) = raw.strip_prefix("~/") {
         if let Some(home) = std::env::var_os("HOME") {

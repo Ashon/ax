@@ -92,7 +92,7 @@ pub fn prepare_codex_home(
     )?;
 
     let base_config = load_base_codex_config(&home.join(".codex").join("config.toml"))?;
-    let reasoning_effort = resolve_codex_reasoning_effort(config_path, workspace)?;
+    let reasoning_effort = resolve_codex_reasoning_effort(config_path, workspace);
 
     let mut content = upsert_top_level_key(
         &base_config,
@@ -252,20 +252,17 @@ fn create_symlink(src: &Path, dst: &Path) -> io::Result<()> {
     std::os::windows::fs::symlink_file(src, dst)
 }
 
-fn resolve_codex_reasoning_effort(
-    config_path: Option<&Path>,
-    workspace: &str,
-) -> Result<String, CodexHomeError> {
+fn resolve_codex_reasoning_effort(config_path: Option<&Path>, workspace: &str) -> String {
     let Some(path) = config_path else {
-        return Ok(DEFAULT_CODEX_REASONING_EFFORT.to_owned());
+        return DEFAULT_CODEX_REASONING_EFFORT.to_owned();
     };
     if path.as_os_str().is_empty() {
-        return Ok(DEFAULT_CODEX_REASONING_EFFORT.to_owned());
+        return DEFAULT_CODEX_REASONING_EFFORT.to_owned();
     }
 
     match Config::load(path) {
-        Ok(cfg) => Ok(codex_reasoning_effort_for_workspace(&cfg, workspace)),
-        Err(_) => Ok(DEFAULT_CODEX_REASONING_EFFORT.to_owned()),
+        Ok(cfg) => codex_reasoning_effort_for_workspace(&cfg, workspace),
+        Err(_) => DEFAULT_CODEX_REASONING_EFFORT.to_owned(),
     }
 }
 

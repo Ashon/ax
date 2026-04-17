@@ -123,7 +123,7 @@ impl TmuxBackend for FakeTmux {
 impl DispatchBackend for FakeTmux {
     fn wake_workspace(&self, _workspace: &str, prompt: &str) -> Result<(), ax_tmux::TmuxError> {
         self.state.woke.set(true);
-        *self.state.wake_prompt.borrow_mut() = prompt.to_owned();
+        prompt.clone_into(&mut self.state.wake_prompt.borrow_mut());
         Ok(())
     }
 }

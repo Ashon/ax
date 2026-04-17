@@ -15,9 +15,12 @@ mod registry;
 mod server;
 mod shared_values;
 mod socket_path;
+mod task_helpers;
+mod task_store;
 mod usage_trends;
 
 pub use queue::MessageQueue;
 pub use registry::Registry;
 pub use server::{Daemon, DaemonError, DaemonHandle};
 pub use socket_path::{expand_socket_path, DEFAULT_SOCKET_PATH};
+pub use task_store::{CreateTaskInput, TaskStore, TaskStoreError};

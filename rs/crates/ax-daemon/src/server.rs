@@ -19,6 +19,7 @@ use crate::memory::Store as MemoryStore;
 use crate::queue::MessageQueue;
 use crate::registry::Registry;
 use crate::shared_values::SharedValues;
+use crate::task_store::TaskStore;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DaemonError {
@@ -40,6 +41,7 @@ pub struct Daemon {
     pub queue: Arc<MessageQueue>,
     pub shared_values: Arc<SharedValues>,
     pub memory_store: Arc<MemoryStore>,
+    pub task_store: Arc<TaskStore>,
 }
 
 impl Daemon {
@@ -54,6 +56,7 @@ impl Daemon {
             queue: MessageQueue::new(),
             shared_values: SharedValues::in_memory(),
             memory_store: MemoryStore::in_memory(),
+            task_store: TaskStore::in_memory(),
         }
     }
 
@@ -66,6 +69,8 @@ impl Daemon {
             SharedValues::load(shared_path).map_err(|e| DaemonError::LoadState(e.to_string()))?;
         self.memory_store =
             MemoryStore::load(state_dir).map_err(|e| DaemonError::LoadState(e.to_string()))?;
+        self.task_store =
+            TaskStore::load(state_dir).map_err(|e| DaemonError::LoadState(e.to_string()))?;
         Ok(self)
     }
 
@@ -97,12 +102,14 @@ impl Daemon {
         let queue = self.queue.clone();
         let shared = self.shared_values.clone();
         let memory = self.memory_store.clone();
+        let task_store = self.task_store.clone();
         let join = tokio::spawn(run_accept_loop(
             listener,
             registry,
             queue,
             shared,
             memory,
+            task_store,
             shutdown_rx,
             socket_path.clone(),
         ));
@@ -114,12 +121,14 @@ impl Daemon {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_accept_loop(
     listener: UnixListener,
     registry: Arc<Registry>,
     queue: Arc<MessageQueue>,
     shared: Arc<SharedValues>,
     memory: Arc<MemoryStore>,
+    task_store: Arc<TaskStore>,
     mut shutdown: tokio::sync::oneshot::Receiver<()>,
     socket_path: PathBuf,
 ) {
@@ -134,6 +143,7 @@ async fn run_accept_loop(
                         queue: queue.clone(),
                         shared: shared.clone(),
                         memory: memory.clone(),
+                        task_store: task_store.clone(),
                     };
                     tokio::spawn(handle_connection(conn, ctx));
                 }
