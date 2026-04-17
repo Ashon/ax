@@ -41,8 +41,11 @@ dependencies = [
  "ax-agent",
  "ax-config",
  "ax-daemon",
+ "ax-proto",
  "ax-tmux",
  "ax-workspace",
+ "serde",
+ "serde_json",
  "tempfile",
  "tokio",
 ]
