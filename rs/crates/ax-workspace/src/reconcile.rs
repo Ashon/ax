@@ -1,20 +1,24 @@
-//! Workspace-only reconcile pass.
+//! Workspace + orchestrator reconcile pass.
 //!
-//! This ports the workspace half of `internal/workspace/reconcile.go`:
-//! persisted runtime state, desired-vs-actual diffing, create/remove,
-//! and disruption guards around existing tmux sessions.
+//! This ports the generated-artifact and managed-session half of
+//! `internal/workspace/reconcile.go`: persisted runtime state,
+//! desired-vs-actual diffing, create/remove/restart for workspaces and
+//! sub-orchestrators, and root-orchestrator manual-restart reporting.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
-use ax_config::{Config, Workspace};
+use ax_agent::Runtime;
+use ax_config::{Config, ProjectNode, Workspace};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 
 use crate::{
-    cleanup_workspace_state, ensure_artifacts, Manager, RealTmux, TmuxBackend, WorkspaceError,
+    cleanup_orchestrator_state, cleanup_workspace_state, ensure_artifacts, ensure_orchestrator,
+    orchestrator_dir_for_node, orchestrator_name, orchestrator_prompt, Manager, OrchestratorError,
+    RealTmux, TmuxBackend, WorkspaceError,
 };
 
 pub const RUNTIME_STATE_FILE: &str = ".runtime-state.json";
@@ -45,6 +49,8 @@ pub enum ReconcileError {
     #[error(transparent)]
     Workspace(#[from] WorkspaceError),
     #[error(transparent)]
+    Orchestrator(#[from] OrchestratorError),
+    #[error(transparent)]
     Tmux(#[from] ax_tmux::TmuxError),
 }
 
@@ -67,6 +73,10 @@ pub struct ReconcileAction {
 pub struct ReconcileReport {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<ReconcileAction>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub root_manual_restart_required: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub root_manual_restart_reasons: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -75,11 +85,24 @@ pub struct DesiredWorkspace {
     pub workspace: Workspace,
 }
 
+#[derive(Debug, Clone)]
+pub struct DesiredOrchestrator {
+    pub name: String,
+    pub node: ProjectNode,
+    pub parent_name: String,
+    pub artifact_dir: PathBuf,
+    pub runtime: String,
+    pub root: bool,
+    pub managed_session: bool,
+    pub prompt_hash: String,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct DesiredState {
     pub socket_path: PathBuf,
     pub config_path: PathBuf,
     pub workspaces: BTreeMap<String, DesiredWorkspace>,
+    pub orchestrators: BTreeMap<String, DesiredOrchestrator>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,6 +120,21 @@ pub struct WorkspaceState {
     pub instructions_hash: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrchestratorState {
+    pub name: String,
+    pub artifact_dir: String,
+    pub runtime: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub parent_name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub prompt_hash: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub managed_session: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub root: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RuntimeState {
     version: i32,
@@ -106,6 +144,8 @@ struct RuntimeState {
     config_path: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     workspaces: BTreeMap<String, WorkspaceState>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    orchestrators: BTreeMap<String, OrchestratorState>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -314,11 +354,163 @@ impl<B: TmuxBackend + Clone> Reconciler<B> {
             );
         }
 
+        for name in sorted_desired_orchestrator_names(&desired.orchestrators) {
+            let entry = desired
+                .orchestrators
+                .get(&name)
+                .expect("desired orchestrator exists");
+            let record = desired_orchestrator_state(entry);
+            let prev_record = previous.orchestrators.get(&name).cloned();
+            let session = sessions.get(&name).cloned().unwrap_or_default();
+            let matches = prev_record
+                .as_ref()
+                .is_some_and(|prev| orchestrator_state_matches(prev, &record))
+                && !global_changed;
+
+            if entry.root {
+                ensure_orchestrator(
+                    &self.tmux,
+                    &entry.node,
+                    &entry.parent_name,
+                    &self.socket_path,
+                    Some(&self.config_path),
+                    &self.ax_bin,
+                    false,
+                )?;
+                if !matches {
+                    report.require_root_manual_restart(
+                        "root orchestrator artifacts changed; manual relaunch is required",
+                    );
+                    let operation = if prev_record.is_some() {
+                        "manual_restart_required"
+                    } else {
+                        "create_artifacts"
+                    };
+                    let details = if prev_record.is_some() {
+                        "root foreground orchestrator is not hot-reloaded"
+                    } else {
+                        "root orchestrator artifacts created"
+                    };
+                    report.add_action("orchestrator", &name, operation, details);
+                }
+                next.orchestrators.insert(name, record);
+                continue;
+            }
+
+            if matches {
+                ensure_orchestrator(
+                    &self.tmux,
+                    &entry.node,
+                    &entry.parent_name,
+                    &self.socket_path,
+                    Some(&self.config_path),
+                    &self.ax_bin,
+                    opts.daemon_running,
+                )?;
+                if opts.daemon_running && !session.exists && entry.managed_session {
+                    report.add_action(
+                        "orchestrator",
+                        &name,
+                        "create",
+                        "session was missing and has been started",
+                    );
+                }
+                next.orchestrators.insert(name, record);
+                continue;
+            }
+
+            let action = if prev_record.is_some() {
+                "restart"
+            } else {
+                "create"
+            };
+            if session.exists && !opts.allow_disruptive_changes {
+                report.add_action(
+                    "orchestrator",
+                    &name,
+                    &format!("blocked_{action}"),
+                    "reconcile mode forbids disrupting an existing session",
+                );
+                if let Some(prev) = prev_record {
+                    next.orchestrators.insert(name, prev);
+                }
+                continue;
+            }
+            if session.exists {
+                if let Some(reason) = disruption_block_reason(&session) {
+                    report.add_action("orchestrator", &name, &format!("blocked_{action}"), reason);
+                    if let Some(prev) = prev_record {
+                        next.orchestrators.insert(name, prev);
+                    }
+                    continue;
+                }
+            }
+
+            let cleanup_dir = prev_record
+                .as_ref()
+                .map(|prev| prev.artifact_dir.as_str())
+                .unwrap_or(record.artifact_dir.as_str());
+            cleanup_orchestrator_state(&self.tmux, &name, Path::new(cleanup_dir))?;
+            ensure_orchestrator(
+                &self.tmux,
+                &entry.node,
+                &entry.parent_name,
+                &self.socket_path,
+                Some(&self.config_path),
+                &self.ax_bin,
+                opts.daemon_running,
+            )?;
+            let details = if opts.daemon_running && entry.managed_session {
+                "generated artifacts refreshed and session started"
+            } else {
+                "generated artifacts refreshed"
+            };
+            report.add_action("orchestrator", &name, action, details);
+            next.orchestrators.insert(name, record);
+        }
+
+        for name in sorted_orchestrator_state_names(&previous.orchestrators) {
+            if desired.orchestrators.contains_key(&name) {
+                continue;
+            }
+            let prev_record = previous
+                .orchestrators
+                .get(&name)
+                .expect("previous orchestrator state exists")
+                .clone();
+            let session = sessions.get(&name).cloned().unwrap_or_default();
+            if session.exists && !opts.allow_disruptive_changes {
+                report.add_action(
+                    "orchestrator",
+                    &name,
+                    "blocked_remove",
+                    "reconcile mode forbids disrupting an existing session",
+                );
+                next.orchestrators.insert(name, prev_record);
+                continue;
+            }
+            if session.exists {
+                if let Some(reason) = disruption_block_reason(&session) {
+                    report.add_action("orchestrator", &name, "blocked_remove", reason);
+                    next.orchestrators.insert(name, prev_record);
+                    continue;
+                }
+            }
+            cleanup_orchestrator_state(&self.tmux, &name, Path::new(&prev_record.artifact_dir))?;
+            report.add_action(
+                "orchestrator",
+                &name,
+                "remove",
+                "generated artifacts cleaned up",
+            );
+        }
+
         save_runtime_state(&state_path, &next)?;
         Ok(report)
     }
 }
 
+#[must_use]
 pub fn build_desired_state(
     config: &Config,
     socket_path: impl Into<PathBuf>,
@@ -340,7 +532,60 @@ pub fn build_desired_state(
         socket_path,
         config_path,
         workspaces,
+        orchestrators: BTreeMap::new(),
     }
+}
+
+pub fn build_desired_state_with_tree(
+    config: &Config,
+    tree: &ProjectNode,
+    socket_path: impl Into<PathBuf>,
+    config_path: impl Into<PathBuf>,
+    include_root: bool,
+) -> Result<DesiredState, ReconcileError> {
+    let mut desired = build_desired_state(config, socket_path, config_path);
+    append_desired_orchestrators(&mut desired, tree, "", include_root)?;
+    Ok(desired)
+}
+
+fn append_desired_orchestrators(
+    desired: &mut DesiredState,
+    node: &ProjectNode,
+    parent_name: &str,
+    include_self: bool,
+) -> Result<(), ReconcileError> {
+    let self_name = orchestrator_name(&node.prefix);
+    let runtime = Runtime::normalize(&node.orchestrator_runtime).ok_or_else(|| {
+        OrchestratorError::InvalidRuntime {
+            name: self_name.clone(),
+            runtime: node.orchestrator_runtime.clone(),
+        }
+    })?;
+
+    let mut child_parent_name = parent_name.to_owned();
+    if include_self {
+        let artifact_dir = orchestrator_dir_for_node(node)?;
+        let prompt = orchestrator_prompt(node, &node.prefix, parent_name);
+        desired.orchestrators.insert(
+            self_name.clone(),
+            DesiredOrchestrator {
+                name: self_name.clone(),
+                node: node.clone(),
+                parent_name: parent_name.to_owned(),
+                artifact_dir,
+                runtime: runtime.as_str().to_owned(),
+                root: node.prefix.is_empty(),
+                managed_session: !node.prefix.is_empty(),
+                prompt_hash: hash_text(&prompt),
+            },
+        );
+        child_parent_name = self_name;
+    }
+
+    for child in &node.children {
+        append_desired_orchestrators(desired, child, &child_parent_name, true)?;
+    }
+    Ok(())
 }
 
 impl ReconcileReport {
@@ -352,6 +597,22 @@ impl ReconcileReport {
             details: details.to_owned(),
         });
     }
+
+    fn require_root_manual_restart(&mut self, reason: &str) {
+        self.root_manual_restart_required = true;
+        let trimmed = reason.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        if self
+            .root_manual_restart_reasons
+            .iter()
+            .any(|existing| existing == trimmed)
+        {
+            return;
+        }
+        self.root_manual_restart_reasons.push(trimmed.to_owned());
+    }
 }
 
 impl RuntimeState {
@@ -361,6 +622,7 @@ impl RuntimeState {
             socket_path: String::new(),
             config_path: String::new(),
             workspaces: BTreeMap::new(),
+            orchestrators: BTreeMap::new(),
         }
     }
 }
@@ -377,6 +639,18 @@ fn desired_workspace_state(entry: &DesiredWorkspace) -> WorkspaceState {
     }
 }
 
+fn desired_orchestrator_state(entry: &DesiredOrchestrator) -> OrchestratorState {
+    OrchestratorState {
+        name: entry.name.clone(),
+        artifact_dir: clean_path_str(&entry.artifact_dir.display().to_string()),
+        runtime: entry.runtime.clone(),
+        parent_name: entry.parent_name.clone(),
+        prompt_hash: entry.prompt_hash.clone(),
+        managed_session: entry.managed_session,
+        root: entry.root,
+    }
+}
+
 fn workspace_state_matches(a: &WorkspaceState, b: &WorkspaceState) -> bool {
     a.name == b.name
         && a.dir == b.dir
@@ -385,6 +659,16 @@ fn workspace_state_matches(a: &WorkspaceState, b: &WorkspaceState) -> bool {
         && a.shell == b.shell
         && a.instructions_hash == b.instructions_hash
         && a.env == b.env
+}
+
+fn orchestrator_state_matches(a: &OrchestratorState, b: &OrchestratorState) -> bool {
+    a.name == b.name
+        && a.artifact_dir == b.artifact_dir
+        && a.runtime == b.runtime
+        && a.parent_name == b.parent_name
+        && a.prompt_hash == b.prompt_hash
+        && a.managed_session == b.managed_session
+        && a.root == b.root
 }
 
 fn load_runtime_state(path: &Path) -> Result<RuntimeState, ReconcileError> {
@@ -406,6 +690,9 @@ fn load_runtime_state(path: &Path) -> Result<RuntimeState, ReconcileError> {
         })?;
     if state.workspaces.is_empty() {
         state.workspaces = BTreeMap::new();
+    }
+    if state.orchestrators.is_empty() {
+        state.orchestrators = BTreeMap::new();
     }
     Ok(state)
 }
@@ -440,7 +727,13 @@ fn desired_session_names(previous: &RuntimeState, desired: &DesiredState) -> Vec
     for name in previous.workspaces.keys() {
         names.insert(name.clone(), ());
     }
+    for name in previous.orchestrators.keys() {
+        names.insert(name.clone(), ());
+    }
     for name in desired.workspaces.keys() {
+        names.insert(name.clone(), ());
+    }
+    for name in desired.orchestrators.keys() {
         names.insert(name.clone(), ());
     }
     names.into_keys().collect()
@@ -500,6 +793,16 @@ fn sorted_workspace_state_names(entries: &BTreeMap<String, WorkspaceState>) -> V
     entries.keys().cloned().collect()
 }
 
+fn sorted_desired_orchestrator_names(
+    entries: &BTreeMap<String, DesiredOrchestrator>,
+) -> Vec<String> {
+    entries.keys().cloned().collect()
+}
+
+fn sorted_orchestrator_state_names(entries: &BTreeMap<String, OrchestratorState>) -> Vec<String> {
+    entries.keys().cloned().collect()
+}
+
 fn hash_text(value: &str) -> String {
     let mut hasher = Sha1::new();
     hasher.update(value.as_bytes());
@@ -549,6 +852,11 @@ fn normalize_path(path: &Path) -> PathBuf {
     } else {
         out
     }
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[cfg(test)]

@@ -5,11 +5,12 @@ use std::rc::Rc;
 use std::sync::Mutex;
 
 use ax_agent::codex_home_path;
-use ax_config::Workspace;
+use ax_config::{ProjectNode, Workspace};
 use ax_tmux::SessionInfo;
 use ax_workspace::{
-    build_desired_state, ensure_artifacts, DesiredState, DesiredWorkspace, ReconcileOptions,
-    Reconciler, TmuxBackend,
+    build_desired_state, build_desired_state_with_tree, ensure_artifacts,
+    orchestrator_dir_for_node, root_orchestrator_dir, DesiredState, DesiredWorkspace,
+    ReconcileOptions, Reconciler, TmuxBackend,
 };
 
 static HOME_LOCK: Mutex<()> = Mutex::new(());
@@ -126,6 +127,47 @@ fn build_desired_state_copies_workspaces_from_config() {
 }
 
 #[test]
+fn build_desired_state_with_tree_includes_root_and_child_orchestrators() {
+    let home = tempfile::tempdir().unwrap();
+    with_home(home.path(), || {
+        let cfg = ax_config::Config::default_for_runtime("demo", "claude");
+        let tree = ProjectNode {
+            name: "root".to_owned(),
+            dir: home.path().join("project"),
+            children: vec![ProjectNode {
+                name: "shared".to_owned(),
+                alias: "alpha".to_owned(),
+                prefix: "alpha".to_owned(),
+                dir: home.path().join("project").join("shared"),
+                orchestrator_runtime: "codex".to_owned(),
+                ..ProjectNode::default()
+            }],
+            ..ProjectNode::default()
+        };
+
+        let desired = build_desired_state_with_tree(
+            &cfg,
+            &tree,
+            "/tmp/ax.sock",
+            "/tmp/demo/.ax/config.yaml",
+            true,
+        )
+        .unwrap();
+
+        assert!(desired.orchestrators.contains_key("orchestrator"));
+        assert!(desired.orchestrators.contains_key("alpha.orchestrator"));
+        assert_eq!(
+            desired
+                .orchestrators
+                .get("alpha.orchestrator")
+                .expect("child orchestrator present")
+                .parent_name,
+            "orchestrator"
+        );
+    });
+}
+
+#[test]
 fn reconcile_desired_state_creates_and_cleans_generated_artifacts() {
     let home = tempfile::tempdir().unwrap();
     with_home(home.path(), || {
@@ -162,6 +204,7 @@ fn reconcile_desired_state_creates_and_cleans_generated_artifacts() {
             socket_path: socket_path.clone(),
             config_path: config_path.clone(),
             workspaces: BTreeMap::new(),
+            orchestrators: BTreeMap::new(),
         };
         desired.workspaces.insert(
             "new".to_owned(),
@@ -180,6 +223,7 @@ fn reconcile_desired_state_creates_and_cleans_generated_artifacts() {
             socket_path,
             config_path: config_path.clone(),
             workspaces: BTreeMap::new(),
+            orchestrators: BTreeMap::new(),
         };
         previous.workspaces.insert(
             "old".to_owned(),
@@ -234,6 +278,7 @@ fn reconcile_desired_state_blocks_busy_workspace_restart() {
             socket_path: PathBuf::from("/tmp/ax.sock"),
             config_path: config_path.clone(),
             workspaces: BTreeMap::new(),
+            orchestrators: BTreeMap::new(),
         };
         previous.workspaces.insert(
             "alpha".to_owned(),
@@ -277,6 +322,7 @@ fn reconcile_desired_state_blocks_busy_workspace_restart() {
             socket_path: PathBuf::from("/tmp/ax.sock"),
             config_path,
             workspaces: BTreeMap::new(),
+            orchestrators: BTreeMap::new(),
         };
         desired.workspaces.insert(
             "alpha".to_owned(),
@@ -311,5 +357,69 @@ fn reconcile_desired_state_blocks_busy_workspace_restart() {
                 && action.name == "alpha"
                 && action.operation == "blocked_restart"
         }));
+    });
+}
+
+#[test]
+fn reconcile_desired_state_creates_orchestrator_artifacts_and_flags_root_restart() {
+    let home = tempfile::tempdir().unwrap();
+    with_home(home.path(), || {
+        let config_path = home.path().join("project").join(".ax").join("config.yaml");
+        let ax_bin = PathBuf::from("/tmp/ax");
+        let cfg = ax_config::Config {
+            project: "demo".to_owned(),
+            ..ax_config::Config::default()
+        };
+        let tree = ProjectNode {
+            name: "root".to_owned(),
+            dir: home.path().join("project"),
+            children: vec![ProjectNode {
+                name: "shared".to_owned(),
+                alias: "alpha".to_owned(),
+                prefix: "alpha".to_owned(),
+                dir: home.path().join("project").join("shared"),
+                orchestrator_runtime: "claude".to_owned(),
+                ..ProjectNode::default()
+            }],
+            ..ProjectNode::default()
+        };
+        let desired =
+            build_desired_state_with_tree(&cfg, &tree, "/tmp/ax.sock", &config_path, true).unwrap();
+
+        let reconciler = Reconciler::with_tmux(
+            "/tmp/ax.sock",
+            config_path.clone(),
+            ax_bin,
+            FakeTmux::default(),
+        );
+        let report = reconciler
+            .reconcile_desired_state(&desired, ReconcileOptions::default())
+            .unwrap();
+
+        assert!(report.root_manual_restart_required);
+        assert!(report.actions.iter().any(|action| {
+            action.kind == "orchestrator"
+                && action.name == "orchestrator"
+                && action.operation == "create_artifacts"
+        }));
+        assert!(report.actions.iter().any(|action| {
+            action.kind == "orchestrator"
+                && action.name == "alpha.orchestrator"
+                && action.operation == "create"
+        }));
+
+        let root_dir = root_orchestrator_dir().unwrap();
+        let child_dir = orchestrator_dir_for_node(
+            &tree
+                .children
+                .first()
+                .expect("child project present")
+                .clone(),
+        )
+        .unwrap();
+        assert!(root_dir.join(".mcp.json").exists());
+        assert!(root_dir.join("CLAUDE.md").exists());
+        assert!(child_dir.join(".mcp.json").exists());
+        assert!(child_dir.join("CLAUDE.md").exists());
     });
 }

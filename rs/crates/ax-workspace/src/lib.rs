@@ -32,6 +32,7 @@ pub use orchestrator_prompt::{
     orchestrator_prompt, write_orchestrator_prompt, OrchestratorPromptError,
 };
 pub use reconcile::{
-    build_desired_state, DesiredState, DesiredWorkspace, ReconcileAction, ReconcileError,
-    ReconcileOptions, ReconcileReport, Reconciler, WorkspaceState, RUNTIME_STATE_FILE,
+    build_desired_state, build_desired_state_with_tree, DesiredOrchestrator, DesiredState,
+    DesiredWorkspace, OrchestratorState, ReconcileAction, ReconcileError, ReconcileOptions,
+    ReconcileReport, Reconciler, WorkspaceState, RUNTIME_STATE_FILE,
 };
