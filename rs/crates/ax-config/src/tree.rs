@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use crate::overlay::ManagedOverlay;
 use crate::paths::{config_path_in_dir, ConfigRoot};
 use crate::schema::{Child, Config, LoadError, Workspace};
 
@@ -49,9 +50,7 @@ fn load_recursive(path: &Path, seen: &mut BTreeSet<PathBuf>) -> Result<Config, T
         return Err(TreeError::Cycle(abs));
     }
 
-    let mut cfg = Config::read_local(&abs)?;
-    initialize_local(&mut cfg, &abs);
-    normalize_local(&mut cfg, &abs);
+    let mut cfg = load_local_config(&abs)?;
 
     let mut child_names: Vec<_> = cfg.children.keys().cloned().collect();
     child_names.sort();
@@ -105,9 +104,7 @@ fn load_tree_recursive(
         return Err(TreeError::Cycle(abs));
     }
 
-    let mut cfg = Config::read_local(&abs)?;
-    initialize_local(&mut cfg, &abs);
-    normalize_local(&mut cfg, &abs);
+    let cfg = load_local_config(&abs)?;
 
     let mut node = ProjectNode {
         name: cfg.project.clone(),
@@ -209,6 +206,20 @@ fn qualify_name(prefix: &str, name: &str) -> String {
     } else {
         format!("{prefix}.{name}")
     }
+}
+
+/// Combines `readConfigFile` + `initializeLocalConfig` + optional
+/// managed-overlay application + `normalizeLocalConfig` from the Go
+/// `loadLocalConfig` helper.
+fn load_local_config(abs: &Path) -> Result<Config, LoadError> {
+    let mut cfg = Config::read_local(abs)?;
+    initialize_local(&mut cfg, abs);
+    if cfg.experimental_mcp_team_reconfigure {
+        let overlay = ManagedOverlay::load_for(abs)?;
+        overlay.apply_to(&mut cfg);
+    }
+    normalize_local(&mut cfg, abs);
+    Ok(cfg)
 }
 
 fn initialize_local(cfg: &mut Config, path: &Path) {
