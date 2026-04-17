@@ -20,6 +20,7 @@ mod envelope;
 pub mod helpers;
 mod payloads;
 mod responses;
+pub mod types;
 
 pub use envelope::{Envelope, ErrorPayload, MessageType, ResponsePayload};
 pub use payloads::{BroadcastPayload, RegisterPayload, SendMessagePayload};

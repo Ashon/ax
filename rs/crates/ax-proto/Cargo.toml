@@ -8,6 +8,7 @@ repository.workspace = true
 description = "Wire protocol types for the ax daemon (Rust port)"
 
 [dependencies]
+chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
