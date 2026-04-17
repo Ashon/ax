@@ -13,6 +13,7 @@ use std::time::Duration;
 use ax_agent::{run_with_options, LaunchOptions};
 use ax_config::{find_config_file, Config};
 use ax_daemon::{expand_socket_path, Daemon, DEFAULT_SOCKET_PATH};
+use ax_tmux::{attach_session, create_ephemeral_session, session_exists};
 use ax_workspace::{
     cleanup_orchestrator_state, dispatch_runnable_work, ensure_artifacts, ensure_orchestrator_tree,
     orchestrator_name, remove_mcp_config, restart_named_target, root_orchestrator_dir,
@@ -28,6 +29,8 @@ Usage:
   ax-rs daemon status [--socket PATH]
   ax-rs up [--config PATH] [--socket PATH] [--ax-bin PATH]
   ax-rs down [--config PATH] [--socket PATH] [--ax-bin PATH]
+  ax-rs claude [claude args...]
+  ax-rs codex [codex args...]
   ax-rs start <target> [--config PATH] [--socket PATH] [--ax-bin PATH]
   ax-rs stop <target> [--config PATH] [--socket PATH] [--ax-bin PATH]
   ax-rs restart <target> [--config PATH] [--socket PATH] [--ax-bin PATH]
@@ -42,6 +45,8 @@ Notes:
   ax-rs run-agent is handled natively; mcp-server is still delegated to Go ax
   Set AX_GO_BINARY=/path/to/ax to override the delegated Go binary for mcp-server (default: ax)
 ";
+
+const ROOT_ORCHESTRATOR_FAILURE_HOLD_SCRIPT: &str = "\"$@\"\nstatus=$?\nif [ \"$status\" -ne 0 ] && [ \"$status\" -ne 130 ] && [ \"$status\" -ne 143 ]; then\n  printf '\\n[ax] Root orchestrator process exited unexpectedly with status %s.\\n' \"$status\"\n  printf '[ax] Common causes: runtime binary not found, auth/config issues, or a CLI crash.\\n'\n  printf '[ax] Press Enter to close this tmux session.\\n'\n  IFS= read -r _\nfi\nexit \"$status\"";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CommonOptions {
@@ -77,6 +82,11 @@ enum ParsedCommand {
     Down {
         options: CommonOptions,
     },
+    RootOrchestrator {
+        runtime: String,
+        passthrough_args: Vec<String>,
+        options: CommonOptions,
+    },
     Lifecycle {
         action: LifecycleAction,
         target: String,
@@ -107,6 +117,7 @@ enum CliError {
     Daemon(DaemonCliError),
     Up(UpCliError),
     Down(DownCliError),
+    RootOrchestrator(RootOrchestratorCliError),
     Lifecycle(ax_workspace::LifecycleError),
     Dispatch(ax_workspace::DispatchError),
     RunAgent(ax_agent::LaunchError),
@@ -193,6 +204,17 @@ enum DownCliError {
     RemoveConfigMcp(ax_workspace::McpConfigError),
 }
 
+#[derive(Debug)]
+enum RootOrchestratorCliError {
+    UnsupportedRuntime(String),
+    LoadTree(ax_config::TreeError),
+    PrepareOrchestrators(ax_workspace::OrchestratorError),
+    ResolveRootDir(ax_workspace::OrchestratorError),
+    StartDaemon(String),
+    CreateSession(ax_tmux::TmuxError),
+    AttachSession(ax_tmux::TmuxError),
+}
+
 impl fmt::Display for CliError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -200,6 +222,7 @@ impl fmt::Display for CliError {
             Self::Daemon(source) => write!(f, "{source}"),
             Self::Up(source) => write!(f, "{source}"),
             Self::Down(source) => write!(f, "{source}"),
+            Self::RootOrchestrator(source) => write!(f, "{source}"),
             Self::Lifecycle(source) => write!(f, "{source}"),
             Self::Dispatch(source) => write!(f, "{source}"),
             Self::RunAgent(source) => write!(f, "{source}"),
@@ -209,6 +232,20 @@ impl fmt::Display for CliError {
             Self::DelegateLoop { binary } => {
                 write!(f, "delegated ax binary {binary:?} resolves to ax-rs itself")
             }
+        }
+    }
+}
+
+impl fmt::Display for RootOrchestratorCliError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedRuntime(runtime) => write!(f, "unsupported runtime {runtime:?}"),
+            Self::LoadTree(source) => write!(f, "load config tree: {source}"),
+            Self::PrepareOrchestrators(source) => write!(f, "{source}"),
+            Self::ResolveRootDir(source) => write!(f, "{source}"),
+            Self::StartDaemon(source) => write!(f, "start daemon: {source}"),
+            Self::CreateSession(source) => write!(f, "create orchestrator session: {source}"),
+            Self::AttachSession(source) => write!(f, "{source}"),
         }
     }
 }
@@ -298,6 +335,12 @@ impl From<DownCliError> for CliError {
     }
 }
 
+impl From<RootOrchestratorCliError> for CliError {
+    fn from(source: RootOrchestratorCliError) -> Self {
+        Self::RootOrchestrator(source)
+    }
+}
+
 impl From<ax_workspace::LifecycleError> for CliError {
     fn from(source: ax_workspace::LifecycleError) -> Self {
         Self::Lifecycle(source)
@@ -356,6 +399,11 @@ where
         } => run_daemon_command(action, &socket_path),
         ParsedCommand::Up { options } => run_up(&options, current_exe),
         ParsedCommand::Down { options } => run_down(&options),
+        ParsedCommand::RootOrchestrator {
+            runtime,
+            passthrough_args,
+            options,
+        } => run_root_orchestrator(&runtime, &passthrough_args, &options, current_exe),
         ParsedCommand::Lifecycle {
             action,
             target,
@@ -464,6 +512,9 @@ where
     }
     if command == "down" {
         return parse_down_args(&argv, cwd, current_exe);
+    }
+    if matches!(command.as_str(), "claude" | "codex") {
+        return parse_root_orchestrator_args(&command, &argv, cwd, current_exe);
     }
     if command == "run-agent" {
         return parse_run_agent_args(&argv, cwd);
@@ -711,6 +762,34 @@ fn parse_down_args(
     })
 }
 
+fn parse_root_orchestrator_args(
+    command: &str,
+    argv: &[OsString],
+    cwd: &Path,
+    current_exe: &Path,
+) -> Result<ParsedCommand, CliError> {
+    let passthrough_args: Vec<String> = argv
+        .iter()
+        .skip(1)
+        .map(|value| value.to_string_lossy().into_owned())
+        .collect();
+    let passthrough_args = if command == "claude" {
+        normalize_claude_passthrough_args(&passthrough_args)
+    } else {
+        passthrough_args
+    };
+
+    Ok(ParsedCommand::RootOrchestrator {
+        runtime: command.to_owned(),
+        passthrough_args,
+        options: CommonOptions {
+            socket_path: expand_socket_path(DEFAULT_SOCKET_PATH),
+            config_path: resolve_config_path(None, cwd)?,
+            ax_bin: current_exe.to_path_buf(),
+        },
+    })
+}
+
 fn parse_run_agent_args(argv: &[OsString], cwd: &Path) -> Result<ParsedCommand, CliError> {
     let mut runtime = "claude".to_owned();
     let mut workspace: Option<String> = None;
@@ -927,6 +1006,67 @@ fn run_down(options: &CommonOptions) -> Result<ExitCode, CliError> {
     Ok(ExitCode::SUCCESS)
 }
 
+fn run_root_orchestrator(
+    runtime_name: &str,
+    passthrough_args: &[String],
+    options: &CommonOptions,
+    current_exe: &Path,
+) -> Result<ExitCode, CliError> {
+    let runtime = ax_agent::Runtime::normalize(runtime_name)
+        .ok_or_else(|| RootOrchestratorCliError::UnsupportedRuntime(runtime_name.to_owned()))?;
+    let mut tree =
+        Config::load_tree(&options.config_path).map_err(RootOrchestratorCliError::LoadTree)?;
+
+    if tree.disable_root_orchestrator {
+        reconcile_root_orchestrator_state(&tree)
+            .map_err(RootOrchestratorCliError::PrepareOrchestrators)?;
+    }
+
+    tree.orchestrator_runtime = runtime.as_str().to_owned();
+    ensure_daemon_running(&options.socket_path, current_exe)
+        .map_err(|err| RootOrchestratorCliError::StartDaemon(err.to_string()))?;
+    ensure_orchestrator_tree(
+        &RealTmux,
+        &tree,
+        &options.socket_path,
+        Some(&options.config_path),
+        &options.ax_bin,
+        true,
+        false,
+    )
+    .map_err(RootOrchestratorCliError::PrepareOrchestrators)?;
+
+    let self_name = orchestrator_name(&tree.prefix);
+    if session_exists(&self_name) {
+        attach_session(&self_name).map_err(RootOrchestratorCliError::AttachSession)?;
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let orch_dir = root_orchestrator_dir().map_err(RootOrchestratorCliError::ResolveRootDir)?;
+    let mut argv = vec![
+        options.ax_bin.display().to_string(),
+        "run-agent".to_owned(),
+        "--runtime".to_owned(),
+        runtime.as_str().to_owned(),
+        "--workspace".to_owned(),
+        self_name.clone(),
+        "--socket".to_owned(),
+        options.socket_path.display().to_string(),
+        "--config".to_owned(),
+        options.config_path.display().to_string(),
+    ];
+    if !passthrough_args.is_empty() {
+        argv.push("--".to_owned());
+        argv.extend_from_slice(passthrough_args);
+    }
+    let wrapped = wrap_root_orchestrator_ephemeral_argv(&argv);
+    let refs: Vec<&str> = wrapped.iter().map(String::as_str).collect();
+    create_ephemeral_session(&self_name, &orch_dir.display().to_string(), &refs)
+        .map_err(RootOrchestratorCliError::CreateSession)?;
+    attach_session(&self_name).map_err(RootOrchestratorCliError::AttachSession)?;
+    Ok(ExitCode::SUCCESS)
+}
+
 fn reconcile_root_orchestrator_state(
     tree: &ax_config::ProjectNode,
 ) -> Result<bool, ax_workspace::OrchestratorError> {
@@ -956,6 +1096,33 @@ fn stop_orchestrator_sessions<B: TmuxBackend>(
         println!("  {name}: stopped");
     }
     Ok(())
+}
+
+fn normalize_claude_passthrough_args(args: &[String]) -> Vec<String> {
+    if args.is_empty() {
+        return Vec::new();
+    }
+    let mut normalized = args.to_vec();
+    match normalized.first().map(String::as_str) {
+        Some("resume") => normalized[0] = "--resume".to_owned(),
+        Some("continue") => normalized[0] = "--continue".to_owned(),
+        _ => {}
+    }
+    normalized
+}
+
+fn wrap_root_orchestrator_ephemeral_argv(argv: &[String]) -> Vec<String> {
+    if argv.is_empty() {
+        return Vec::new();
+    }
+    let mut wrapped = vec![
+        "sh".to_owned(),
+        "-lc".to_owned(),
+        ROOT_ORCHESTRATOR_FAILURE_HOLD_SCRIPT.to_owned(),
+        "ax-root-orchestrator".to_owned(),
+    ];
+    wrapped.extend_from_slice(argv);
+    wrapped
 }
 
 fn ensure_daemon_running(socket_path: &Path, current_exe: &Path) -> Result<(), CliError> {
@@ -1463,6 +1630,73 @@ mod tests {
                 }
             );
         });
+    }
+
+    #[test]
+    fn claude_parses_passthrough_args_and_normalizes_resume_alias() {
+        let root = TempDir::new().expect("tempdir");
+        let home = TempDir::new().expect("home");
+        let _config_path = write_config(&root);
+        let cwd = root.path().join("nested");
+        fs::create_dir_all(&cwd).expect("create cwd");
+        let current_exe = PathBuf::from("/tmp/ax-rs");
+
+        with_home(home.path(), || {
+            let parsed = parse_args(
+                vec![
+                    "ax-rs".into(),
+                    "claude".into(),
+                    "resume".into(),
+                    "--model".into(),
+                    "sonnet".into(),
+                ],
+                &cwd,
+                &current_exe,
+            )
+            .expect("parse");
+
+            assert_eq!(
+                parsed,
+                ParsedCommand::RootOrchestrator {
+                    runtime: "claude".to_owned(),
+                    passthrough_args: vec![
+                        "--resume".to_owned(),
+                        "--model".to_owned(),
+                        "sonnet".to_owned(),
+                    ],
+                    options: CommonOptions {
+                        socket_path: expand_socket_path(DEFAULT_SOCKET_PATH),
+                        config_path: root.path().join(".ax").join("config.yaml"),
+                        ax_bin: current_exe,
+                    },
+                }
+            );
+        });
+    }
+
+    #[test]
+    fn wrap_root_orchestrator_ephemeral_argv_preserves_original_command() {
+        let argv = vec![
+            "ax-rs".to_owned(),
+            "run-agent".to_owned(),
+            "--runtime".to_owned(),
+            "codex".to_owned(),
+            "--workspace".to_owned(),
+            "orchestrator".to_owned(),
+        ];
+
+        let wrapped = wrap_root_orchestrator_ephemeral_argv(&argv);
+        assert_eq!(wrapped.len(), argv.len() + 4);
+        assert_eq!(&wrapped[0], "sh");
+        assert_eq!(&wrapped[1], "-lc");
+        assert!(wrapped[2].contains("Root orchestrator process exited unexpectedly"));
+        assert_eq!(&wrapped[3], "ax-root-orchestrator");
+        assert_eq!(&wrapped[4..], &argv);
+    }
+
+    #[test]
+    fn wrap_root_orchestrator_ephemeral_argv_handles_empty_input() {
+        assert!(wrap_root_orchestrator_ephemeral_argv(&[]).is_empty());
     }
 
     #[test]
