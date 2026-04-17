@@ -10,8 +10,8 @@ use ax_config::ProjectNode;
 use ax_tmux::SessionInfo;
 use ax_workspace::{
     cleanup_orchestrator_artifacts, cleanup_orchestrator_state, ensure_orchestrator,
-    orchestrator_dir_for_node, orchestrator_name, root_orchestrator_dir, write_mcp_config,
-    TmuxBackend,
+    ensure_orchestrator_tree, orchestrator_dir_for_node, orchestrator_name, root_orchestrator_dir,
+    write_mcp_config, TmuxBackend,
 };
 
 static HOME_LOCK: Mutex<()> = Mutex::new(());
@@ -347,6 +347,44 @@ fn ensure_codex_orchestrator_prepares_codex_home() {
         let codex_home = codex_home_path(&name, &orch_dir.display().to_string()).unwrap();
         assert!(orch_dir.join("AGENTS.md").exists());
         assert!(codex_home.join("config.toml").exists());
+        assert!(!tmux.created());
+    });
+}
+
+#[test]
+fn ensure_orchestrator_tree_skips_root_but_prepares_children() {
+    let home = tempfile::tempdir().unwrap();
+    with_home(home.path(), || {
+        let tree = ProjectNode {
+            name: "root".to_owned(),
+            dir: home.path().join("repo"),
+            children: vec![ProjectNode {
+                name: "shared".to_owned(),
+                alias: "alpha".to_owned(),
+                prefix: "alpha".to_owned(),
+                dir: home.path().join("repo").join("shared"),
+                orchestrator_runtime: "claude".to_owned(),
+                ..ProjectNode::default()
+            }],
+            ..ProjectNode::default()
+        };
+
+        let tmux = FakeTmux::default();
+        ensure_orchestrator_tree(
+            &tmux,
+            &tree,
+            Path::new("/tmp/ax.sock"),
+            Some(Path::new("/tmp/config.yaml")),
+            Path::new("/tmp/ax"),
+            false,
+            true,
+        )
+        .unwrap();
+
+        assert!(!root_orchestrator_dir().unwrap().exists());
+        let child_dir = orchestrator_dir_for_node(&tree.children[0]).unwrap();
+        assert!(child_dir.join(".mcp.json").exists());
+        assert!(child_dir.join("CLAUDE.md").exists());
         assert!(!tmux.created());
     });
 }

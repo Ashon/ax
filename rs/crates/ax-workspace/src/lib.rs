@@ -33,7 +33,8 @@ pub use manager::{
 pub use mcp_config::{remove_mcp_config, write_mcp_config, McpConfigError, MCP_CONFIG_FILE};
 pub use orchestrator::{
     cleanup_orchestrator_artifacts, cleanup_orchestrator_state, ensure_orchestrator,
-    orchestrator_dir_for_node, orchestrator_name, root_orchestrator_dir, OrchestratorError,
+    ensure_orchestrator_tree, orchestrator_dir_for_node, orchestrator_name, root_orchestrator_dir,
+    OrchestratorError,
 };
 pub use orchestrator_prompt::{
     orchestrator_prompt, write_orchestrator_prompt, OrchestratorPromptError,

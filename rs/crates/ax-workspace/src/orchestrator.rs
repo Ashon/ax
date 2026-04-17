@@ -164,6 +164,70 @@ pub fn ensure_orchestrator<B: TmuxBackend>(
     Ok(())
 }
 
+/// Ensure orchestrator artifacts across the whole project tree, optionally
+/// skipping the root node while still wiring children to the correct parent.
+pub fn ensure_orchestrator_tree<B: TmuxBackend>(
+    tmux: &B,
+    node: &ProjectNode,
+    socket_path: &Path,
+    config_path: Option<&Path>,
+    ax_bin: &Path,
+    start_sessions: bool,
+    skip_root: bool,
+) -> Result<(), OrchestratorError> {
+    ensure_orchestrator_tree_node(
+        tmux,
+        node,
+        "",
+        socket_path,
+        config_path,
+        ax_bin,
+        start_sessions,
+        skip_root,
+    )
+}
+
+fn ensure_orchestrator_tree_node<B: TmuxBackend>(
+    tmux: &B,
+    node: &ProjectNode,
+    parent_name: &str,
+    socket_path: &Path,
+    config_path: Option<&Path>,
+    ax_bin: &Path,
+    start_sessions: bool,
+    skip_root: bool,
+) -> Result<(), OrchestratorError> {
+    let self_name = orchestrator_name(&node.prefix);
+    let is_root = node.prefix.is_empty();
+
+    if !(is_root && skip_root) {
+        ensure_orchestrator(
+            tmux,
+            node,
+            parent_name,
+            socket_path,
+            config_path,
+            ax_bin,
+            start_sessions,
+        )?;
+    }
+
+    let child_parent_name = if is_root && skip_root { "" } else { &self_name };
+    for child in &node.children {
+        ensure_orchestrator_tree_node(
+            tmux,
+            child,
+            child_parent_name,
+            socket_path,
+            config_path,
+            ax_bin,
+            start_sessions,
+            false,
+        )?;
+    }
+    Ok(())
+}
+
 /// Remove generated orchestrator artifacts but leave unrelated files intact.
 pub fn cleanup_orchestrator_artifacts(orch_dir: &Path) -> Result<(), OrchestratorError> {
     if orch_dir.as_os_str().is_empty() {
