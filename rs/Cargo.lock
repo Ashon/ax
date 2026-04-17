@@ -41,6 +41,7 @@ dependencies = [
  "ax-agent",
  "ax-config",
  "ax-daemon",
+ "ax-tmux",
  "ax-workspace",
  "tempfile",
  "tokio",

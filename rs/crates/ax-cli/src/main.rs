@@ -15,8 +15,8 @@ use ax_config::{find_config_file, Config};
 use ax_daemon::{expand_socket_path, Daemon, DEFAULT_SOCKET_PATH};
 use ax_workspace::{
     cleanup_orchestrator_state, dispatch_runnable_work, ensure_artifacts, ensure_orchestrator_tree,
-    orchestrator_name, restart_named_target, root_orchestrator_dir, start_named_target,
-    stop_named_target, RealTmux,
+    orchestrator_name, remove_mcp_config, restart_named_target, root_orchestrator_dir,
+    start_named_target, stop_named_target, Manager, RealTmux, TmuxBackend,
 };
 
 const USAGE: &str = "\
@@ -27,6 +27,7 @@ Usage:
   ax-rs daemon stop [--socket PATH]
   ax-rs daemon status [--socket PATH]
   ax-rs up [--config PATH] [--socket PATH] [--ax-bin PATH]
+  ax-rs down [--config PATH] [--socket PATH] [--ax-bin PATH]
   ax-rs start <target> [--config PATH] [--socket PATH] [--ax-bin PATH]
   ax-rs stop <target> [--config PATH] [--socket PATH] [--ax-bin PATH]
   ax-rs restart <target> [--config PATH] [--socket PATH] [--ax-bin PATH]
@@ -73,6 +74,9 @@ enum ParsedCommand {
     Up {
         options: CommonOptions,
     },
+    Down {
+        options: CommonOptions,
+    },
     Lifecycle {
         action: LifecycleAction,
         target: String,
@@ -102,6 +106,7 @@ enum CliError {
     Usage(String),
     Daemon(DaemonCliError),
     Up(UpCliError),
+    Down(DownCliError),
     Lifecycle(ax_workspace::LifecycleError),
     Dispatch(ax_workspace::DispatchError),
     RunAgent(ax_agent::LaunchError),
@@ -173,12 +178,28 @@ enum UpCliError {
     },
 }
 
+#[derive(Debug)]
+enum DownCliError {
+    LoadConfig(ax_config::TreeError),
+    StopWorkspace {
+        name: String,
+        source: ax_workspace::WorkspaceError,
+    },
+    StopOrchestrator {
+        name: String,
+        source: ax_tmux::TmuxError,
+    },
+    CleanupRootOrchestrator(ax_workspace::OrchestratorError),
+    RemoveConfigMcp(ax_workspace::McpConfigError),
+}
+
 impl fmt::Display for CliError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Usage(message) => f.write_str(message),
             Self::Daemon(source) => write!(f, "{source}"),
             Self::Up(source) => write!(f, "{source}"),
+            Self::Down(source) => write!(f, "{source}"),
             Self::Lifecycle(source) => write!(f, "{source}"),
             Self::Dispatch(source) => write!(f, "{source}"),
             Self::RunAgent(source) => write!(f, "{source}"),
@@ -188,6 +209,22 @@ impl fmt::Display for CliError {
             Self::DelegateLoop { binary } => {
                 write!(f, "delegated ax binary {binary:?} resolves to ax-rs itself")
             }
+        }
+    }
+}
+
+impl fmt::Display for DownCliError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LoadConfig(source) => write!(f, "{source}"),
+            Self::StopWorkspace { name, source } => {
+                write!(f, "destroy workspace {name:?}: {source}")
+            }
+            Self::StopOrchestrator { name, source } => {
+                write!(f, "destroy orchestrator session {name:?}: {source}")
+            }
+            Self::CleanupRootOrchestrator(source) => write!(f, "{source}"),
+            Self::RemoveConfigMcp(source) => write!(f, "{source}"),
         }
     }
 }
@@ -255,6 +292,12 @@ impl From<UpCliError> for CliError {
     }
 }
 
+impl From<DownCliError> for CliError {
+    fn from(source: DownCliError) -> Self {
+        Self::Down(source)
+    }
+}
+
 impl From<ax_workspace::LifecycleError> for CliError {
     fn from(source: ax_workspace::LifecycleError) -> Self {
         Self::Lifecycle(source)
@@ -312,6 +355,7 @@ where
             socket_path,
         } => run_daemon_command(action, &socket_path),
         ParsedCommand::Up { options } => run_up(&options, current_exe),
+        ParsedCommand::Down { options } => run_down(&options),
         ParsedCommand::Lifecycle {
             action,
             target,
@@ -417,6 +461,9 @@ where
     }
     if command == "up" {
         return parse_up_args(&argv, cwd, current_exe);
+    }
+    if command == "down" {
+        return parse_down_args(&argv, cwd, current_exe);
     }
     if command == "run-agent" {
         return parse_run_agent_args(&argv, cwd);
@@ -615,6 +662,55 @@ fn parse_up_args(
     })
 }
 
+fn parse_down_args(
+    argv: &[OsString],
+    cwd: &Path,
+    current_exe: &Path,
+) -> Result<ParsedCommand, CliError> {
+    let mut socket_override: Option<PathBuf> = None;
+    let mut config_override: Option<PathBuf> = None;
+    let mut ax_bin_override: Option<PathBuf> = None;
+
+    let mut i = 1;
+    while i < argv.len() {
+        let arg = &argv[i];
+        match arg.to_string_lossy().as_ref() {
+            "-h" | "--help" => return Ok(ParsedCommand::Help),
+            "--socket" => {
+                i += 1;
+                socket_override = Some(parse_socket_path(argv.get(i), "--socket")?);
+            }
+            "--config" => {
+                i += 1;
+                config_override = Some(parse_path_arg(argv.get(i), "--config", cwd)?);
+            }
+            "--ax-bin" => {
+                i += 1;
+                ax_bin_override = Some(parse_path_arg(argv.get(i), "--ax-bin", cwd)?);
+            }
+            other if other.starts_with('-') => {
+                return Err(CliError::Usage(format!(
+                    "unknown flag {other:?}\n\n{USAGE}"
+                )));
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unexpected extra argument {other:?}\n\n{USAGE}"
+                )));
+            }
+        }
+        i += 1;
+    }
+
+    Ok(ParsedCommand::Down {
+        options: CommonOptions {
+            socket_path: socket_override.unwrap_or_else(|| expand_socket_path(DEFAULT_SOCKET_PATH)),
+            config_path: resolve_config_path(config_override, cwd)?,
+            ax_bin: ax_bin_override.unwrap_or_else(|| current_exe.to_path_buf()),
+        },
+    })
+}
+
 fn parse_run_agent_args(argv: &[OsString], cwd: &Path) -> Result<ParsedCommand, CliError> {
     let mut runtime = "claude".to_owned();
     let mut workspace: Option<String> = None;
@@ -752,7 +848,8 @@ fn run_up(options: &CommonOptions, current_exe: &Path) -> Result<ExitCode, CliEr
 
     println!();
     println!("Orchestrators:");
-    let skip_root = reconcile_root_orchestrator_state(&tree)?;
+    let skip_root =
+        reconcile_root_orchestrator_state(&tree).map_err(UpCliError::PrepareOrchestrators)?;
     ensure_orchestrator_tree(
         &RealTmux,
         &tree,
@@ -781,14 +878,84 @@ fn run_up(options: &CommonOptions, current_exe: &Path) -> Result<ExitCode, CliEr
     Ok(ExitCode::SUCCESS)
 }
 
-fn reconcile_root_orchestrator_state(tree: &ax_config::ProjectNode) -> Result<bool, UpCliError> {
+fn run_down(options: &CommonOptions) -> Result<ExitCode, CliError> {
+    let cfg = Config::load(&options.config_path).map_err(DownCliError::LoadConfig)?;
+
+    println!("Stopping workspaces:");
+    let manager = Manager::new(
+        options.socket_path.clone(),
+        Some(options.config_path.clone()),
+        options.ax_bin.clone(),
+    );
+    for (name, workspace) in &cfg.workspaces {
+        if !RealTmux.session_exists(name) {
+            println!("  {name}: not running (skipped)");
+            continue;
+        }
+        manager
+            .destroy(name, &workspace.dir)
+            .map_err(|source| DownCliError::StopWorkspace {
+                name: name.clone(),
+                source,
+            })?;
+        println!("  {name}: stopped");
+    }
+
+    if let Ok(tree) = Config::load_tree(&options.config_path) {
+        println!();
+        println!("Stopping orchestrators:");
+        stop_orchestrator_sessions(&RealTmux, &tree)?;
+        let _ = reconcile_root_orchestrator_state(&tree)
+            .map_err(DownCliError::CleanupRootOrchestrator)?;
+    }
+
+    if let Some(config_dir) = options.config_path.parent() {
+        remove_mcp_config(config_dir).map_err(DownCliError::RemoveConfigMcp)?;
+    }
+
+    println!();
+    match daemon_status(&options.socket_path)? {
+        DaemonStatus::Running(pid) => {
+            send_signal(pid, "-TERM")?;
+            println!("Daemon: stopped");
+        }
+        DaemonStatus::NotRunning | DaemonStatus::StalePid => {
+            println!("Daemon: not running");
+        }
+    }
+
+    Ok(ExitCode::SUCCESS)
+}
+
+fn reconcile_root_orchestrator_state(
+    tree: &ax_config::ProjectNode,
+) -> Result<bool, ax_workspace::OrchestratorError> {
     if !tree.disable_root_orchestrator {
         return Ok(false);
     }
-    let orch_dir = root_orchestrator_dir().map_err(UpCliError::PrepareOrchestrators)?;
-    cleanup_orchestrator_state(&RealTmux, &orchestrator_name(""), &orch_dir)
-        .map_err(UpCliError::PrepareOrchestrators)?;
+    let orch_dir = root_orchestrator_dir()?;
+    cleanup_orchestrator_state(&RealTmux, &orchestrator_name(""), &orch_dir)?;
     Ok(true)
+}
+
+fn stop_orchestrator_sessions<B: TmuxBackend>(
+    tmux: &B,
+    tree: &ax_config::ProjectNode,
+) -> Result<(), DownCliError> {
+    for child in &tree.children {
+        stop_orchestrator_sessions(tmux, child)?;
+    }
+
+    let name = orchestrator_name(&tree.prefix);
+    if tmux.session_exists(&name) {
+        tmux.destroy_session(&name)
+            .map_err(|source| DownCliError::StopOrchestrator {
+                name: name.clone(),
+                source,
+            })?;
+        println!("  {name}: stopped");
+    }
+    Ok(())
 }
 
 fn ensure_daemon_running(socket_path: &Path, current_exe: &Path) -> Result<(), CliError> {
@@ -1262,6 +1429,32 @@ mod tests {
             assert_eq!(
                 parsed,
                 ParsedCommand::Up {
+                    options: CommonOptions {
+                        socket_path: expand_socket_path(DEFAULT_SOCKET_PATH),
+                        config_path: root.path().join(".ax").join("config.yaml"),
+                        ax_bin: current_exe,
+                    },
+                }
+            );
+        });
+    }
+
+    #[test]
+    fn down_defaults_to_discovered_config_and_current_exe() {
+        let root = TempDir::new().expect("tempdir");
+        let home = TempDir::new().expect("home");
+        let _config_path = write_config(&root);
+        let cwd = root.path().join("nested");
+        fs::create_dir_all(&cwd).expect("create cwd");
+        let current_exe = PathBuf::from("/tmp/ax-rs");
+
+        with_home(home.path(), || {
+            let parsed =
+                parse_args(vec!["ax-rs".into(), "down".into()], &cwd, &current_exe).expect("parse");
+
+            assert_eq!(
+                parsed,
+                ParsedCommand::Down {
                     options: CommonOptions {
                         socket_path: expand_socket_path(DEFAULT_SOCKET_PATH),
                         config_path: root.path().join(".ax").join("config.yaml"),
