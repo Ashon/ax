@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use tokio::sync::mpsc;
@@ -24,6 +25,8 @@ pub struct Entry {
     pub id: ConnectionId,
     pub info: WorkspaceInfo,
     pub config_path: String,
+    pub idle_timeout: Duration,
+    pub last_active_at: DateTime<Utc>,
     pub outbox: mpsc::Sender<Envelope>,
 }
 
@@ -33,6 +36,17 @@ impl Entry {
     pub fn try_send(&self, env: Envelope) -> bool {
         self.outbox.try_send(env).is_ok()
     }
+}
+
+/// Immutable view used by the idle-sleep guard. Mirrors Go's
+/// `RegisteredWorkspace` — includes the knobs `should_sleep` reads
+/// without leaking the mpsc outbox.
+#[derive(Debug, Clone)]
+pub struct RegisteredWorkspace {
+    pub info: WorkspaceInfo,
+    pub config_path: String,
+    pub idle_timeout: Duration,
+    pub last_active_at: DateTime<Utc>,
 }
 
 /// Outcome of `Registry::register` — the caller uses `previous` to close
@@ -70,7 +84,23 @@ impl Registry {
         description: &str,
         config_path: &str,
     ) -> RegisterOutcome {
+        self.register_with_idle(workspace, dir, description, config_path, Duration::ZERO)
+    }
+
+    /// Like [`Self::register`] but also records the idle timeout
+    /// reported in the `RegisterPayload`. The idle-sleep guard uses
+    /// this to decide whether a workspace is eligible for the
+    /// `stop_idle` lifecycle when no pending work remains.
+    pub fn register_with_idle(
+        &self,
+        workspace: &str,
+        dir: &str,
+        description: &str,
+        config_path: &str,
+        idle_timeout: Duration,
+    ) -> RegisterOutcome {
         let (tx, rx) = mpsc::channel(OUTBOX_CAPACITY);
+        let now = Utc::now();
         let mut inner = self.inner.lock().expect("registry poisoned");
         inner.next_id += 1;
         let id = inner.next_id;
@@ -85,12 +115,14 @@ impl Registry {
             description: description.to_owned(),
             status: AgentStatus::Online,
             status_text,
-            connected_at: Some(Utc::now()),
+            connected_at: Some(now),
         };
         let entry = Entry {
             id,
             info,
             config_path: config_path.to_owned(),
+            idle_timeout,
+            last_active_at: now,
             outbox: tx,
         };
         let previous = inner.entries.insert(workspace.to_owned(), entry.clone());
@@ -99,6 +131,25 @@ impl Registry {
             receiver: rx,
             previous,
         }
+    }
+
+    /// Snapshot of all currently-registered workspaces including
+    /// idle metadata. Used by the idle-sleep loop; `list` stays as
+    /// a thinner projection for `list_workspaces` responses.
+    #[must_use]
+    pub fn snapshot(&self) -> Vec<RegisteredWorkspace> {
+        self.inner
+            .lock()
+            .expect("registry poisoned")
+            .entries
+            .values()
+            .map(|e| RegisteredWorkspace {
+                info: e.info.clone(),
+                config_path: e.config_path.clone(),
+                idle_timeout: e.idle_timeout,
+                last_active_at: e.last_active_at,
+            })
+            .collect()
     }
 
     /// Remove `workspace` only if the currently-registered entry has
@@ -158,14 +209,14 @@ impl Registry {
         }
     }
 
-    /// Stamp `connected_at` forward to `now`. Match Go's `Touch` which
-    /// bumps the last-active timestamp on outbound traffic; we fold it
-    /// into `connected_at` for now since we don't store a separate
-    /// `last_active_at` field yet.
+    /// Bump the last-active watermark on outbound traffic. Mirrors
+    /// Go's `Touch`; `connected_at` stays pinned to the initial
+    /// registration time so clients can tell "since when has this
+    /// workspace been online" apart from "most recent activity".
     pub fn touch(&self, workspace: &str, now: DateTime<Utc>) {
         let mut inner = self.inner.lock().expect("registry poisoned");
         if let Some(entry) = inner.entries.get_mut(workspace) {
-            entry.info.connected_at = Some(now);
+            entry.last_active_at = now;
         }
     }
 }

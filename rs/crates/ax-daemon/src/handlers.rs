@@ -76,11 +76,15 @@ pub(crate) fn handle_register(
     let payload: RegisterPayload = env
         .decode_payload()
         .map_err(|e| HandlerError::DecodePayload("register", e))?;
-    let outcome = ctx.registry.register(
+    let idle_timeout = u64::try_from(payload.idle_timeout_seconds)
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(std::time::Duration::ZERO);
+    let outcome = ctx.registry.register_with_idle(
         &payload.workspace,
         &payload.dir,
         &payload.description,
         &payload.config_path,
+        idle_timeout,
     );
     let response = response(
         &env.id,
@@ -1441,12 +1445,16 @@ mod tests {
         let wake_scheduler = WakeScheduler::new(queue.clone(), RealWakeBackend);
         let registry = Registry::new();
         let task_store = TaskStore::in_memory();
-        let session_manager = SessionManager::new(
-            socket_path.clone(),
-            std::path::PathBuf::from("/tmp/ax-rs"),
-            registry.clone(),
-            task_store.clone(),
-            RealTmux,
+        let session_manager = Arc::new(
+            SessionManager::new(
+                socket_path.clone(),
+                std::path::PathBuf::from("/tmp/ax-rs"),
+                registry.clone(),
+                queue.clone(),
+                task_store.clone(),
+                RealTmux,
+            )
+            .with_wake_scheduler(wake_scheduler.clone()),
         );
         HandlerCtx {
             socket_path,

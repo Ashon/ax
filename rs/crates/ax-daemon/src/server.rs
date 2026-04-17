@@ -71,12 +71,16 @@ impl Daemon {
         let registry = Registry::new();
         let task_store = TaskStore::in_memory();
         let ax_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ax"));
-        let session_manager = SessionManager::new(
-            socket_path.clone(),
-            ax_bin,
-            registry.clone(),
-            task_store.clone(),
-            RealTmux,
+        let session_manager = Arc::new(
+            SessionManager::new(
+                socket_path.clone(),
+                ax_bin,
+                registry.clone(),
+                queue.clone(),
+                task_store.clone(),
+                RealTmux,
+            )
+            .with_wake_scheduler(wake_scheduler.clone()),
         );
         attach_session_manager(&wake_scheduler, &session_manager);
         Self {
@@ -117,12 +121,16 @@ impl Daemon {
             .map_err(|e| DaemonError::LoadState(e.to_string()))?;
         self.wake_scheduler = WakeScheduler::new(self.queue.clone(), RealWakeBackend);
         let ax_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ax"));
-        self.session_manager = SessionManager::new(
-            self.socket_path.clone(),
-            ax_bin,
-            self.registry.clone(),
-            self.task_store.clone(),
-            RealTmux,
+        self.session_manager = Arc::new(
+            SessionManager::new(
+                self.socket_path.clone(),
+                ax_bin,
+                self.registry.clone(),
+                self.queue.clone(),
+                self.task_store.clone(),
+                RealTmux,
+            )
+            .with_wake_scheduler(self.wake_scheduler.clone()),
         );
         attach_session_manager(&self.wake_scheduler, &self.session_manager);
         Ok(self)
@@ -163,6 +171,7 @@ impl Daemon {
         let session_manager = self.session_manager.clone();
         let flusher = queue.spawn_flusher();
         let wake_loop = wake_scheduler.clone().spawn();
+        let idle_loop = spawn_idle_sleep_loop(session_manager.clone());
         let join = tokio::spawn(run_accept_loop(
             listener,
             AcceptLoopCtx {
@@ -185,7 +194,57 @@ impl Daemon {
             join: Some(join),
             flusher: Some(flusher),
             wake_loop: Some(wake_loop),
+            idle_loop: Some(idle_loop),
         })
+    }
+}
+
+const IDLE_SLEEP_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Handle the idle-sleep background task owns. Mirrors the flusher /
+/// wake-loop pattern so shutdown is graceful.
+pub(crate) struct IdleLoopHandle {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    join: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl IdleLoopHandle {
+    async fn shutdown(mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(join) = self.join.take() {
+            join.abort();
+            let _ = join.await;
+        }
+    }
+}
+
+impl Drop for IdleLoopHandle {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(join) = self.join.take() {
+            join.abort();
+        }
+    }
+}
+
+fn spawn_idle_sleep_loop(session_manager: Arc<SessionManager<RealTmux>>) -> IdleLoopHandle {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_task = stop.clone();
+    let join = tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(IDLE_SLEEP_CHECK_INTERVAL);
+        ticker.tick().await; // skip the immediate first tick
+        loop {
+            ticker.tick().await;
+            if stop_task.load(Ordering::Relaxed) {
+                break;
+            }
+            let _ = session_manager.stop_idle(chrono::Utc::now());
+        }
+    });
+    IdleLoopHandle {
+        stop,
+        join: Some(join),
     }
 }
 
@@ -367,6 +426,7 @@ pub struct DaemonHandle {
     join: Option<tokio::task::JoinHandle<()>>,
     flusher: Option<FlusherHandle>,
     wake_loop: Option<WakeLoopHandle>,
+    idle_loop: Option<IdleLoopHandle>,
 }
 
 impl DaemonHandle {
@@ -390,6 +450,9 @@ impl DaemonHandle {
         }
         if let Some(wake_loop) = self.wake_loop.take() {
             wake_loop.shutdown().await;
+        }
+        if let Some(idle_loop) = self.idle_loop.take() {
+            idle_loop.shutdown().await;
         }
     }
 }
