@@ -12,22 +12,25 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use ax_proto::payloads::{
-    BroadcastPayload, ReadMessagesPayload, RegisterPayload, SendMessagePayload, SetStatusPayload,
+    BroadcastPayload, GetSharedPayload, ReadMessagesPayload, RegisterPayload, SendMessagePayload,
+    SetSharedPayload, SetStatusPayload,
 };
 use ax_proto::responses::{
-    BroadcastResponse, ListWorkspacesResponse, ReadMessagesResponse, SendMessageResponse,
-    StatusResponse,
+    BroadcastResponse, GetSharedResponse, ListSharedResponse, ListWorkspacesResponse,
+    ReadMessagesResponse, SendMessageResponse, StatusResponse,
 };
 use ax_proto::types::Message;
 use ax_proto::{Envelope, ErrorPayload, MessageType, ResponsePayload};
 
 use crate::queue::MessageQueue;
 use crate::registry::{Entry, RegisterOutcome, Registry};
+use crate::shared_values::SharedValues;
 
 /// Context shared across handlers for one connected client.
 pub(crate) struct HandlerCtx {
     pub registry: Arc<Registry>,
     pub queue: Arc<MessageQueue>,
+    pub shared: Arc<SharedValues>,
 }
 
 pub(crate) struct RegisterHandled {
@@ -192,6 +195,55 @@ pub(crate) fn handle_read_messages(
     response(&env.id, &ReadMessagesResponse { messages })
 }
 
+pub(crate) fn handle_set_shared(
+    ctx: &HandlerCtx,
+    env: &Envelope,
+) -> Result<Envelope, HandlerError> {
+    let payload: SetSharedPayload = env
+        .decode_payload()
+        .map_err(|e| HandlerError::DecodePayload("set_shared", e))?;
+    ctx.shared
+        .set(&payload.key, &payload.value)
+        .map_err(|e| HandlerError::Logic(format!("persist shared values: {e}")))?;
+    response(
+        &env.id,
+        &StatusResponse {
+            status: "stored".into(),
+        },
+    )
+}
+
+pub(crate) fn handle_get_shared(
+    ctx: &HandlerCtx,
+    env: &Envelope,
+) -> Result<Envelope, HandlerError> {
+    let payload: GetSharedPayload = env
+        .decode_payload()
+        .map_err(|e| HandlerError::DecodePayload("get_shared", e))?;
+    let value = ctx.shared.get(&payload.key);
+    let found = value.is_some();
+    response(
+        &env.id,
+        &GetSharedResponse {
+            key: payload.key,
+            value: value.unwrap_or_default(),
+            found,
+        },
+    )
+}
+
+pub(crate) fn handle_list_shared(
+    ctx: &HandlerCtx,
+    env: &Envelope,
+) -> Result<Envelope, HandlerError> {
+    response(
+        &env.id,
+        &ListSharedResponse {
+            values: ctx.shared.list(),
+        },
+    )
+}
+
 // ---------- helpers ----------
 
 fn push_if_registered(ctx: &HandlerCtx, target: &str, msg: &Message) {
@@ -301,6 +353,15 @@ pub(crate) fn handle_envelope(
         MessageType::UsageTrends => HandlerOutput::Response(
             crate::usage_trends::handle_usage_trends(env)
                 .unwrap_or_else(|e| error_envelope(&env.id, e.to_string())),
+        ),
+        MessageType::SetShared => HandlerOutput::Response(
+            handle_set_shared(ctx, env).unwrap_or_else(|e| error_envelope(&env.id, e.to_string())),
+        ),
+        MessageType::GetShared => HandlerOutput::Response(
+            handle_get_shared(ctx, env).unwrap_or_else(|e| error_envelope(&env.id, e.to_string())),
+        ),
+        MessageType::ListShared => HandlerOutput::Response(
+            handle_list_shared(ctx, env).unwrap_or_else(|e| error_envelope(&env.id, e.to_string())),
         ),
         _ => HandlerOutput::Response(error_envelope(
             &env.id,

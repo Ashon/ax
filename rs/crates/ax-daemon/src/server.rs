@@ -17,6 +17,7 @@ use ax_proto::Envelope;
 use crate::handlers::{handle_envelope, HandlerCtx, HandlerOutput};
 use crate::queue::MessageQueue;
 use crate::registry::Registry;
+use crate::shared_values::SharedValues;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DaemonError {
@@ -26,6 +27,8 @@ pub enum DaemonError {
     Bind { path: PathBuf, source: io::Error },
     #[error("accept connection: {0}")]
     Accept(#[source] io::Error),
+    #[error("load persisted state: {0}")]
+    LoadState(String),
 }
 
 /// Configuration handed to [`Daemon::bind`].
@@ -34,16 +37,32 @@ pub struct Daemon {
     pub socket_path: PathBuf,
     pub registry: Arc<Registry>,
     pub queue: Arc<MessageQueue>,
+    pub shared_values: Arc<SharedValues>,
 }
 
 impl Daemon {
+    /// Build a daemon that keeps all state in memory. Useful for
+    /// tests; production callers should use [`Daemon::with_state_dir`]
+    /// so shared values survive restarts.
     #[must_use]
     pub fn new(socket_path: PathBuf) -> Self {
         Self {
             socket_path,
             registry: Registry::new(),
             queue: MessageQueue::new(),
+            shared_values: SharedValues::in_memory(),
         }
+    }
+
+    /// Attach `state_dir` as the directory where daemon state files
+    /// live — currently just `shared_values.json`. Errors if the file
+    /// exists but can't be parsed (caller can still fall back to
+    /// [`Self::new`] in that case).
+    pub fn with_state_dir(mut self, state_dir: &Path) -> Result<Self, DaemonError> {
+        let path = crate::shared_values::default_path(state_dir);
+        self.shared_values =
+            SharedValues::load(path).map_err(|e| DaemonError::LoadState(e.to_string()))?;
+        Ok(self)
     }
 
     /// Bind the Unix socket and spawn the accept loop on the current
@@ -72,10 +91,12 @@ impl Daemon {
         let socket_path = self.socket_path.clone();
         let registry = self.registry.clone();
         let queue = self.queue.clone();
+        let shared = self.shared_values.clone();
         let join = tokio::spawn(run_accept_loop(
             listener,
             registry,
             queue,
+            shared,
             shutdown_rx,
             socket_path.clone(),
         ));
@@ -91,6 +112,7 @@ async fn run_accept_loop(
     listener: UnixListener,
     registry: Arc<Registry>,
     queue: Arc<MessageQueue>,
+    shared: Arc<SharedValues>,
     mut shutdown: tokio::sync::oneshot::Receiver<()>,
     socket_path: PathBuf,
 ) {
@@ -102,6 +124,7 @@ async fn run_accept_loop(
                     let ctx = HandlerCtx {
                         registry: registry.clone(),
                         queue: queue.clone(),
+                        shared: shared.clone(),
                     };
                     tokio::spawn(handle_connection(conn, ctx));
                 }

@@ -7,10 +7,12 @@
 
 #![forbid(unsafe_code)]
 
+mod atomicfile;
 mod handlers;
 mod queue;
 mod registry;
 mod server;
+mod shared_values;
 mod socket_path;
 mod usage_trends;
 
