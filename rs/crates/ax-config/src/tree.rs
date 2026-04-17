@@ -26,12 +26,15 @@ pub enum TreeError {
         #[source]
         source: Box<TreeError>,
     },
+    #[error(transparent)]
+    Validation(#[from] Box<crate::validate::ValidationError>),
 }
 
 impl Config {
     /// Recursive load, merging child-project workspaces into the root
     /// `Config.workspaces` map with `prefix.name` keys.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, TreeError> {
+        crate::validate::validate_tree(path.as_ref())?;
         let mut seen = BTreeSet::new();
         load_recursive(path.as_ref(), &mut seen)
     }
@@ -39,6 +42,7 @@ impl Config {
     /// Like [`Config::load`] but preserves the hierarchy instead of
     /// flattening workspaces.
     pub fn load_tree(path: impl AsRef<Path>) -> Result<ProjectNode, TreeError> {
+        crate::validate::validate_tree(path.as_ref())?;
         let mut seen = BTreeSet::new();
         load_tree_recursive(path.as_ref(), "", &mut seen)
     }

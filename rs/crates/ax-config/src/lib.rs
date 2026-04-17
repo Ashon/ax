@@ -1,10 +1,9 @@
 //! ax config loader.
 //!
-//! This is the Rust port of `internal/config`. Covered so far: the
-//! core YAML schema (`Config`, `Workspace`, `Child`), path discovery,
-//! recursive child loading with project-tree construction, and the
-//! machine-managed overlay. Structural validation (duplicate names,
-//! reserved-name collisions) is the remaining slice.
+//! This is the Rust port of `internal/config`. Covers the full config
+//! surface: YAML schema (`Config`, `Workspace`, `Child`), path discovery,
+//! recursive child loading with project-tree construction, machine-
+//! managed overlay merging, and structural validation.
 
 #![forbid(unsafe_code)]
 
@@ -12,6 +11,7 @@ mod overlay;
 mod paths;
 mod schema;
 mod tree;
+mod validate;
 
 pub use overlay::{
     managed_overlay_path, ManagedChildPatch, ManagedOverlay, ManagedPolicyOverlay,
@@ -26,3 +26,4 @@ pub use schema::{
     DEFAULT_CODEX_REASONING_EFFORT, DEFAULT_IDLE_TIMEOUT_MINUTES,
 };
 pub use tree::{ProjectNode, TreeError, WorkspaceRef};
+pub use validate::{validate_tree, ValidationError};
