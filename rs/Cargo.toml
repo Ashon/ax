@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ax-proto",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/ashon/ax"
+
+[workspace.lints.rust]
+unused_must_use = "deny"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+too_many_lines = "allow"
+must_use_candidate = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_possible_wrap = "allow"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
+thiserror = "2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

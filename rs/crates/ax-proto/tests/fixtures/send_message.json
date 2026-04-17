@@ -1,0 +1,1 @@
+{"id":"snd-1","type":"send_message","payload":{"to":"worker","message":"ping","config_path":"/tmp/proj/.ax/config.yaml"}}

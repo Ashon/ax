@@ -1,0 +1,1 @@
+{"id":"bcast-1","type":"response","payload":{"success":true,"data":{"recipients":["worker-a","worker-b"],"count":2}}}
