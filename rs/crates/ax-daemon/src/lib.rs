@@ -17,6 +17,8 @@ mod shared_values;
 mod socket_path;
 mod task_helpers;
 mod task_store;
+mod team_reconfigure;
+mod team_state_store;
 mod usage_trends;
 
 pub use queue::MessageQueue;
@@ -24,3 +26,5 @@ pub use registry::Registry;
 pub use server::{Daemon, DaemonError, DaemonHandle};
 pub use socket_path::{expand_socket_path, DEFAULT_SOCKET_PATH};
 pub use task_store::{CreateTaskInput, TaskStore, TaskStoreError};
+pub use team_reconfigure::{TeamController, TeamError};
+pub use team_state_store::{TeamStateError, TeamStateStore};

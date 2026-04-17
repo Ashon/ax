@@ -20,6 +20,8 @@ use crate::queue::MessageQueue;
 use crate::registry::Registry;
 use crate::shared_values::SharedValues;
 use crate::task_store::TaskStore;
+use crate::team_reconfigure::TeamController;
+use crate::team_state_store::TeamStateStore;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DaemonError {
@@ -42,6 +44,7 @@ pub struct Daemon {
     pub shared_values: Arc<SharedValues>,
     pub memory_store: Arc<MemoryStore>,
     pub task_store: Arc<TaskStore>,
+    pub team_controller: Arc<TeamController>,
 }
 
 impl Daemon {
@@ -50,13 +53,20 @@ impl Daemon {
     /// so shared values and durable memory survive restarts.
     #[must_use]
     pub fn new(socket_path: PathBuf) -> Self {
+        let state_dir = socket_path
+            .parent()
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        let shared_values = SharedValues::in_memory();
+        let team_store = TeamStateStore::in_memory();
+        let team_controller = TeamController::new(state_dir, team_store, shared_values.clone());
         Self {
             socket_path,
             registry: Registry::new(),
             queue: MessageQueue::new(),
-            shared_values: SharedValues::in_memory(),
+            shared_values,
             memory_store: MemoryStore::in_memory(),
             task_store: TaskStore::in_memory(),
+            team_controller,
         }
     }
 
@@ -71,6 +81,13 @@ impl Daemon {
             MemoryStore::load(state_dir).map_err(|e| DaemonError::LoadState(e.to_string()))?;
         self.task_store =
             TaskStore::load(state_dir).map_err(|e| DaemonError::LoadState(e.to_string()))?;
+        let team_store =
+            TeamStateStore::load(state_dir).map_err(|e| DaemonError::LoadState(e.to_string()))?;
+        self.team_controller = TeamController::new(
+            state_dir.to_path_buf(),
+            team_store,
+            self.shared_values.clone(),
+        );
         Ok(self)
     }
 
@@ -103,6 +120,7 @@ impl Daemon {
         let shared = self.shared_values.clone();
         let memory = self.memory_store.clone();
         let task_store = self.task_store.clone();
+        let team_controller = self.team_controller.clone();
         let join = tokio::spawn(run_accept_loop(
             listener,
             registry,
@@ -110,6 +128,7 @@ impl Daemon {
             shared,
             memory,
             task_store,
+            team_controller,
             shutdown_rx,
             socket_path.clone(),
         ));
@@ -129,6 +148,7 @@ async fn run_accept_loop(
     shared: Arc<SharedValues>,
     memory: Arc<MemoryStore>,
     task_store: Arc<TaskStore>,
+    team_controller: Arc<TeamController>,
     mut shutdown: tokio::sync::oneshot::Receiver<()>,
     socket_path: PathBuf,
 ) {
@@ -144,6 +164,7 @@ async fn run_accept_loop(
                         shared: shared.clone(),
                         memory: memory.clone(),
                         task_store: task_store.clone(),
+                        team_controller: team_controller.clone(),
                     };
                     tokio::spawn(handle_connection(conn, ctx));
                 }

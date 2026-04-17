@@ -11,13 +11,16 @@ workspace = true
 
 [dependencies]
 ax-agent = { path = "../ax-agent" }
+ax-config = { path = "../ax-config" }
 ax-proto = { path = "../ax-proto" }
 ax-usage = { path = "../ax-usage" }
 ax-workspace = { path = "../ax-workspace" }
 chrono = { workspace = true }
+hex = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha1 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "fs"] }
 tracing = "0.1"

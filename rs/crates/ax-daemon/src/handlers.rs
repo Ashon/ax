@@ -14,15 +14,16 @@ use uuid::Uuid;
 
 use ax_proto::payloads::{
     AgentLifecyclePayload, BroadcastPayload, CancelTaskPayload, ControlLifecyclePayload,
-    CreateTaskPayload, GetSharedPayload, GetTaskPayload, ListTasksPayload, ReadMessagesPayload,
-    RecallMemoriesPayload, RegisterPayload, RememberMemoryPayload, RemoveTaskPayload,
-    SendMessagePayload, SetSharedPayload, SetStatusPayload, UpdateTaskPayload,
+    CreateTaskPayload, FinishTeamReconfigurePayload, GetSharedPayload, GetTaskPayload,
+    GetTeamStatePayload, ListTasksPayload, ReadMessagesPayload, RecallMemoriesPayload,
+    RegisterPayload, RememberMemoryPayload, RemoveTaskPayload, SendMessagePayload,
+    SetSharedPayload, SetStatusPayload, TeamReconfigurePayload, UpdateTaskPayload,
 };
 use ax_proto::responses::{
     AgentLifecycleResponse, BroadcastResponse, ControlLifecycleResponse, GetSharedResponse,
     ListSharedResponse, ListTasksResponse, ListWorkspacesResponse, MemoryResponse,
     ReadMessagesResponse, RecallMemoriesResponse, SendMessageResponse, StatusResponse,
-    TaskResponse,
+    TaskResponse, TeamApplyResponse, TeamPlanResponse, TeamStateResponse,
 };
 use ax_proto::types::{LifecycleAction, Message};
 use ax_proto::{Envelope, ErrorPayload, MessageType, ResponsePayload};
@@ -38,6 +39,7 @@ use crate::registry::{Entry, RegisterOutcome, Registry};
 use crate::shared_values::SharedValues;
 use crate::task_helpers::parse_task_lifecycle_options;
 use crate::task_store::{CreateTaskInput, TaskStore};
+use crate::team_reconfigure::TeamController;
 
 /// Context shared across handlers for one connected client.
 pub(crate) struct HandlerCtx {
@@ -47,6 +49,7 @@ pub(crate) struct HandlerCtx {
     pub shared: Arc<SharedValues>,
     pub memory: Arc<MemoryStore>,
     pub task_store: Arc<TaskStore>,
+    pub team_controller: Arc<TeamController>,
 }
 
 pub(crate) struct RegisterHandled {
@@ -508,6 +511,76 @@ pub(crate) fn handle_remove_task(
     ctx.registry.touch(workspace, Utc::now());
     ctx.queue.remove_task_messages(&task.assignee, &task.id);
     response(&env.id, &TaskResponse { task })
+}
+
+pub(crate) fn handle_get_team_state(
+    ctx: &HandlerCtx,
+    env: &Envelope,
+) -> Result<Envelope, HandlerError> {
+    let payload: GetTeamStatePayload = env
+        .decode_payload()
+        .map_err(|e| HandlerError::DecodePayload("get_team_state", e))?;
+    let state = ctx
+        .team_controller
+        .get_state(&payload.config_path)
+        .map_err(|e| HandlerError::Logic(e.to_string()))?;
+    response(&env.id, &TeamStateResponse { state })
+}
+
+pub(crate) fn handle_dry_run_team_reconfigure(
+    ctx: &HandlerCtx,
+    env: &Envelope,
+) -> Result<Envelope, HandlerError> {
+    let payload: TeamReconfigurePayload = env
+        .decode_payload()
+        .map_err(|e| HandlerError::DecodePayload("dry_run_team_reconfigure", e))?;
+    let plan = ctx
+        .team_controller
+        .plan(
+            &payload.config_path,
+            payload.expected_revision,
+            &payload.changes,
+        )
+        .map_err(|e| HandlerError::Logic(e.to_string()))?;
+    response(&env.id, &TeamPlanResponse { plan })
+}
+
+pub(crate) fn handle_apply_team_reconfigure(
+    ctx: &HandlerCtx,
+    env: &Envelope,
+) -> Result<Envelope, HandlerError> {
+    let payload: TeamReconfigurePayload = env
+        .decode_payload()
+        .map_err(|e| HandlerError::DecodePayload("apply_team_reconfigure", e))?;
+    let ticket = ctx
+        .team_controller
+        .begin_apply(
+            &payload.config_path,
+            payload.expected_revision,
+            &payload.changes,
+            payload.reconcile_mode,
+        )
+        .map_err(|e| HandlerError::Logic(e.to_string()))?;
+    response(&env.id, &TeamApplyResponse { ticket })
+}
+
+pub(crate) fn handle_finish_team_reconfigure(
+    ctx: &HandlerCtx,
+    env: &Envelope,
+) -> Result<Envelope, HandlerError> {
+    let payload: FinishTeamReconfigurePayload = env
+        .decode_payload()
+        .map_err(|e| HandlerError::DecodePayload("finish_team_reconfigure", e))?;
+    let state = ctx
+        .team_controller
+        .finish_apply(
+            &payload.token,
+            payload.success,
+            &payload.error,
+            &payload.actions,
+        )
+        .map_err(|e| HandlerError::Logic(e.to_string()))?;
+    response(&env.id, &TeamStateResponse { state })
 }
 
 // ---------- helpers ----------
@@ -1006,6 +1079,22 @@ pub(crate) fn handle_envelope(
             handle_remove_task(ctx, env, workspace)
                 .unwrap_or_else(|e| error_envelope(&env.id, e.to_string())),
         ),
+        MessageType::GetTeamState => HandlerOutput::Response(
+            handle_get_team_state(ctx, env)
+                .unwrap_or_else(|e| error_envelope(&env.id, e.to_string())),
+        ),
+        MessageType::DryRunTeam => HandlerOutput::Response(
+            handle_dry_run_team_reconfigure(ctx, env)
+                .unwrap_or_else(|e| error_envelope(&env.id, e.to_string())),
+        ),
+        MessageType::ApplyTeam => HandlerOutput::Response(
+            handle_apply_team_reconfigure(ctx, env)
+                .unwrap_or_else(|e| error_envelope(&env.id, e.to_string())),
+        ),
+        MessageType::FinishTeam => HandlerOutput::Response(
+            handle_finish_team_reconfigure(ctx, env)
+                .unwrap_or_else(|e| error_envelope(&env.id, e.to_string())),
+        ),
         _ => HandlerOutput::Response(error_envelope(
             &env.id,
             format!("unknown message type: {:?}", env.r#type),
@@ -1118,13 +1207,22 @@ mod tests {
     }
 
     fn test_ctx(socket_path: PathBuf) -> HandlerCtx {
+        let shared = SharedValues::in_memory();
+        let team_controller = TeamController::new(
+            socket_path
+                .parent()
+                .map_or_else(|| std::path::PathBuf::from("."), Path::to_path_buf),
+            crate::team_state_store::TeamStateStore::in_memory(),
+            shared.clone(),
+        );
         HandlerCtx {
             socket_path,
             registry: Registry::new(),
             queue: MessageQueue::new(),
-            shared: SharedValues::in_memory(),
+            shared,
             memory: MemoryStore::in_memory(),
             task_store: TaskStore::in_memory(),
+            team_controller,
         }
     }
 
