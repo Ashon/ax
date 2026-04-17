@@ -12,16 +12,18 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use ax_proto::payloads::{
-    BroadcastPayload, GetSharedPayload, ReadMessagesPayload, RegisterPayload, SendMessagePayload,
-    SetSharedPayload, SetStatusPayload,
+    BroadcastPayload, GetSharedPayload, ReadMessagesPayload, RecallMemoriesPayload,
+    RegisterPayload, RememberMemoryPayload, SendMessagePayload, SetSharedPayload, SetStatusPayload,
 };
 use ax_proto::responses::{
     BroadcastResponse, GetSharedResponse, ListSharedResponse, ListWorkspacesResponse,
-    ReadMessagesResponse, SendMessageResponse, StatusResponse,
+    MemoryResponse, ReadMessagesResponse, RecallMemoriesResponse, SendMessageResponse,
+    StatusResponse,
 };
 use ax_proto::types::Message;
 use ax_proto::{Envelope, ErrorPayload, MessageType, ResponsePayload};
 
+use crate::memory::{Query as MemoryQuery, Store as MemoryStore};
 use crate::queue::MessageQueue;
 use crate::registry::{Entry, RegisterOutcome, Registry};
 use crate::shared_values::SharedValues;
@@ -31,6 +33,7 @@ pub(crate) struct HandlerCtx {
     pub registry: Arc<Registry>,
     pub queue: Arc<MessageQueue>,
     pub shared: Arc<SharedValues>,
+    pub memory: Arc<MemoryStore>,
 }
 
 pub(crate) struct RegisterHandled {
@@ -244,6 +247,51 @@ pub(crate) fn handle_list_shared(
     )
 }
 
+pub(crate) fn handle_remember_memory(
+    ctx: &HandlerCtx,
+    env: &Envelope,
+    workspace: &str,
+) -> Result<Envelope, HandlerError> {
+    let payload: RememberMemoryPayload = env
+        .decode_payload()
+        .map_err(|e| HandlerError::DecodePayload("remember_memory", e))?;
+    require_registered(workspace)?;
+    let memory = ctx
+        .memory
+        .remember(
+            &payload.scope,
+            &payload.kind,
+            &payload.subject,
+            &payload.content,
+            &payload.tags,
+            workspace,
+            &payload.supersedes,
+        )
+        .map_err(|e| HandlerError::Logic(e.to_string()))?;
+    ctx.registry.touch(workspace, Utc::now());
+    response(&env.id, &MemoryResponse { memory })
+}
+
+pub(crate) fn handle_recall_memories(
+    ctx: &HandlerCtx,
+    env: &Envelope,
+    workspace: &str,
+) -> Result<Envelope, HandlerError> {
+    let payload: RecallMemoriesPayload = env
+        .decode_payload()
+        .map_err(|e| HandlerError::DecodePayload("recall_memories", e))?;
+    require_registered(workspace)?;
+    let memories = ctx.memory.list(&MemoryQuery {
+        scopes: payload.scopes,
+        kind: payload.kind,
+        tags: payload.tags,
+        include_superseded: payload.include_superseded,
+        limit: payload.limit,
+    });
+    ctx.registry.touch(workspace, Utc::now());
+    response(&env.id, &RecallMemoriesResponse { memories })
+}
+
 // ---------- helpers ----------
 
 fn push_if_registered(ctx: &HandlerCtx, target: &str, msg: &Message) {
@@ -362,6 +410,14 @@ pub(crate) fn handle_envelope(
         ),
         MessageType::ListShared => HandlerOutput::Response(
             handle_list_shared(ctx, env).unwrap_or_else(|e| error_envelope(&env.id, e.to_string())),
+        ),
+        MessageType::RememberMemory => HandlerOutput::Response(
+            handle_remember_memory(ctx, env, workspace)
+                .unwrap_or_else(|e| error_envelope(&env.id, e.to_string())),
+        ),
+        MessageType::RecallMemories => HandlerOutput::Response(
+            handle_recall_memories(ctx, env, workspace)
+                .unwrap_or_else(|e| error_envelope(&env.id, e.to_string())),
         ),
         _ => HandlerOutput::Response(error_envelope(
             &env.id,

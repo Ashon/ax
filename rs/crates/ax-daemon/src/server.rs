@@ -15,6 +15,7 @@ use tokio::task::JoinHandle;
 use ax_proto::Envelope;
 
 use crate::handlers::{handle_envelope, HandlerCtx, HandlerOutput};
+use crate::memory::Store as MemoryStore;
 use crate::queue::MessageQueue;
 use crate::registry::Registry;
 use crate::shared_values::SharedValues;
@@ -38,12 +39,13 @@ pub struct Daemon {
     pub registry: Arc<Registry>,
     pub queue: Arc<MessageQueue>,
     pub shared_values: Arc<SharedValues>,
+    pub memory_store: Arc<MemoryStore>,
 }
 
 impl Daemon {
     /// Build a daemon that keeps all state in memory. Useful for
     /// tests; production callers should use [`Daemon::with_state_dir`]
-    /// so shared values survive restarts.
+    /// so shared values and durable memory survive restarts.
     #[must_use]
     pub fn new(socket_path: PathBuf) -> Self {
         Self {
@@ -51,17 +53,19 @@ impl Daemon {
             registry: Registry::new(),
             queue: MessageQueue::new(),
             shared_values: SharedValues::in_memory(),
+            memory_store: MemoryStore::in_memory(),
         }
     }
 
     /// Attach `state_dir` as the directory where daemon state files
-    /// live — currently just `shared_values.json`. Errors if the file
-    /// exists but can't be parsed (caller can still fall back to
-    /// [`Self::new`] in that case).
+    /// live — `shared_values.json` and `memories.json` today. Errors
+    /// if an existing file can't be parsed.
     pub fn with_state_dir(mut self, state_dir: &Path) -> Result<Self, DaemonError> {
-        let path = crate::shared_values::default_path(state_dir);
+        let shared_path = crate::shared_values::default_path(state_dir);
         self.shared_values =
-            SharedValues::load(path).map_err(|e| DaemonError::LoadState(e.to_string()))?;
+            SharedValues::load(shared_path).map_err(|e| DaemonError::LoadState(e.to_string()))?;
+        self.memory_store =
+            MemoryStore::load(state_dir).map_err(|e| DaemonError::LoadState(e.to_string()))?;
         Ok(self)
     }
 
@@ -92,11 +96,13 @@ impl Daemon {
         let registry = self.registry.clone();
         let queue = self.queue.clone();
         let shared = self.shared_values.clone();
+        let memory = self.memory_store.clone();
         let join = tokio::spawn(run_accept_loop(
             listener,
             registry,
             queue,
             shared,
+            memory,
             shutdown_rx,
             socket_path.clone(),
         ));
@@ -113,6 +119,7 @@ async fn run_accept_loop(
     registry: Arc<Registry>,
     queue: Arc<MessageQueue>,
     shared: Arc<SharedValues>,
+    memory: Arc<MemoryStore>,
     mut shutdown: tokio::sync::oneshot::Receiver<()>,
     socket_path: PathBuf,
 ) {
@@ -125,6 +132,7 @@ async fn run_accept_loop(
                         registry: registry.clone(),
                         queue: queue.clone(),
                         shared: shared.clone(),
+                        memory: memory.clone(),
                     };
                     tokio::spawn(handle_connection(conn, ctx));
                 }

@@ -9,6 +9,7 @@
 
 mod atomicfile;
 mod handlers;
+mod memory;
 mod queue;
 mod registry;
 mod server;
