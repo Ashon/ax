@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/ashon/ax/internal/daemon"
+	"github.com/ashon/ax/internal/daemonutil"
 	"github.com/spf13/cobra"
 )
 
@@ -42,7 +43,7 @@ var daemonStopCmd = &cobra.Command{
 	Use:   "stop",
 	Short: "Stop the ax daemon",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		pidPath := filepath.Join(filepath.Dir(daemon.ExpandSocketPath(socketPath)), "daemon.pid")
+		pidPath := filepath.Join(filepath.Dir(daemonutil.ExpandSocketPath(socketPath)), "daemon.pid")
 		data, err := os.ReadFile(pidPath)
 		if err != nil {
 			return fmt.Errorf("daemon not running (no pid file)")
@@ -67,7 +68,7 @@ var daemonStatusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Show daemon status",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		sp := daemon.ExpandSocketPath(socketPath)
+		sp := daemonutil.ExpandSocketPath(socketPath)
 		pidPath := filepath.Join(filepath.Dir(sp), "daemon.pid")
 
 		data, err := os.ReadFile(pidPath)

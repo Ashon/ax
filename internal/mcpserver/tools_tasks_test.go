@@ -345,26 +345,6 @@ func TestListWorkspaceTasksHandlerReturnsExplicitViews(t *testing.T) {
 	}
 }
 
-func TestNormalizeStartTaskMessageRejectsEmbeddedTaskID(t *testing.T) {
-	_, err := normalizeStartTaskMessage("Task ID: 33333333-3333-3333-3333-333333333333\n\nPlease handle this")
-	if err == nil {
-		t.Fatal("expected embedded Task ID to be rejected")
-	}
-	if !strings.Contains(err.Error(), "start_task injects the new task ID automatically") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestNormalizeStartTaskMessageRejectsBlankMessage(t *testing.T) {
-	_, err := normalizeStartTaskMessage(" \n\t ")
-	if err == nil {
-		t.Fatal("expected blank message to be rejected")
-	}
-	if !strings.Contains(err.Error(), "message is required") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
 func TestParseTaskCreateOptionsValidation(t *testing.T) {
 	t.Run("rejects negative stale threshold", func(t *testing.T) {
 		_, _, _, _, _, _, err := parseTaskCreateOptions(mcp.CallToolRequest{

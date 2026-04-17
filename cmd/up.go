@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/ashon/ax/internal/config"
-	"github.com/ashon/ax/internal/daemon"
+	"github.com/ashon/ax/internal/daemonutil"
 	"github.com/ashon/ax/internal/workspace"
 	"github.com/spf13/cobra"
 )
@@ -56,7 +56,7 @@ var upCmd = &cobra.Command{
 		}
 
 		// Prepare orchestrator artifacts without starting sessions.
-		sp := daemon.ExpandSocketPath(socketPath)
+		sp := daemonutil.ExpandSocketPath(socketPath)
 		fmt.Println("\nOrchestrators:")
 		if err := upRefreshOrchestratorArtifacts(tree, "", sp, cfgPath); err != nil {
 			return err
@@ -98,7 +98,7 @@ func prepareOnDemandWorkspaces(cfg *config.Config, cfgPath string) error {
 }
 
 func ensureDaemon() error {
-	sp := daemon.ExpandSocketPath(socketPath)
+	sp := daemonutil.ExpandSocketPath(socketPath)
 
 	// Check if already running
 	if isDaemonRunning(sp) {

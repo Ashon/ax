@@ -10,7 +10,7 @@ import (
 
 	"github.com/ashon/ax/internal/agent"
 	"github.com/ashon/ax/internal/config"
-	"github.com/ashon/ax/internal/daemon"
+	"github.com/ashon/ax/internal/daemonutil"
 	"github.com/ashon/ax/internal/tmux"
 	"github.com/ashon/ax/internal/types"
 	"github.com/charmbracelet/lipgloss"
@@ -462,7 +462,7 @@ func loadWatchRuntimes() map[string]string {
 }
 
 func loadWatchWorkspaceInfos() (map[string]types.WorkspaceInfo, bool) {
-	sp := daemon.ExpandSocketPath(socketPath)
+	sp := daemonutil.ExpandSocketPath(socketPath)
 	if !isDaemonRunning(sp) {
 		return map[string]types.WorkspaceInfo{}, true
 	}

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ashon/ax/internal/daemon"
+	"github.com/ashon/ax/internal/daemonutil"
 	"github.com/ashon/ax/internal/tmux"
 	"github.com/ashon/ax/internal/types"
 	"github.com/ashon/ax/internal/usage"
@@ -27,7 +28,7 @@ type tokenTotals struct {
 }
 
 func loadWatchTokenTrends(_ []tmux.SessionInfo) (map[string]usage.WorkspaceTrend, bool) {
-	sp := daemon.ExpandSocketPath(socketPath)
+	sp := daemonutil.ExpandSocketPath(socketPath)
 	if !isDaemonRunning(sp) {
 		return map[string]usage.WorkspaceTrend{}, true
 	}

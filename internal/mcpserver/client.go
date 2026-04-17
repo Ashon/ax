@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ashon/ax/internal/daemon"
+	"github.com/ashon/ax/internal/daemonutil"
 	"github.com/ashon/ax/internal/types"
 	"github.com/ashon/ax/internal/usage"
 	"github.com/google/uuid"
@@ -61,7 +62,7 @@ type requestResult struct {
 
 func NewDaemonClient(socketPath, workspace string) *DaemonClient {
 	return &DaemonClient{
-		socketPath:     daemon.ExpandSocketPath(socketPath),
+		socketPath:     daemonutil.ExpandSocketPath(socketPath),
 		workspace:      workspace,
 		pending:        make(map[string]chan requestResult),
 		requestTimeout: DefaultRequestTimeout,

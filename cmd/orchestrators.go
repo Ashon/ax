@@ -6,7 +6,7 @@ import (
 
 	"github.com/ashon/ax/internal/agent"
 	"github.com/ashon/ax/internal/config"
-	"github.com/ashon/ax/internal/daemon"
+	"github.com/ashon/ax/internal/daemonutil"
 	"github.com/ashon/ax/internal/mcpserver"
 	"github.com/ashon/ax/internal/tmux"
 	"github.com/ashon/ax/internal/workspace"
@@ -99,7 +99,7 @@ func refreshOrchestratorTree(newChildName string) error {
 	if err != nil {
 		return err
 	}
-	sp := daemon.ExpandSocketPath(socketPath)
+	sp := daemonutil.ExpandSocketPath(socketPath)
 	skipRoot, err := reconcileRootOrchestratorState(cfgPath)
 	if err != nil {
 		return err

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -394,8 +393,6 @@ func waitForWorkspaceReply(ctx context.Context, client *DaemonClient, from strin
 	return "", fmt.Errorf("Timeout: no reply from %q within %ds", from, timeout)
 }
 
-var taskIDPattern = regexp.MustCompile(`(?i)task id:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`)
-
 type startTaskResult = daemon.StartTaskResponse
 
 type workspaceTaskView string
@@ -445,13 +442,6 @@ func sendWorkspaceMessage(client *DaemonClient, configPath, target, message stri
 	return client.SendMessage(target, message, dispatchConfigPath)
 }
 
-func extractTaskID(message string) (string, bool) {
-	matches := taskIDPattern.FindStringSubmatch(message)
-	if len(matches) < 2 {
-		return "", false
-	}
-	return matches[1], true
-}
 
 func readMessagesHandler(client *DaemonClient) server.ToolHandlerFunc {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -700,12 +690,7 @@ func startTaskHandler(client *DaemonClient) server.ToolHandlerFunc {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		dispatchBody, err := normalizeStartTaskMessage(message)
-		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
-		}
-
-		started, err := client.StartTask(title, description, dispatchBody, assignee, parentTaskID, startMode, workflowMode, priority, staleAfterSeconds)
+		started, err := client.StartTask(title, description, message, assignee, parentTaskID, startMode, workflowMode, priority, staleAfterSeconds)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Failed to start task: %v", err)), nil
 		}
@@ -801,17 +786,6 @@ func parseWorkspaceTaskView(value string) (workspaceTaskView, error) {
 	default:
 		return "", fmt.Errorf("Invalid workspace task view: %q (must be assigned, created, or both)", viewValue)
 	}
-}
-
-func normalizeStartTaskMessage(message string) (string, error) {
-	trimmed := strings.TrimSpace(message)
-	if trimmed == "" {
-		return "", fmt.Errorf("message is required")
-	}
-	if existingTaskID, ok := extractTaskID(trimmed); ok {
-		return "", fmt.Errorf("message must not include Task ID %q; start_task injects the new task ID automatically", existingTaskID)
-	}
-	return trimmed, nil
 }
 
 func updateTaskHandler(client *DaemonClient) server.ToolHandlerFunc {

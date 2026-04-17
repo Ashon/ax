@@ -10,7 +10,7 @@ import (
 	"syscall"
 
 	"github.com/ashon/ax/internal/config"
-	"github.com/ashon/ax/internal/daemon"
+	"github.com/ashon/ax/internal/daemonutil"
 	"github.com/ashon/ax/internal/workspace"
 	"github.com/spf13/cobra"
 )
@@ -51,7 +51,7 @@ var downCmd = &cobra.Command{
 		workspace.RemoveMCPConfig(configDir)
 
 		// Stop daemon
-		sp := daemon.ExpandSocketPath(socketPath)
+		sp := daemonutil.ExpandSocketPath(socketPath)
 		pidPath := filepath.Join(filepath.Dir(sp), "daemon.pid")
 		data, err := os.ReadFile(pidPath)
 		if err == nil {

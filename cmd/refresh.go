@@ -6,7 +6,7 @@ import (
 	"sort"
 
 	"github.com/ashon/ax/internal/config"
-	"github.com/ashon/ax/internal/daemon"
+	"github.com/ashon/ax/internal/daemonutil"
 	"github.com/ashon/ax/internal/tmux"
 	"github.com/ashon/ax/internal/workspace"
 	"github.com/spf13/cobra"
@@ -35,7 +35,7 @@ var refreshCmd = &cobra.Command{
 			return fmt.Errorf("load config tree: %w", err)
 		}
 
-		sp := daemon.ExpandSocketPath(socketPath)
+		sp := daemonutil.ExpandSocketPath(socketPath)
 		daemonRunning := isDaemonRunning(sp)
 
 		fmt.Printf("Config: %s\n", cfgPath)

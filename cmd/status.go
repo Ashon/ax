@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/ashon/ax/internal/config"
-	"github.com/ashon/ax/internal/daemon"
+	"github.com/ashon/ax/internal/daemonutil"
 	"github.com/ashon/ax/internal/tmux"
 	"github.com/ashon/ax/internal/types"
 	"github.com/spf13/cobra"
@@ -15,7 +15,7 @@ var statusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Show overall ax status",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		sp := daemon.ExpandSocketPath(socketPath)
+		sp := daemonutil.ExpandSocketPath(socketPath)
 		daemonRunning := isDaemonRunning(sp)
 		taskSummary := taskSummary{}
 		workspaceInfos := map[string]types.WorkspaceInfo{}

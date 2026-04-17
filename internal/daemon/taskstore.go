@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ashon/ax/internal/daemonutil"
 	"github.com/ashon/ax/internal/types"
 	"github.com/google/uuid"
 )
@@ -83,7 +84,7 @@ func (s *TaskStore) Load() error {
 // TasksFilePath returns the path to the materialized task snapshot file used by
 // external readers such as watch.
 func TasksFilePath(socketPath string) string {
-	return filepath.Join(filepath.Dir(ExpandSocketPath(socketPath)), taskSnapshotFileName)
+	return filepath.Join(filepath.Dir(daemonutil.ExpandSocketPath(socketPath)), taskSnapshotFileName)
 }
 
 // Create inserts a new pending task, applying default start mode and priority

@@ -25,10 +25,6 @@ const duplicateSuppressionWindow = 15 * time.Second
 
 var duplicateNoOpPattern = regexp.MustCompile(`(?i)\b(ack|acked|acknowledged|received|noted|thanks?|thank you|roger|copy that|working on it|on it|looking into it|in progress|still working|status|no update|no-op|noop|same update|same status)\b`)
 
-func ExpandSocketPath(path string) string {
-	return daemonutil.ExpandSocketPath(path)
-}
-
 type Daemon struct {
 	socketPath     string
 	registry       *Registry
@@ -49,7 +45,7 @@ type Daemon struct {
 }
 
 func New(socketPath string) *Daemon {
-	sp := ExpandSocketPath(socketPath)
+	sp := daemonutil.ExpandSocketPath(socketPath)
 	stateDir := filepath.Dir(sp)
 	logger := log.New(os.Stderr, "[ax-daemon] ", log.LstdFlags)
 	queue := NewPersistentMessageQueue(stateDir)

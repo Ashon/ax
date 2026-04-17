@@ -7,6 +7,7 @@ import (
 
 	"github.com/ashon/ax/internal/config"
 	"github.com/ashon/ax/internal/daemon"
+	"github.com/ashon/ax/internal/daemonutil"
 	"github.com/ashon/ax/internal/tmux"
 	"github.com/ashon/ax/internal/types"
 	"github.com/ashon/ax/internal/workspace"
@@ -45,7 +46,7 @@ var (
 	watchNewClient          = func() (watchLifecycleClient, error) { return newCLIClient() }
 	watchLifecycleSupported = defaultWatchLifecycleSupported
 	watchDaemonRunning      = func() bool {
-		return isDaemonRunning(daemon.ExpandSocketPath(socketPath))
+		return isDaemonRunning(daemonutil.ExpandSocketPath(socketPath))
 	}
 )
 

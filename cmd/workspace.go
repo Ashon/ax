@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/ashon/ax/internal/config"
-	"github.com/ashon/ax/internal/daemon"
+	"github.com/ashon/ax/internal/daemonutil"
 	"github.com/ashon/ax/internal/tmux"
 	"github.com/ashon/ax/internal/types"
 	"github.com/ashon/ax/internal/workspace"
@@ -95,7 +95,7 @@ var wsListCmd = &cobra.Command{
 		}
 
 		workspaceInfos := map[string]types.WorkspaceInfo{}
-		if sp := daemon.ExpandSocketPath(socketPath); isDaemonRunning(sp) {
+		if sp := daemonutil.ExpandSocketPath(socketPath); isDaemonRunning(sp) {
 			if client, err := newCLIClient(); err == nil {
 				if workspaces, err := client.ListWorkspaces(); err == nil {
 					workspaceInfos = workspaceInfoMap(workspaces)

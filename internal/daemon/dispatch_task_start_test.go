@@ -3,10 +3,31 @@ package daemon
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/ashon/ax/internal/types"
 )
+
+func TestNormalizeTaskDispatchBody_RejectsEmbeddedTaskID(t *testing.T) {
+	_, err := normalizeTaskDispatchBody("Task ID: 33333333-3333-3333-3333-333333333333\n\nPlease handle this")
+	if err == nil {
+		t.Fatal("expected embedded Task ID to be rejected")
+	}
+	if !strings.Contains(err.Error(), "start_task injects the new task ID automatically") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestNormalizeTaskDispatchBody_RejectsBlankMessage(t *testing.T) {
+	_, err := normalizeTaskDispatchBody(" \n\t ")
+	if err == nil {
+		t.Fatal("expected blank message to be rejected")
+	}
+	if !strings.Contains(err.Error(), "message is required") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
 
 func decodeStartTaskResponse(t *testing.T, env *Envelope) StartTaskResponse {
 	t.Helper()

@@ -5,7 +5,7 @@ import (
 
 	"github.com/ashon/ax/internal/agent"
 	"github.com/ashon/ax/internal/config"
-	"github.com/ashon/ax/internal/daemon"
+	"github.com/ashon/ax/internal/daemonutil"
 	"github.com/ashon/ax/internal/tmux"
 	"github.com/ashon/ax/internal/workspace"
 )
@@ -66,7 +66,7 @@ func runRootOrchestrator(runtime string, runtimeArgs []string) error {
 	// is untouched.
 	tree.OrchestratorRuntime = runtime
 
-	sp := daemon.ExpandSocketPath(socketPath)
+	sp := daemonutil.ExpandSocketPath(socketPath)
 	if !isDaemonRunning(sp) {
 		if err := ensureDaemon(); err != nil {
 			return fmt.Errorf("start daemon: %w", err)

@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ashon/ax/internal/daemonutil"
 	"github.com/ashon/ax/internal/types"
 )
 
@@ -143,5 +144,5 @@ func (h *History) RecentMatching(n int, match func(HistoryEntry) bool) []History
 
 // HistoryFilePath returns the path to the history file for external readers (watch)
 func HistoryFilePath(socketPath string) string {
-	return filepath.Join(filepath.Dir(ExpandSocketPath(socketPath)), "message_history.jsonl")
+	return filepath.Join(filepath.Dir(daemonutil.ExpandSocketPath(socketPath)), "message_history.jsonl")
 }
