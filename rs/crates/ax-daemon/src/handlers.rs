@@ -13,19 +13,21 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use ax_proto::payloads::{
-    BroadcastPayload, ControlLifecyclePayload, GetSharedPayload, ReadMessagesPayload,
-    RecallMemoriesPayload, RegisterPayload, RememberMemoryPayload, SendMessagePayload,
-    SetSharedPayload, SetStatusPayload,
+    AgentLifecyclePayload, BroadcastPayload, ControlLifecyclePayload, GetSharedPayload,
+    ReadMessagesPayload, RecallMemoriesPayload, RegisterPayload, RememberMemoryPayload,
+    SendMessagePayload, SetSharedPayload, SetStatusPayload,
 };
 use ax_proto::responses::{
-    BroadcastResponse, ControlLifecycleResponse, GetSharedResponse, ListSharedResponse,
-    ListWorkspacesResponse, MemoryResponse, ReadMessagesResponse, RecallMemoriesResponse,
-    SendMessageResponse, StatusResponse,
+    AgentLifecycleResponse, BroadcastResponse, ControlLifecycleResponse, GetSharedResponse,
+    ListSharedResponse, ListWorkspacesResponse, MemoryResponse, ReadMessagesResponse,
+    RecallMemoriesResponse, SendMessageResponse, StatusResponse,
 };
 use ax_proto::types::{LifecycleAction, Message};
 use ax_proto::{Envelope, ErrorPayload, MessageType, ResponsePayload};
 use ax_workspace::{
-    restart_named_target, start_named_target, stop_named_target, RealTmux, TmuxBackend,
+    cleanup_orchestrator_state, ensure_orchestrator, load_dispatch_desired_state,
+    restart_named_target, start_named_target, stop_named_target, DesiredOrchestrator,
+    DesiredWorkspace, Manager, RealTmux, TmuxBackend,
 };
 
 use crate::memory::{Query as MemoryQuery, Store as MemoryStore};
@@ -122,6 +124,15 @@ pub(crate) fn handle_control_lifecycle(
 ) -> Result<Envelope, HandlerError> {
     let ax_bin = current_ax_bin()?;
     handle_control_lifecycle_with_tmux(ctx, env, workspace, &RealTmux, &ax_bin)
+}
+
+pub(crate) fn handle_agent_lifecycle(
+    ctx: &HandlerCtx,
+    env: &Envelope,
+    workspace: &str,
+) -> Result<Envelope, HandlerError> {
+    let ax_bin = current_ax_bin()?;
+    handle_agent_lifecycle_with_tmux(ctx, env, workspace, &RealTmux, &ax_bin)
 }
 
 pub(crate) fn handle_send_message(
@@ -366,6 +377,16 @@ fn handle_control_lifecycle_with_tmux<B: TmuxBackend + Clone>(
     )
 }
 
+#[derive(Debug, Clone)]
+struct ResolvedAgentLifecycleTarget {
+    name: String,
+    kind: &'static str,
+    managed_session: bool,
+    workspace: Option<DesiredWorkspace>,
+    orchestrator: Option<DesiredOrchestrator>,
+    limit: Option<String>,
+}
+
 fn control_lifecycle_target<B: TmuxBackend + Clone>(
     tmux: &B,
     socket_path: &Path,
@@ -386,6 +407,266 @@ fn control_lifecycle_target<B: TmuxBackend + Clone>(
         }
     }
     .map_err(|e| HandlerError::Logic(e.to_string()))
+}
+
+fn handle_agent_lifecycle_with_tmux<B: TmuxBackend + Clone>(
+    ctx: &HandlerCtx,
+    env: &Envelope,
+    workspace: &str,
+    tmux: &B,
+    ax_bin: &Path,
+) -> Result<Envelope, HandlerError> {
+    let payload: AgentLifecyclePayload = env
+        .decode_payload()
+        .map_err(|e| HandlerError::DecodePayload("agent_lifecycle", e))?;
+    require_registered(workspace)?;
+
+    let config_path = payload.config_path.trim();
+    if config_path.is_empty() {
+        return Err(HandlerError::Logic("config_path is required".into()));
+    }
+
+    let target =
+        resolve_agent_lifecycle_target(&ctx.socket_path, Path::new(config_path), &payload.name)?;
+    let result = apply_agent_lifecycle_action(
+        tmux,
+        &ctx.socket_path,
+        Path::new(config_path),
+        ax_bin,
+        target,
+        &payload.action,
+    )?;
+    ctx.registry.touch(workspace, Utc::now());
+    response(&env.id, &result)
+}
+
+fn resolve_agent_lifecycle_target(
+    socket_path: &Path,
+    config_path: &Path,
+    name: &str,
+) -> Result<ResolvedAgentLifecycleTarget, HandlerError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(HandlerError::Logic("name is required".into()));
+    }
+
+    let desired = load_dispatch_desired_state(socket_path, config_path)
+        .map_err(|e| HandlerError::Logic(e.to_string()))?;
+
+    if let Some(entry) = desired.workspaces.get(name) {
+        return Ok(ResolvedAgentLifecycleTarget {
+            name: entry.name.clone(),
+            kind: "workspace",
+            managed_session: true,
+            workspace: Some(entry.clone()),
+            orchestrator: None,
+            limit: None,
+        });
+    }
+
+    if let Some(entry) = desired.orchestrators.get(name) {
+        return Ok(ResolvedAgentLifecycleTarget {
+            name: entry.name.clone(),
+            kind: "orchestrator",
+            managed_session: entry.managed_session,
+            workspace: None,
+            orchestrator: Some(entry.clone()),
+            limit: (entry.root || !entry.managed_session).then(|| {
+                "root orchestrator lifecycle is not supported here because it is not a daemon-managed session"
+                    .to_owned()
+            }),
+        });
+    }
+
+    Err(HandlerError::Logic(format!(
+        "Agent {name:?} is not defined exactly in {}; use list_agents for exact configured names",
+        config_path.display()
+    )))
+}
+
+fn apply_agent_lifecycle_action<B: TmuxBackend + Clone>(
+    tmux: &B,
+    socket_path: &Path,
+    config_path: &Path,
+    ax_bin: &Path,
+    target: ResolvedAgentLifecycleTarget,
+    action: &LifecycleAction,
+) -> Result<AgentLifecycleResponse, HandlerError> {
+    if let Some(limit) = target.limit.as_deref() {
+        return Err(HandlerError::Logic(format!(
+            "Agent {:?} does not support {}: {}",
+            target.name,
+            lifecycle_action_name(action),
+            limit
+        )));
+    }
+
+    let existed_before = tmux.session_exists(&target.name);
+    let mut result = AgentLifecycleResponse {
+        name: target.name.clone(),
+        action: lifecycle_action_name(action).to_owned(),
+        target_kind: target.kind.to_owned(),
+        managed_session: target.managed_session,
+        exact_match: true,
+        status: String::new(),
+        session_exists_before: existed_before,
+        session_exists_after: false,
+    };
+
+    match target.kind {
+        "workspace" => {
+            let workspace = target.workspace.as_ref().expect("workspace target");
+            let manager = Manager::with_tmux(
+                socket_path.to_path_buf(),
+                Some(config_path.to_path_buf()),
+                ax_bin.to_path_buf(),
+                tmux.clone(),
+            );
+            match action {
+                LifecycleAction::Start => {
+                    if existed_before {
+                        result.status = "already_running".to_owned();
+                    } else {
+                        manager
+                            .create(&target.name, &workspace.workspace)
+                            .map_err(|e| {
+                                HandlerError::Logic(format!(
+                                    "start workspace {:?}: {}",
+                                    target.name, e
+                                ))
+                            })?;
+                        result.status = "started".to_owned();
+                    }
+                }
+                LifecycleAction::Stop => {
+                    manager
+                        .destroy(&target.name, &workspace.workspace.dir)
+                        .map_err(|e| {
+                            HandlerError::Logic(format!("stop workspace {:?}: {}", target.name, e))
+                        })?;
+                    result.status = if existed_before {
+                        "stopped".to_owned()
+                    } else {
+                        "already_stopped".to_owned()
+                    };
+                }
+                LifecycleAction::Restart => {
+                    manager
+                        .restart(&target.name, &workspace.workspace)
+                        .map_err(|e| {
+                            HandlerError::Logic(format!(
+                                "restart workspace {:?}: {}",
+                                target.name, e
+                            ))
+                        })?;
+                    result.status = "restarted".to_owned();
+                }
+            }
+        }
+        "orchestrator" => {
+            let orchestrator = target.orchestrator.as_ref().expect("orchestrator target");
+            match action {
+                LifecycleAction::Start => {
+                    if existed_before {
+                        result.status = "already_running".to_owned();
+                    } else {
+                        ensure_orchestrator(
+                            tmux,
+                            &orchestrator.node,
+                            &orchestrator.parent_name,
+                            socket_path,
+                            Some(config_path),
+                            ax_bin,
+                            true,
+                        )
+                        .map_err(|e| {
+                            HandlerError::Logic(format!(
+                                "start orchestrator {:?}: {}",
+                                target.name, e
+                            ))
+                        })?;
+                        result.status = "started".to_owned();
+                    }
+                }
+                LifecycleAction::Stop => {
+                    cleanup_orchestrator_state(tmux, &target.name, &orchestrator.artifact_dir)
+                        .map_err(|e| {
+                            HandlerError::Logic(format!(
+                                "stop orchestrator {:?}: {}",
+                                target.name, e
+                            ))
+                        })?;
+                    result.status = if existed_before {
+                        "stopped".to_owned()
+                    } else {
+                        "already_stopped".to_owned()
+                    };
+                }
+                LifecycleAction::Restart => {
+                    cleanup_orchestrator_state(tmux, &target.name, &orchestrator.artifact_dir)
+                        .map_err(|e| {
+                            HandlerError::Logic(format!(
+                                "restart orchestrator {:?}: {}",
+                                target.name, e
+                            ))
+                        })?;
+                    ensure_orchestrator(
+                        tmux,
+                        &orchestrator.node,
+                        &orchestrator.parent_name,
+                        socket_path,
+                        Some(config_path),
+                        ax_bin,
+                        true,
+                    )
+                    .map_err(|e| {
+                        HandlerError::Logic(format!(
+                            "restart orchestrator {:?}: {}",
+                            target.name, e
+                        ))
+                    })?;
+                    result.status = "restarted".to_owned();
+                }
+            }
+        }
+        _ => {
+            return Err(HandlerError::Logic(format!(
+                "unsupported lifecycle target kind {:?}",
+                target.kind
+            )));
+        }
+    }
+
+    result.session_exists_after = tmux.session_exists(&target.name);
+    match action {
+        LifecycleAction::Start | LifecycleAction::Restart => {
+            if !result.session_exists_after {
+                return Err(HandlerError::Logic(format!(
+                    "{} {:?} completed without leaving a running session",
+                    lifecycle_action_name(action),
+                    target.name
+                )));
+            }
+        }
+        LifecycleAction::Stop => {
+            if result.session_exists_after {
+                return Err(HandlerError::Logic(format!(
+                    "stop {:?} completed but the session is still running",
+                    target.name
+                )));
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+fn lifecycle_action_name(action: &LifecycleAction) -> &'static str {
+    match action {
+        LifecycleAction::Start => "start",
+        LifecycleAction::Stop => "stop",
+        LifecycleAction::Restart => "restart",
+    }
 }
 
 fn current_ax_bin() -> Result<PathBuf, HandlerError> {
@@ -474,6 +755,10 @@ pub(crate) fn handle_envelope(
             handle_control_lifecycle(ctx, env, workspace)
                 .unwrap_or_else(|e| error_envelope(&env.id, e.to_string())),
         ),
+        MessageType::AgentLifecycle => HandlerOutput::Response(
+            handle_agent_lifecycle(ctx, env, workspace)
+                .unwrap_or_else(|e| error_envelope(&env.id, e.to_string())),
+        ),
         MessageType::SendMessage => HandlerOutput::Response(
             handle_send_message(ctx, env, workspace)
                 .unwrap_or_else(|e| error_envelope(&env.id, e.to_string())),
@@ -532,7 +817,7 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use ax_proto::ResponsePayload;
+    use ax_proto::{responses::AgentLifecycleResponse, ResponsePayload};
     use ax_workspace::TmuxBackend;
 
     #[derive(Debug, Default, Clone)]
@@ -628,6 +913,14 @@ mod tests {
         let config_path = root.path().join(".ax").join("config.yaml");
         fs::create_dir_all(config_path.parent().expect("config dir")).expect("create config dir");
         fs::write(&config_path, body).expect("write config");
+        config_path
+    }
+
+    fn write_child_config(root: &TempDir, child: &str, body: &str) -> PathBuf {
+        let config_path = root.path().join(child).join(".ax").join("config.yaml");
+        fs::create_dir_all(config_path.parent().expect("child config dir"))
+            .expect("create child config dir");
+        fs::write(&config_path, body).expect("write child config");
         config_path
     }
 
@@ -754,6 +1047,194 @@ mod tests {
         assert_eq!(
             err.to_string(),
             "orchestrator \"orchestrator\" does not support targeted stop because it is not a managed session"
+        );
+    }
+
+    #[test]
+    fn agent_lifecycle_starts_workspace_by_exact_name() {
+        let root = TempDir::new().expect("tempdir");
+        let config_path = write_config(
+            &root,
+            "project: demo\nworkspaces:\n  worker:\n    dir: ./worker\n    runtime: claude\n",
+        );
+        let ctx = test_ctx(root.path().join("daemon.sock"));
+        ctx.registry.register("caller", "/tmp/caller", "", "");
+        let env = Envelope::new(
+            "agent-1",
+            MessageType::AgentLifecycle,
+            &AgentLifecyclePayload {
+                config_path: config_path.display().to_string(),
+                name: "worker".into(),
+                action: LifecycleAction::Start,
+            },
+        )
+        .expect("encode envelope");
+
+        let response = handle_agent_lifecycle_with_tmux(
+            &ctx,
+            &env,
+            "caller",
+            &FakeTmux::default(),
+            Path::new("/tmp/ax-rs"),
+        )
+        .expect("agent lifecycle");
+
+        let decoded: AgentLifecycleResponse = decode_response(&response);
+        assert_eq!(decoded.name, "worker");
+        assert_eq!(decoded.action, "start");
+        assert_eq!(decoded.target_kind, "workspace");
+        assert!(decoded.managed_session);
+        assert!(decoded.exact_match);
+        assert_eq!(decoded.status, "started");
+        assert!(!decoded.session_exists_before);
+        assert!(decoded.session_exists_after);
+    }
+
+    #[test]
+    fn agent_lifecycle_start_reports_already_running() {
+        let root = TempDir::new().expect("tempdir");
+        let config_path = write_config(
+            &root,
+            "project: demo\nworkspaces:\n  worker:\n    dir: ./worker\n    runtime: claude\n",
+        );
+        let ctx = test_ctx(root.path().join("daemon.sock"));
+        ctx.registry.register("caller", "/tmp/caller", "", "");
+        let tmux = FakeTmux::default();
+        tmux.sessions
+            .lock()
+            .expect("sessions lock")
+            .insert("worker".to_owned());
+        let env = Envelope::new(
+            "agent-2",
+            MessageType::AgentLifecycle,
+            &AgentLifecyclePayload {
+                config_path: config_path.display().to_string(),
+                name: "worker".into(),
+                action: LifecycleAction::Start,
+            },
+        )
+        .expect("encode envelope");
+
+        let response =
+            handle_agent_lifecycle_with_tmux(&ctx, &env, "caller", &tmux, Path::new("/tmp/ax-rs"))
+                .expect("agent lifecycle");
+
+        let decoded: AgentLifecycleResponse = decode_response(&response);
+        assert_eq!(decoded.status, "already_running");
+        assert!(decoded.session_exists_before);
+        assert!(decoded.session_exists_after);
+    }
+
+    #[test]
+    fn agent_lifecycle_starts_managed_child_orchestrator() {
+        let root = TempDir::new().expect("tempdir");
+        let config_path = write_config(
+            &root,
+            "project: demo\norchestrator_runtime: claude\nworkspaces:\n  worker:\n    dir: ./worker\n    runtime: claude\nchildren:\n  child:\n    dir: ./child\n    prefix: team\n",
+        );
+        let _child_config = write_child_config(
+            &root,
+            "child",
+            "project: child\nworkspaces:\n  helper:\n    dir: ./helper\n    runtime: claude\n",
+        );
+        let ctx = test_ctx(root.path().join("daemon.sock"));
+        ctx.registry.register("caller", "/tmp/caller", "", "");
+        let env = Envelope::new(
+            "agent-3",
+            MessageType::AgentLifecycle,
+            &AgentLifecyclePayload {
+                config_path: config_path.display().to_string(),
+                name: "team.orchestrator".into(),
+                action: LifecycleAction::Start,
+            },
+        )
+        .expect("encode envelope");
+
+        let response = handle_agent_lifecycle_with_tmux(
+            &ctx,
+            &env,
+            "caller",
+            &FakeTmux::default(),
+            Path::new("/tmp/ax-rs"),
+        )
+        .expect("agent lifecycle");
+
+        let decoded: AgentLifecycleResponse = decode_response(&response);
+        assert_eq!(decoded.name, "team.orchestrator");
+        assert_eq!(decoded.target_kind, "orchestrator");
+        assert!(decoded.managed_session);
+        assert_eq!(decoded.status, "started");
+        assert!(decoded.session_exists_after);
+    }
+
+    #[test]
+    fn agent_lifecycle_rejects_root_orchestrator() {
+        let root = TempDir::new().expect("tempdir");
+        let config_path = write_config(
+            &root,
+            "project: demo\norchestrator_runtime: claude\nworkspaces:\n  worker:\n    dir: ./worker\n    runtime: claude\n",
+        );
+        let ctx = test_ctx(root.path().join("daemon.sock"));
+        ctx.registry.register("caller", "/tmp/caller", "", "");
+        let env = Envelope::new(
+            "agent-4",
+            MessageType::AgentLifecycle,
+            &AgentLifecyclePayload {
+                config_path: config_path.display().to_string(),
+                name: "orchestrator".into(),
+                action: LifecycleAction::Stop,
+            },
+        )
+        .expect("encode envelope");
+
+        let err = handle_agent_lifecycle_with_tmux(
+            &ctx,
+            &env,
+            "caller",
+            &FakeTmux::default(),
+            Path::new("/tmp/ax-rs"),
+        )
+        .expect_err("root orchestrator should fail");
+        assert_eq!(
+            err.to_string(),
+            "Agent \"orchestrator\" does not support stop: root orchestrator lifecycle is not supported here because it is not a daemon-managed session"
+        );
+    }
+
+    #[test]
+    fn agent_lifecycle_requires_exact_configured_name() {
+        let root = TempDir::new().expect("tempdir");
+        let config_path = write_config(
+            &root,
+            "project: demo\nworkspaces:\n  worker:\n    dir: ./worker\n    runtime: claude\n",
+        );
+        let ctx = test_ctx(root.path().join("daemon.sock"));
+        ctx.registry.register("caller", "/tmp/caller", "", "");
+        let env = Envelope::new(
+            "agent-5",
+            MessageType::AgentLifecycle,
+            &AgentLifecyclePayload {
+                config_path: config_path.display().to_string(),
+                name: "Worker".into(),
+                action: LifecycleAction::Start,
+            },
+        )
+        .expect("encode envelope");
+
+        let err = handle_agent_lifecycle_with_tmux(
+            &ctx,
+            &env,
+            "caller",
+            &FakeTmux::default(),
+            Path::new("/tmp/ax-rs"),
+        )
+        .expect_err("name mismatch should fail");
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "Agent \"Worker\" is not defined exactly in {}; use list_agents for exact configured names",
+                config_path.display()
+            )
         );
     }
 }
