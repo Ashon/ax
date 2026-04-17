@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ashon/ax/internal/daemonutil"
 	"github.com/ashon/ax/internal/tmux"
 	"github.com/ashon/ax/internal/types"
 	"github.com/ashon/ax/internal/usage"
@@ -474,7 +475,7 @@ func (d *Daemon) handleInterveneTaskEnvelope(env *Envelope, workspace string) (*
 			if !tmux.SessionExists(task.Assignee) {
 				return nil, fmt.Errorf("workspace %q is not running", task.Assignee)
 			}
-			if err := tmux.WakeWorkspace(task.Assignee, WakePrompt(workspace, false)); err != nil {
+			if err := tmux.WakeWorkspace(task.Assignee, daemonutil.WakePrompt(workspace, false)); err != nil {
 				return nil, err
 			}
 		}

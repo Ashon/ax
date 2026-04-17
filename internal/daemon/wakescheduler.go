@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ashon/ax/internal/daemonutil"
 	"github.com/ashon/ax/internal/tmux"
 )
 
@@ -243,7 +244,7 @@ func (s *WakeScheduler) process() {
 		}
 
 		// Agent is idle and has pending messages — attempt wake
-		err := wakeSchedulerWakeWorkspace(pw.Workspace, WakePrompt(pw.Sender, false))
+		err := wakeSchedulerWakeWorkspace(pw.Workspace, daemonutil.WakePrompt(pw.Sender, false))
 
 		s.mu.Lock()
 		if entry, ok := s.pending[pw.Workspace]; ok {
