@@ -8,6 +8,7 @@ repository.workspace = true
 description = "Runtime identity + path helpers for ax agent bootstrap (Rust port of internal/agent)"
 
 [dependencies]
+ax-config = { path = "../ax-config" }
 hex.workspace = true
 sha1.workspace = true
 thiserror.workspace = true

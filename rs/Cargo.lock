@@ -27,6 +27,7 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 name = "ax-agent"
 version = "0.1.0"
 dependencies = [
+ "ax-config",
  "hex",
  "sha1",
  "tempfile",
@@ -97,6 +98,8 @@ name = "ax-workspace"
 version = "0.1.0"
 dependencies = [
  "ax-agent",
+ "ax-config",
+ "ax-tmux",
  "serde",
  "serde_json",
  "tempfile",

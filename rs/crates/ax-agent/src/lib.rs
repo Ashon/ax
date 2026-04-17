@@ -16,7 +16,8 @@ mod shell;
 
 pub use claude::{claude_project_path, ClaudeProjectError};
 pub use codex::{
-    codex_home_key, codex_home_path, is_managed_codex_home, remove_codex_home, CodexHomeError,
+    codex_home_key, codex_home_path, is_managed_codex_home, prepare_codex_home,
+    prepare_codex_home_for_launch, remove_codex_home, CodexHomeError,
 };
 pub use runtime::{instruction_file, Runtime, SUPPORTED_RUNTIMES};
 pub use shell::shell_quote;

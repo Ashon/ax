@@ -11,6 +11,8 @@ workspace = true
 
 [dependencies]
 ax-agent = { path = "../ax-agent" }
+ax-config = { path = "../ax-config" }
+ax-tmux = { path = "../ax-tmux" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

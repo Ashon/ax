@@ -40,6 +40,7 @@ pub enum LoadError {
 /// Root ax config file schema.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
+    #[serde(default)]
     pub project: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub orchestrator_runtime: String,
