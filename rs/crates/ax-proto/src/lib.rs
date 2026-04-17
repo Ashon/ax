@@ -18,10 +18,24 @@
 
 mod envelope;
 pub mod helpers;
-mod payloads;
-mod responses;
+pub mod payloads;
+pub mod responses;
 pub mod types;
+pub mod usage;
 
 pub use envelope::{Envelope, ErrorPayload, MessageType, ResponsePayload};
-pub use payloads::{BroadcastPayload, RegisterPayload, SendMessagePayload};
-pub use responses::{BroadcastResponse, SendMessageResponse, StatusResponse};
+pub use payloads::{
+    AgentLifecyclePayload, BroadcastPayload, CancelTaskPayload, ControlLifecyclePayload,
+    CreateTaskPayload, FinishTeamReconfigurePayload, GetSharedPayload, GetTaskPayload,
+    GetTeamStatePayload, InterveneTaskPayload, ListTasksPayload, ReadMessagesPayload,
+    RecallMemoriesPayload, RegisterPayload, RememberMemoryPayload, RemoveTaskPayload,
+    SendMessagePayload, SetSharedPayload, SetStatusPayload, StartTaskPayload,
+    TeamReconfigurePayload, UpdateTaskPayload, UsageTrendWorkspace, UsageTrendsPayload,
+};
+pub use responses::{
+    AgentLifecycleResponse, BroadcastResponse, ControlLifecycleResponse, GetSharedResponse,
+    InterveneTaskResponse, ListSharedResponse, ListTasksResponse, ListWorkspacesResponse,
+    MemoryResponse, ReadMessagesResponse, RecallMemoriesResponse, SendMessageResponse,
+    StartTaskResponse, StatusResponse, TaskDispatch, TaskResponse, TeamApplyResponse,
+    TeamPlanResponse, TeamStateResponse, UsageTrendsResponse,
+};

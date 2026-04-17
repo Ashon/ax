@@ -13,8 +13,11 @@
 //! migration: Rust must be indistinguishable from Go on the wire.
 
 use ax_proto::{
-    BroadcastPayload, BroadcastResponse, Envelope, ErrorPayload, MessageType, RegisterPayload,
-    ResponsePayload, SendMessagePayload, SendMessageResponse, StatusResponse,
+    AgentLifecycleResponse, BroadcastPayload, BroadcastResponse, CancelTaskPayload,
+    ControlLifecycleResponse, CreateTaskPayload, Envelope, ErrorPayload, InterveneTaskPayload,
+    ListWorkspacesResponse, MessageType, RegisterPayload, RememberMemoryPayload, ResponsePayload,
+    SendMessagePayload, SendMessageResponse, StartTaskResponse, StatusResponse, UpdateTaskPayload,
+    UsageTrendsResponse,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
@@ -133,6 +136,86 @@ fn broadcast_response_matches_go() {
     assert_eq!(decoded.count, 2);
     let reencoded = serde_json::to_string(&decoded).unwrap();
     assert_eq!(reencoded, response.data.get());
+}
+
+// ---------- Expanded request payload coverage ----------
+
+#[test]
+fn create_task_payload_matches_go() {
+    assert_envelope_roundtrip("create_task", &MessageType::CreateTask);
+    assert_payload_roundtrip::<CreateTaskPayload>("create_task");
+}
+
+#[test]
+fn update_task_payload_includes_optional_fields_only_when_present() {
+    assert_envelope_roundtrip("update_task", &MessageType::UpdateTask);
+    assert_payload_roundtrip::<UpdateTaskPayload>("update_task");
+}
+
+#[test]
+fn cancel_task_payload_preserves_expected_version() {
+    assert_envelope_roundtrip("cancel_task", &MessageType::CancelTask);
+    assert_payload_roundtrip::<CancelTaskPayload>("cancel_task");
+}
+
+#[test]
+fn intervene_task_payload_matches_go() {
+    assert_envelope_roundtrip("intervene_task", &MessageType::InterveneTask);
+    assert_payload_roundtrip::<InterveneTaskPayload>("intervene_task");
+}
+
+#[test]
+fn remember_memory_renames_supersedes_to_ids() {
+    // Critical: Go uses `supersedes_ids` as the JSON key, not `supersedes`.
+    assert_envelope_roundtrip("remember_memory", &MessageType::RememberMemory);
+    assert_payload_roundtrip::<RememberMemoryPayload>("remember_memory");
+}
+
+// ---------- Response coverage with embedded domain types ----------
+
+fn assert_response_data_roundtrip<T>(fixture: &str)
+where
+    T: Serialize + DeserializeOwned,
+{
+    let raw = load_fixture(fixture);
+    let env: Envelope = serde_json::from_str(&raw).unwrap();
+    assert_eq!(env.r#type, MessageType::Response);
+    let resp: ResponsePayload = env.decode_payload().unwrap();
+    let decoded: T = serde_json::from_str(resp.data.get()).unwrap();
+    let reencoded = serde_json::to_string(&decoded).unwrap();
+    assert_eq!(
+        reencoded,
+        resp.data.get(),
+        "response data drift in {fixture}"
+    );
+    // Full envelope also round-trips.
+    let env_reencoded = serde_json::to_string(&env).unwrap();
+    assert_eq!(env_reencoded, raw, "envelope drift in {fixture}");
+}
+
+#[test]
+fn list_workspaces_response_matches_go() {
+    assert_response_data_roundtrip::<ListWorkspacesResponse>("resp_list_workspaces");
+}
+
+#[test]
+fn control_lifecycle_response_matches_go() {
+    assert_response_data_roundtrip::<ControlLifecycleResponse>("resp_control_lifecycle");
+}
+
+#[test]
+fn agent_lifecycle_response_matches_go() {
+    assert_response_data_roundtrip::<AgentLifecycleResponse>("resp_agent_lifecycle");
+}
+
+#[test]
+fn start_task_response_with_nested_task_matches_go() {
+    assert_response_data_roundtrip::<StartTaskResponse>("resp_start_task");
+}
+
+#[test]
+fn usage_trends_response_matches_go() {
+    assert_response_data_roundtrip::<UsageTrendsResponse>("resp_usage_trends");
 }
 
 #[test]

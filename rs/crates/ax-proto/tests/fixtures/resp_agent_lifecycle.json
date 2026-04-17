@@ -1,0 +1,1 @@
+{"id":"al-1","type":"response","payload":{"success":true,"data":{"name":"worker","action":"start","target_kind":"workspace","managed_session":true,"exact_match":true,"status":"started","session_exists_before":false,"session_exists_after":true}}}

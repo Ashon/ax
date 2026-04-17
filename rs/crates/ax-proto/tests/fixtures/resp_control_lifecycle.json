@@ -1,0 +1,1 @@
+{"id":"cl-1","type":"response","payload":{"success":true,"data":{"target":{"name":"worker","kind":"workspace","managed_session":true},"action":"restart","running":true}}}
