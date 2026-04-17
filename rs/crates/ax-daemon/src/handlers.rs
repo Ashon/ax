@@ -41,6 +41,7 @@ use crate::shared_values::SharedValues;
 use crate::task_helpers::parse_task_lifecycle_options;
 use crate::task_store::{CreateTaskInput, TaskStore};
 use crate::team_reconfigure::TeamController;
+use crate::wake_scheduler::{RealWakeBackend, WakeScheduler};
 
 /// Context shared across handlers for one connected client.
 pub(crate) struct HandlerCtx {
@@ -52,6 +53,7 @@ pub(crate) struct HandlerCtx {
     pub task_store: Arc<TaskStore>,
     pub team_controller: Arc<TeamController>,
     pub history: Arc<History>,
+    pub wake_scheduler: Arc<WakeScheduler<RealWakeBackend>>,
 }
 
 pub(crate) struct RegisterHandled {
@@ -181,6 +183,7 @@ fn handle_send_message_with_dispatch<B: DispatchBackend + Clone>(
     ctx.history.append_message(&msg);
     ctx.registry.touch(workspace, msg.created_at);
     push_if_registered(ctx, &payload.to, &msg);
+    ctx.wake_scheduler.schedule(&payload.to, workspace);
 
     let config_path = payload.config_path.trim();
     if !config_path.is_empty() {
@@ -243,6 +246,7 @@ fn handle_broadcast_with_dispatch<B: DispatchBackend + Clone>(
         ctx.history.append_message(&msg);
         recipients.push(ws.name.clone());
         push_if_registered(ctx, &ws.name, &msg);
+        ctx.wake_scheduler.schedule(&ws.name, workspace);
     }
     ctx.registry.touch(workspace, Utc::now());
 
@@ -289,6 +293,9 @@ pub(crate) fn handle_read_messages(
     let messages = ctx.queue.dequeue(workspace, limit, from);
     if !messages.is_empty() {
         ctx.registry.touch(workspace, Utc::now());
+    }
+    if ctx.queue.pending_count(workspace) == 0 {
+        ctx.wake_scheduler.cancel(workspace);
     }
     response(&env.id, &ReadMessagesResponse { messages })
 }
@@ -491,6 +498,9 @@ pub(crate) fn handle_cancel_task(
         .map_err(|e| HandlerError::Logic(e.to_string()))?;
     ctx.registry.touch(workspace, Utc::now());
     ctx.queue.remove_task_messages(&task.assignee, &task.id);
+    if ctx.queue.pending_count(&task.assignee) == 0 {
+        ctx.wake_scheduler.cancel(&task.assignee);
+    }
     response(&env.id, &TaskResponse { task })
 }
 
@@ -514,6 +524,9 @@ pub(crate) fn handle_remove_task(
         .map_err(|e| HandlerError::Logic(e.to_string()))?;
     ctx.registry.touch(workspace, Utc::now());
     ctx.queue.remove_task_messages(&task.assignee, &task.id);
+    if ctx.queue.pending_count(&task.assignee) == 0 {
+        ctx.wake_scheduler.cancel(&task.assignee);
+    }
     response(&env.id, &TaskResponse { task })
 }
 
@@ -1219,15 +1232,18 @@ mod tests {
             crate::team_state_store::TeamStateStore::in_memory(),
             shared.clone(),
         );
+        let queue = MessageQueue::new();
+        let wake_scheduler = WakeScheduler::new(queue.clone(), RealWakeBackend);
         HandlerCtx {
             socket_path,
             registry: Registry::new(),
-            queue: MessageQueue::new(),
+            queue,
             shared,
             memory: MemoryStore::in_memory(),
             task_store: TaskStore::in_memory(),
             team_controller,
             history: History::in_memory(crate::history::DEFAULT_HISTORY_MAX_SIZE),
+            wake_scheduler,
         }
     }
 

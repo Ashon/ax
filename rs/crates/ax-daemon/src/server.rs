@@ -23,6 +23,7 @@ use crate::shared_values::SharedValues;
 use crate::task_store::TaskStore;
 use crate::team_reconfigure::TeamController;
 use crate::team_state_store::TeamStateStore;
+use crate::wake_scheduler::{RealWakeBackend, WakeLoopHandle, WakeScheduler};
 
 #[derive(Debug, thiserror::Error)]
 pub enum DaemonError {
@@ -47,6 +48,7 @@ pub struct Daemon {
     pub task_store: Arc<TaskStore>,
     pub team_controller: Arc<TeamController>,
     pub history: Arc<History>,
+    pub wake_scheduler: Arc<WakeScheduler<RealWakeBackend>>,
 }
 
 impl Daemon {
@@ -61,15 +63,18 @@ impl Daemon {
         let shared_values = SharedValues::in_memory();
         let team_store = TeamStateStore::in_memory();
         let team_controller = TeamController::new(state_dir, team_store, shared_values.clone());
+        let queue = MessageQueue::new();
+        let wake_scheduler = WakeScheduler::new(queue.clone(), RealWakeBackend);
         Self {
             socket_path,
             registry: Registry::new(),
-            queue: MessageQueue::new(),
+            queue,
             shared_values,
             memory_store: MemoryStore::in_memory(),
             task_store: TaskStore::in_memory(),
             team_controller,
             history: History::in_memory(DEFAULT_HISTORY_MAX_SIZE),
+            wake_scheduler,
         }
     }
 
@@ -95,6 +100,7 @@ impl Daemon {
             MessageQueue::load(state_dir).map_err(|e| DaemonError::LoadState(e.to_string()))?;
         self.history = History::load(state_dir, DEFAULT_HISTORY_MAX_SIZE)
             .map_err(|e| DaemonError::LoadState(e.to_string()))?;
+        self.wake_scheduler = WakeScheduler::new(self.queue.clone(), RealWakeBackend);
         Ok(self)
     }
 
@@ -129,7 +135,9 @@ impl Daemon {
         let task_store = self.task_store.clone();
         let team_controller = self.team_controller.clone();
         let history = self.history.clone();
+        let wake_scheduler = self.wake_scheduler.clone();
         let flusher = queue.spawn_flusher();
+        let wake_loop = wake_scheduler.clone().spawn();
         let join = tokio::spawn(run_accept_loop(
             listener,
             registry,
@@ -139,6 +147,7 @@ impl Daemon {
             task_store,
             team_controller,
             history,
+            wake_scheduler,
             shutdown_rx,
             socket_path.clone(),
         ));
@@ -147,6 +156,7 @@ impl Daemon {
             shutdown: Some(shutdown_tx),
             join: Some(join),
             flusher: Some(flusher),
+            wake_loop: Some(wake_loop),
         })
     }
 }
@@ -161,6 +171,7 @@ async fn run_accept_loop(
     task_store: Arc<TaskStore>,
     team_controller: Arc<TeamController>,
     history: Arc<History>,
+    wake_scheduler: Arc<WakeScheduler<RealWakeBackend>>,
     mut shutdown: tokio::sync::oneshot::Receiver<()>,
     socket_path: PathBuf,
 ) {
@@ -178,6 +189,7 @@ async fn run_accept_loop(
                         task_store: task_store.clone(),
                         team_controller: team_controller.clone(),
                         history: history.clone(),
+                        wake_scheduler: wake_scheduler.clone(),
                     };
                     tokio::spawn(handle_connection(conn, ctx));
                 }
@@ -307,6 +319,7 @@ pub struct DaemonHandle {
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     join: Option<tokio::task::JoinHandle<()>>,
     flusher: Option<FlusherHandle>,
+    wake_loop: Option<WakeLoopHandle>,
 }
 
 impl DaemonHandle {
@@ -327,6 +340,9 @@ impl DaemonHandle {
         }
         if let Some(flusher) = self.flusher.take() {
             flusher.shutdown().await;
+        }
+        if let Some(wake_loop) = self.wake_loop.take() {
+            wake_loop.shutdown().await;
         }
     }
 }
