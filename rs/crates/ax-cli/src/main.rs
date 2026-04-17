@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+mod daemon_client;
+
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -8,17 +10,19 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitCode, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ax_agent::{run_with_options, LaunchOptions};
 use ax_config::{find_config_file, Config};
 use ax_daemon::{expand_socket_path, Daemon, DEFAULT_SOCKET_PATH};
+use ax_proto::types::Message;
 use ax_tmux::{attach_session, create_ephemeral_session, session_exists};
 use ax_workspace::{
     cleanup_orchestrator_state, dispatch_runnable_work, ensure_artifacts, ensure_orchestrator_tree,
     orchestrator_name, remove_mcp_config, restart_named_target, root_orchestrator_dir,
     start_named_target, stop_named_target, Manager, RealTmux, TmuxBackend,
 };
+use daemon_client::{DaemonClient, DaemonClientError};
 
 const USAGE: &str = "\
 ax-rs - thin Rust entrypoint for migrated workspace control
@@ -31,6 +35,8 @@ Usage:
   ax-rs down [--config PATH] [--socket PATH] [--ax-bin PATH]
   ax-rs claude [claude args...]
   ax-rs codex [codex args...]
+  ax-rs send [--config PATH] [--socket PATH] <workspace> <message...>
+  ax-rs messages [--from NAME] [--limit N] [--wait] [--timeout SECONDS] [--json] [--socket PATH]
   ax-rs start <target> [--config PATH] [--socket PATH] [--ax-bin PATH]
   ax-rs stop <target> [--config PATH] [--socket PATH] [--ax-bin PATH]
   ax-rs restart <target> [--config PATH] [--socket PATH] [--ax-bin PATH]
@@ -47,6 +53,7 @@ Notes:
 ";
 
 const ROOT_ORCHESTRATOR_FAILURE_HOLD_SCRIPT: &str = "\"$@\"\nstatus=$?\nif [ \"$status\" -ne 0 ] && [ \"$status\" -ne 130 ] && [ \"$status\" -ne 143 ]; then\n  printf '\\n[ax] Root orchestrator process exited unexpectedly with status %s.\\n' \"$status\"\n  printf '[ax] Common causes: runtime binary not found, auth/config issues, or a CLI crash.\\n'\n  printf '[ax] Press Enter to close this tmux session.\\n'\n  IFS= read -r _\nfi\nexit \"$status\"";
+const CLI_INBOX_WORKSPACE: &str = "_cli";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CommonOptions {
@@ -87,6 +94,20 @@ enum ParsedCommand {
         passthrough_args: Vec<String>,
         options: CommonOptions,
     },
+    Send {
+        to: String,
+        message: String,
+        socket_path: PathBuf,
+        config_path: PathBuf,
+    },
+    Messages {
+        from: String,
+        limit: i64,
+        wait: bool,
+        timeout_seconds: u64,
+        json_output: bool,
+        socket_path: PathBuf,
+    },
     Lifecycle {
         action: LifecycleAction,
         target: String,
@@ -118,6 +139,8 @@ enum CliError {
     Up(UpCliError),
     Down(DownCliError),
     RootOrchestrator(RootOrchestratorCliError),
+    Send(SendCliError),
+    Messages(MessagesCliError),
     Lifecycle(ax_workspace::LifecycleError),
     Dispatch(ax_workspace::DispatchError),
     RunAgent(ax_agent::LaunchError),
@@ -215,6 +238,19 @@ enum RootOrchestratorCliError {
     AttachSession(ax_tmux::TmuxError),
 }
 
+#[derive(Debug)]
+enum SendCliError {
+    Connect(DaemonClientError),
+    Send(DaemonClientError),
+}
+
+#[derive(Debug)]
+enum MessagesCliError {
+    Connect(DaemonClientError),
+    Read(DaemonClientError),
+    FormatJson(serde_json::Error),
+}
+
 impl fmt::Display for CliError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -223,6 +259,8 @@ impl fmt::Display for CliError {
             Self::Up(source) => write!(f, "{source}"),
             Self::Down(source) => write!(f, "{source}"),
             Self::RootOrchestrator(source) => write!(f, "{source}"),
+            Self::Send(source) => write!(f, "{source}"),
+            Self::Messages(source) => write!(f, "{source}"),
             Self::Lifecycle(source) => write!(f, "{source}"),
             Self::Dispatch(source) => write!(f, "{source}"),
             Self::RunAgent(source) => write!(f, "{source}"),
@@ -232,6 +270,25 @@ impl fmt::Display for CliError {
             Self::DelegateLoop { binary } => {
                 write!(f, "delegated ax binary {binary:?} resolves to ax-rs itself")
             }
+        }
+    }
+}
+
+impl fmt::Display for SendCliError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Connect(source) => write!(f, "connect to daemon: {source} (is daemon running?)"),
+            Self::Send(source) => write!(f, "send: {source}"),
+        }
+    }
+}
+
+impl fmt::Display for MessagesCliError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Connect(source) => write!(f, "connect to daemon: {source} (is daemon running?)"),
+            Self::Read(source) => write!(f, "read messages: {source}"),
+            Self::FormatJson(source) => write!(f, "format messages as json: {source}"),
         }
     }
 }
@@ -341,6 +398,18 @@ impl From<RootOrchestratorCliError> for CliError {
     }
 }
 
+impl From<SendCliError> for CliError {
+    fn from(source: SendCliError) -> Self {
+        Self::Send(source)
+    }
+}
+
+impl From<MessagesCliError> for CliError {
+    fn from(source: MessagesCliError) -> Self {
+        Self::Messages(source)
+    }
+}
+
 impl From<ax_workspace::LifecycleError> for CliError {
     fn from(source: ax_workspace::LifecycleError) -> Self {
         Self::Lifecycle(source)
@@ -404,6 +473,27 @@ where
             passthrough_args,
             options,
         } => run_root_orchestrator(&runtime, &passthrough_args, &options, current_exe),
+        ParsedCommand::Send {
+            to,
+            message,
+            socket_path,
+            config_path,
+        } => run_send(&to, &message, &socket_path, &config_path),
+        ParsedCommand::Messages {
+            from,
+            limit,
+            wait,
+            timeout_seconds,
+            json_output,
+            socket_path,
+        } => run_messages(
+            &from,
+            limit,
+            wait,
+            timeout_seconds,
+            json_output,
+            &socket_path,
+        ),
         ParsedCommand::Lifecycle {
             action,
             target,
@@ -515,6 +605,12 @@ where
     }
     if matches!(command.as_str(), "claude" | "codex") {
         return parse_root_orchestrator_args(&command, &argv, cwd, current_exe);
+    }
+    if command == "send" {
+        return parse_send_args(&argv, cwd);
+    }
+    if matches!(command.as_str(), "messages" | "messages-json" | "msg") {
+        return parse_messages_args(&argv, matches!(command.as_str(), "messages-json"));
     }
     if command == "run-agent" {
         return parse_run_agent_args(&argv, cwd);
@@ -790,6 +886,116 @@ fn parse_root_orchestrator_args(
     })
 }
 
+fn parse_send_args(argv: &[OsString], cwd: &Path) -> Result<ParsedCommand, CliError> {
+    let mut socket_path = expand_socket_path(DEFAULT_SOCKET_PATH);
+    let mut config_override: Option<PathBuf> = None;
+    let mut to: Option<String> = None;
+    let mut message_parts = Vec::new();
+
+    let mut i = 1;
+    while i < argv.len() {
+        let arg = &argv[i];
+        if to.is_none() {
+            match arg.to_string_lossy().as_ref() {
+                "-h" | "--help" => return Ok(ParsedCommand::Help),
+                "--socket" => {
+                    i += 1;
+                    socket_path = parse_socket_path(argv.get(i), "--socket")?;
+                }
+                "--config" => {
+                    i += 1;
+                    config_override = Some(parse_path_arg(argv.get(i), "--config", cwd)?);
+                }
+                other if other.starts_with('-') => {
+                    return Err(CliError::Usage(format!(
+                        "unknown flag {other:?}\n\n{USAGE}"
+                    )));
+                }
+                _ => {
+                    to = Some(arg.to_string_lossy().into_owned());
+                }
+            }
+        } else {
+            message_parts.push(arg.to_string_lossy().into_owned());
+        }
+        i += 1;
+    }
+
+    let to =
+        to.ok_or_else(|| CliError::Usage(format!("send requires a workspace target\n\n{USAGE}")))?;
+    if message_parts.is_empty() {
+        return Err(CliError::Usage(format!(
+            "send requires a message body\n\n{USAGE}"
+        )));
+    }
+
+    Ok(ParsedCommand::Send {
+        to,
+        message: message_parts.join(" "),
+        socket_path,
+        config_path: resolve_config_path(config_override, cwd)?,
+    })
+}
+
+fn parse_messages_args(argv: &[OsString], force_json: bool) -> Result<ParsedCommand, CliError> {
+    let mut socket_path = expand_socket_path(DEFAULT_SOCKET_PATH);
+    let mut from = String::new();
+    let mut limit = 10_i64;
+    let mut wait = false;
+    let mut timeout_seconds = 120_u64;
+    let mut json_output = force_json;
+
+    let mut i = 1;
+    while i < argv.len() {
+        let arg = &argv[i];
+        match arg.to_string_lossy().as_ref() {
+            "-h" | "--help" => return Ok(ParsedCommand::Help),
+            "--socket" => {
+                i += 1;
+                socket_path = parse_socket_path(argv.get(i), "--socket")?;
+            }
+            "--from" => {
+                i += 1;
+                from = parse_string_arg(argv.get(i), "--from")?;
+            }
+            "--limit" => {
+                i += 1;
+                limit = parse_i64_arg(argv.get(i), "--limit")?;
+            }
+            "--wait" => {
+                wait = true;
+            }
+            "--timeout" => {
+                i += 1;
+                timeout_seconds = parse_u64_arg(argv.get(i), "--timeout")?;
+            }
+            "--json" => {
+                json_output = true;
+            }
+            other if other.starts_with('-') => {
+                return Err(CliError::Usage(format!(
+                    "unknown flag {other:?}\n\n{USAGE}"
+                )));
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unexpected extra argument {other:?}\n\n{USAGE}"
+                )));
+            }
+        }
+        i += 1;
+    }
+
+    Ok(ParsedCommand::Messages {
+        from,
+        limit,
+        wait,
+        timeout_seconds,
+        json_output,
+        socket_path,
+    })
+}
+
 fn parse_run_agent_args(argv: &[OsString], cwd: &Path) -> Result<ParsedCommand, CliError> {
     let mut runtime = "claude".to_owned();
     let mut workspace: Option<String> = None;
@@ -886,6 +1092,21 @@ fn parse_socket_path(value: Option<&OsString>, flag: &str) -> Result<PathBuf, Cl
     Ok(expand_socket_path(&value.to_string_lossy()))
 }
 
+fn parse_i64_arg(value: Option<&OsString>, flag: &str) -> Result<i64, CliError> {
+    let raw = parse_string_arg(value, flag)?;
+    raw.parse::<i64>()
+        .map_err(|_| CliError::Usage(format!("{flag} requires an integer value\n\n{USAGE}")))
+}
+
+fn parse_u64_arg(value: Option<&OsString>, flag: &str) -> Result<u64, CliError> {
+    let raw = parse_string_arg(value, flag)?;
+    raw.parse::<u64>().map_err(|_| {
+        CliError::Usage(format!(
+            "{flag} requires a non-negative integer value\n\n{USAGE}"
+        ))
+    })
+}
+
 fn resolve_config_path(config_override: Option<PathBuf>, cwd: &Path) -> Result<PathBuf, CliError> {
     if let Some(path) = config_override {
         return Ok(path);
@@ -896,6 +1117,65 @@ fn resolve_config_path(config_override: Option<PathBuf>, cwd: &Path) -> Result<P
             cwd.display()
         ))
     })
+}
+
+fn run_send(
+    to: &str,
+    message: &str,
+    socket_path: &Path,
+    config_path: &Path,
+) -> Result<ExitCode, CliError> {
+    let mut client =
+        DaemonClient::connect(socket_path, "orchestrator").map_err(SendCliError::Connect)?;
+    let result = client
+        .send_message(to, message, Some(config_path))
+        .map_err(SendCliError::Send)?;
+
+    println!("Message sent to {:?} (id: {})", to, result.message_id);
+    println!("Agent {:?} readied for queued work.", to);
+    Ok(ExitCode::SUCCESS)
+}
+
+fn run_messages(
+    from: &str,
+    limit: i64,
+    wait: bool,
+    timeout_seconds: u64,
+    json_output: bool,
+    socket_path: &Path,
+) -> Result<ExitCode, CliError> {
+    let mut client = DaemonClient::connect(socket_path, CLI_INBOX_WORKSPACE)
+        .map_err(MessagesCliError::Connect)?;
+    if !wait {
+        let messages = client
+            .read_messages(limit, from)
+            .map_err(MessagesCliError::Read)?;
+        print!(
+            "{}",
+            format_messages_output(&messages, json_output).map_err(MessagesCliError::FormatJson)?
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    println!("Waiting for CLI inbox messages for `{CLI_INBOX_WORKSPACE}`... (Ctrl+C to stop)");
+    let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
+    while Instant::now() < deadline {
+        let messages = client
+            .read_messages(limit, from)
+            .map_err(MessagesCliError::Read)?;
+        if !messages.is_empty() {
+            print!(
+                "{}",
+                format_messages_output(&messages, json_output)
+                    .map_err(MessagesCliError::FormatJson)?
+            );
+            return Ok(ExitCode::SUCCESS);
+        }
+        thread::sleep(Duration::from_secs(2));
+    }
+
+    print!("{}", timeout_messages_output(json_output));
+    Ok(ExitCode::SUCCESS)
 }
 
 fn run_up(options: &CommonOptions, current_exe: &Path) -> Result<ExitCode, CliError> {
@@ -1359,6 +1639,37 @@ fn delegates_to_self(delegate_bin: &OsStr, current_exe: &Path) -> bool {
         .is_some_and(|name| name == delegate_bin)
 }
 
+fn format_messages_output(
+    messages: &[Message],
+    json_output: bool,
+) -> Result<String, serde_json::Error> {
+    if json_output {
+        return serde_json::to_string_pretty(messages).map(|text| format!("{text}\n"));
+    }
+    if messages.is_empty() {
+        return Ok("No messages.\n".to_owned());
+    }
+
+    let mut out = String::new();
+    for message in messages {
+        out.push_str(&format!(
+            "── [{}] from {} ──\n{}\n\n",
+            message.created_at.format("%H:%M:%S"),
+            message.from,
+            message.content
+        ));
+    }
+    Ok(out)
+}
+
+fn timeout_messages_output(json_output: bool) -> &'static str {
+    if json_output {
+        "[]\n"
+    } else {
+        "No messages received within timeout.\n"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1697,6 +2008,105 @@ mod tests {
     #[test]
     fn wrap_root_orchestrator_ephemeral_argv_handles_empty_input() {
         assert!(wrap_root_orchestrator_ephemeral_argv(&[]).is_empty());
+    }
+
+    #[test]
+    fn send_defaults_to_discovered_config() {
+        let root = TempDir::new().expect("tempdir");
+        let home = TempDir::new().expect("home");
+        let _config_path = write_config(&root);
+        let cwd = root.path().join("nested");
+        fs::create_dir_all(&cwd).expect("create cwd");
+
+        with_home(home.path(), || {
+            let parsed = parse_args(
+                vec![
+                    "ax-rs".into(),
+                    "send".into(),
+                    "worker".into(),
+                    "hello".into(),
+                    "world".into(),
+                ],
+                &cwd,
+                Path::new("/tmp/ax-rs"),
+            )
+            .expect("parse");
+
+            assert_eq!(
+                parsed,
+                ParsedCommand::Send {
+                    to: "worker".to_owned(),
+                    message: "hello world".to_owned(),
+                    socket_path: expand_socket_path(DEFAULT_SOCKET_PATH),
+                    config_path: root.path().join(".ax").join("config.yaml"),
+                }
+            );
+        });
+    }
+
+    #[test]
+    fn messages_parses_filters_and_json_alias() {
+        let parsed = parse_args(
+            vec![
+                "ax-rs".into(),
+                "messages-json".into(),
+                "--from".into(),
+                "worker".into(),
+                "--limit".into(),
+                "5".into(),
+                "--wait".into(),
+                "--timeout".into(),
+                "30".into(),
+                "--socket".into(),
+                "~/daemon.sock".into(),
+            ],
+            Path::new("/missing"),
+            Path::new("/tmp/ax-rs"),
+        )
+        .expect("parse");
+
+        assert_eq!(
+            parsed,
+            ParsedCommand::Messages {
+                from: "worker".to_owned(),
+                limit: 5,
+                wait: true,
+                timeout_seconds: 30,
+                json_output: true,
+                socket_path: expand_socket_path("~/daemon.sock"),
+            }
+        );
+    }
+
+    #[test]
+    fn format_messages_output_text_and_json_match_go_shape() {
+        let messages = vec![Message {
+            id: "msg-1".to_owned(),
+            from: "ax.orchestrator".to_owned(),
+            to: CLI_INBOX_WORKSPACE.to_owned(),
+            content: "Task ready".to_owned(),
+            task_id: String::new(),
+            created_at: "2026-04-14T02:30:00Z".parse().expect("timestamp"),
+        }];
+
+        let text = format_messages_output(&messages, false).expect("text output");
+        assert!(text.contains("── [02:30:00] from ax.orchestrator ──"));
+        assert!(text.contains("Task ready"));
+
+        let json = format_messages_output(&messages, true).expect("json output");
+        let decoded: Vec<Message> = serde_json::from_str(&json).expect("decode json");
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].id, "msg-1");
+        assert_eq!(decoded[0].to, CLI_INBOX_WORKSPACE);
+    }
+
+    #[test]
+    fn timeout_messages_output_matches_text_and_json_modes() {
+        assert_eq!(timeout_messages_output(true), "[]\n");
+        assert_eq!(
+            timeout_messages_output(false),
+            "No messages received within timeout.\n"
+        );
     }
 
     #[test]
