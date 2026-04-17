@@ -102,9 +102,11 @@ type workspaceAssignment struct {
 }
 
 type dirState struct {
-	projectDir       string
-	projectExists    bool
-	transcriptsFound bool
+	projectDir         string
+	projectExists      bool
+	transcriptsFound   bool
+	codexHomeExists    bool
+	codexSessionsFound bool
 }
 
 // QueryHistory scans local Claude transcripts and returns recent usage trends
@@ -123,11 +125,19 @@ func QueryHistory(bindings []WorkspaceBinding, q HistoryQuery) (HistoryResponse,
 		return resp, nil
 	}
 
-	states, series, err := scanBindings(bindings, q)
+	states, series, codexByBinding, err := scanBindings(bindings, q)
 	if err != nil {
 		return resp, err
 	}
 	assignments := assignSeries(bindings, series)
+	for name, codexSeries := range codexByBinding {
+		if len(codexSeries) == 0 {
+			continue
+		}
+		existing := assignments[name]
+		existing.series = append(existing.series, codexSeries...)
+		assignments[name] = existing
+	}
 
 	for _, binding := range bindings {
 		ws := WorkspaceHistory{
@@ -141,9 +151,9 @@ func QueryHistory(bindings []WorkspaceBinding, q HistoryQuery) (HistoryResponse,
 			switch {
 			case cleanPath(binding.Dir) == "":
 				ws.UnavailableReason = "missing_workspace_dir"
-			case !state.projectExists:
+			case !state.projectExists && !state.codexHomeExists:
 				ws.UnavailableReason = "no_project_transcripts"
-			case !state.transcriptsFound:
+			case !state.transcriptsFound && !state.codexSessionsFound:
 				ws.UnavailableReason = "no_transcripts"
 			default:
 				ws.UnavailableReason = "workspace_unattributed"
@@ -204,17 +214,38 @@ func normalizeBindings(bindings []WorkspaceBinding, only string) []WorkspaceBind
 	return filtered
 }
 
-func scanBindings(bindings []WorkspaceBinding, q HistoryQuery) (map[string]dirState, []*transcriptSeries, error) {
+func scanBindings(bindings []WorkspaceBinding, q HistoryQuery) (map[string]dirState, []*transcriptSeries, map[string][]*transcriptSeries, error) {
 	states := make(map[string]dirState, len(bindings))
-	seenDirs := map[string]struct{}{}
 	series := make([]*transcriptSeries, 0, 16)
+	codexByBinding := make(map[string][]*transcriptSeries, len(bindings))
+
 	for _, binding := range bindings {
+		// Codex sessions are addressed by workspace name, not by dir-only
+		// cache key, so this pass runs once per binding instead of once
+		// per unique dir.
+		codexResult, err := scanCodexForBinding(binding, q)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		if len(codexResult.series) > 0 {
+			codexByBinding[binding.Name] = codexResult.series
+		}
+
 		dir := cleanPath(binding.Dir)
-		if _, ok := seenDirs[dir]; ok {
+		if existing, ok := states[dir]; ok {
+			if codexResult.homeExists {
+				existing.codexHomeExists = true
+			}
+			if codexResult.sessionsFound {
+				existing.codexSessionsFound = true
+			}
+			states[dir] = existing
 			continue
 		}
-		seenDirs[dir] = struct{}{}
-		state := dirState{}
+		state := dirState{
+			codexHomeExists:    codexResult.homeExists,
+			codexSessionsFound: codexResult.sessionsFound,
+		}
 		states[dir] = state
 		if dir == "" {
 			continue
@@ -222,7 +253,7 @@ func scanBindings(bindings []WorkspaceBinding, q HistoryQuery) (map[string]dirSt
 
 		projectDir, err := ProjectPath(dir)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		state.projectDir = projectDir
 		if _, err := os.Stat(projectDir); err != nil {
@@ -230,13 +261,13 @@ func scanBindings(bindings []WorkspaceBinding, q HistoryQuery) (map[string]dirSt
 				states[dir] = state
 				continue
 			}
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		state.projectExists = true
 
 		paths, err := discoverTranscripts(projectDir)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		if len(paths) == 0 {
 			states[dir] = state
@@ -248,14 +279,14 @@ func scanBindings(bindings []WorkspaceBinding, q HistoryQuery) (map[string]dirSt
 		for _, path := range paths {
 			s, err := scanTranscript(path, q)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 			if s != nil {
 				series = append(series, s)
 			}
 		}
 	}
-	return states, series, nil
+	return states, series, codexByBinding, nil
 }
 
 func discoverTranscripts(projectDir string) ([]string, error) {
