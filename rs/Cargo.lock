@@ -35,6 +35,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ax-cli"
+version = "0.1.0"
+dependencies = [
+ "ax-config",
+ "ax-daemon",
+ "ax-workspace",
+ "tempfile",
+]
+
+[[package]]
 name = "ax-config"
 version = "0.1.0"
 dependencies = [

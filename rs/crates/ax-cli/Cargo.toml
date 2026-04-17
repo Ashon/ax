@@ -1,0 +1,23 @@
+[package]
+name = "ax-cli"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Thin Rust CLI entrypoint for migrated ax workspace lifecycle/dispatch flows"
+
+[[bin]]
+name = "ax-rs"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+ax-config = { path = "../ax-config" }
+ax-daemon = { path = "../ax-daemon" }
+ax-workspace = { path = "../ax-workspace" }
+
+[dev-dependencies]
+tempfile = "3"

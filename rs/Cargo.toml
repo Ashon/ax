@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/ax-cli",
     "crates/ax-agent",
     "crates/ax-config",
     "crates/ax-daemon",
