@@ -15,8 +15,9 @@ use tokio::task::JoinHandle;
 use ax_proto::Envelope;
 
 use crate::handlers::{handle_envelope, HandlerCtx, HandlerOutput};
+use crate::history::{History, DEFAULT_HISTORY_MAX_SIZE};
 use crate::memory::Store as MemoryStore;
-use crate::queue::MessageQueue;
+use crate::queue::{FlusherHandle, MessageQueue};
 use crate::registry::Registry;
 use crate::shared_values::SharedValues;
 use crate::task_store::TaskStore;
@@ -45,6 +46,7 @@ pub struct Daemon {
     pub memory_store: Arc<MemoryStore>,
     pub task_store: Arc<TaskStore>,
     pub team_controller: Arc<TeamController>,
+    pub history: Arc<History>,
 }
 
 impl Daemon {
@@ -67,6 +69,7 @@ impl Daemon {
             memory_store: MemoryStore::in_memory(),
             task_store: TaskStore::in_memory(),
             team_controller,
+            history: History::in_memory(DEFAULT_HISTORY_MAX_SIZE),
         }
     }
 
@@ -88,6 +91,10 @@ impl Daemon {
             team_store,
             self.shared_values.clone(),
         );
+        self.queue =
+            MessageQueue::load(state_dir).map_err(|e| DaemonError::LoadState(e.to_string()))?;
+        self.history = History::load(state_dir, DEFAULT_HISTORY_MAX_SIZE)
+            .map_err(|e| DaemonError::LoadState(e.to_string()))?;
         Ok(self)
     }
 
@@ -121,6 +128,8 @@ impl Daemon {
         let memory = self.memory_store.clone();
         let task_store = self.task_store.clone();
         let team_controller = self.team_controller.clone();
+        let history = self.history.clone();
+        let flusher = queue.spawn_flusher();
         let join = tokio::spawn(run_accept_loop(
             listener,
             registry,
@@ -129,6 +138,7 @@ impl Daemon {
             memory,
             task_store,
             team_controller,
+            history,
             shutdown_rx,
             socket_path.clone(),
         ));
@@ -136,6 +146,7 @@ impl Daemon {
             socket_path,
             shutdown: Some(shutdown_tx),
             join: Some(join),
+            flusher: Some(flusher),
         })
     }
 }
@@ -149,6 +160,7 @@ async fn run_accept_loop(
     memory: Arc<MemoryStore>,
     task_store: Arc<TaskStore>,
     team_controller: Arc<TeamController>,
+    history: Arc<History>,
     mut shutdown: tokio::sync::oneshot::Receiver<()>,
     socket_path: PathBuf,
 ) {
@@ -165,6 +177,7 @@ async fn run_accept_loop(
                         memory: memory.clone(),
                         task_store: task_store.clone(),
                         team_controller: team_controller.clone(),
+                        history: history.clone(),
                     };
                     tokio::spawn(handle_connection(conn, ctx));
                 }
@@ -293,6 +306,7 @@ pub struct DaemonHandle {
     socket_path: PathBuf,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     join: Option<tokio::task::JoinHandle<()>>,
+    flusher: Option<FlusherHandle>,
 }
 
 impl DaemonHandle {
@@ -301,13 +315,18 @@ impl DaemonHandle {
         &self.socket_path
     }
 
-    /// Gracefully stop the server and wait for the accept loop.
+    /// Gracefully stop the server and wait for the accept loop. Also
+    /// stops the queue flusher and awaits a final snapshot so no
+    /// pending enqueue is lost on clean shutdown.
     pub async fn shutdown(mut self) {
         if let Some(tx) = self.shutdown.take() {
             let _ = tx.send(());
         }
         if let Some(join) = self.join.take() {
             let _ = join.await;
+        }
+        if let Some(flusher) = self.flusher.take() {
+            flusher.shutdown().await;
         }
     }
 }

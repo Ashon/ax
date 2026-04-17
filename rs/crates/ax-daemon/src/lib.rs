@@ -9,6 +9,7 @@
 
 mod atomicfile;
 mod handlers;
+mod history;
 mod memory;
 mod queue;
 mod registry;
@@ -21,7 +22,8 @@ mod team_reconfigure;
 mod team_state_store;
 mod usage_trends;
 
-pub use queue::MessageQueue;
+pub use history::{History, HistoryEntry, HistoryError, DEFAULT_HISTORY_MAX_SIZE};
+pub use queue::{FlusherHandle, MessageQueue, QueueError, DEFAULT_MAX_QUEUE_PER_WORKSPACE};
 pub use registry::Registry;
 pub use server::{Daemon, DaemonError, DaemonHandle};
 pub use socket_path::{expand_socket_path, DEFAULT_SOCKET_PATH};

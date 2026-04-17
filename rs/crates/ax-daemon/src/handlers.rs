@@ -33,6 +33,7 @@ use ax_workspace::{
     DesiredOrchestrator, DesiredWorkspace, DispatchBackend, Manager, RealTmux, TmuxBackend,
 };
 
+use crate::history::History;
 use crate::memory::{Query as MemoryQuery, Store as MemoryStore};
 use crate::queue::MessageQueue;
 use crate::registry::{Entry, RegisterOutcome, Registry};
@@ -50,6 +51,7 @@ pub(crate) struct HandlerCtx {
     pub memory: Arc<MemoryStore>,
     pub task_store: Arc<TaskStore>,
     pub team_controller: Arc<TeamController>,
+    pub history: Arc<History>,
 }
 
 pub(crate) struct RegisterHandled {
@@ -176,6 +178,7 @@ fn handle_send_message_with_dispatch<B: DispatchBackend + Clone>(
         created_at: Utc::now(),
     };
     let msg = ctx.queue.enqueue(msg);
+    ctx.history.append_message(&msg);
     ctx.registry.touch(workspace, msg.created_at);
     push_if_registered(ctx, &payload.to, &msg);
 
@@ -237,6 +240,7 @@ fn handle_broadcast_with_dispatch<B: DispatchBackend + Clone>(
             created_at: Utc::now(),
         };
         let msg = ctx.queue.enqueue(msg);
+        ctx.history.append_message(&msg);
         recipients.push(ws.name.clone());
         push_if_registered(ctx, &ws.name, &msg);
     }
@@ -1223,6 +1227,7 @@ mod tests {
             memory: MemoryStore::in_memory(),
             task_store: TaskStore::in_memory(),
             team_controller,
+            history: History::in_memory(crate::history::DEFAULT_HISTORY_MAX_SIZE),
         }
     }
 
