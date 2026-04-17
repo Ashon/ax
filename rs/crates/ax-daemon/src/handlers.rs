@@ -25,9 +25,9 @@ use ax_proto::responses::{
 use ax_proto::types::{LifecycleAction, Message};
 use ax_proto::{Envelope, ErrorPayload, MessageType, ResponsePayload};
 use ax_workspace::{
-    cleanup_orchestrator_state, ensure_orchestrator, load_dispatch_desired_state,
-    restart_named_target, start_named_target, stop_named_target, DesiredOrchestrator,
-    DesiredWorkspace, Manager, RealTmux, TmuxBackend,
+    cleanup_orchestrator_state, dispatch_runnable_work, ensure_orchestrator,
+    load_dispatch_desired_state, restart_named_target, start_named_target, stop_named_target,
+    DesiredOrchestrator, DesiredWorkspace, DispatchBackend, Manager, RealTmux, TmuxBackend,
 };
 
 use crate::memory::{Query as MemoryQuery, Store as MemoryStore};
@@ -140,6 +140,17 @@ pub(crate) fn handle_send_message(
     env: &Envelope,
     workspace: &str,
 ) -> Result<Envelope, HandlerError> {
+    let ax_bin = current_ax_bin()?;
+    handle_send_message_with_dispatch(ctx, env, workspace, &RealTmux, &ax_bin)
+}
+
+fn handle_send_message_with_dispatch<B: DispatchBackend + Clone>(
+    ctx: &HandlerCtx,
+    env: &Envelope,
+    workspace: &str,
+    dispatch: &B,
+    ax_bin: &Path,
+) -> Result<Envelope, HandlerError> {
     let payload: SendMessagePayload = env
         .decode_payload()
         .map_err(|e| HandlerError::DecodePayload("send_message", e))?;
@@ -160,6 +171,20 @@ pub(crate) fn handle_send_message(
     ctx.registry.touch(workspace, msg.created_at);
     push_if_registered(ctx, &payload.to, &msg);
 
+    let config_path = payload.config_path.trim();
+    if !config_path.is_empty() {
+        dispatch_runnable_work(
+            dispatch,
+            &ctx.socket_path,
+            Path::new(config_path),
+            ax_bin,
+            &payload.to,
+            workspace,
+            false,
+        )
+        .map_err(|e| HandlerError::Logic(format!("dispatch {workspace} -> {}: {e}", payload.to)))?;
+    }
+
     response(
         &env.id,
         &SendMessageResponse {
@@ -173,6 +198,17 @@ pub(crate) fn handle_broadcast(
     ctx: &HandlerCtx,
     env: &Envelope,
     workspace: &str,
+) -> Result<Envelope, HandlerError> {
+    let ax_bin = current_ax_bin()?;
+    handle_broadcast_with_dispatch(ctx, env, workspace, &RealTmux, &ax_bin)
+}
+
+fn handle_broadcast_with_dispatch<B: DispatchBackend + Clone>(
+    ctx: &HandlerCtx,
+    env: &Envelope,
+    workspace: &str,
+    dispatch: &B,
+    ax_bin: &Path,
 ) -> Result<Envelope, HandlerError> {
     let payload: BroadcastPayload = env
         .decode_payload()
@@ -197,6 +233,27 @@ pub(crate) fn handle_broadcast(
         push_if_registered(ctx, &ws.name, &msg);
     }
     ctx.registry.touch(workspace, Utc::now());
+
+    let config_path = payload.config_path.trim();
+    if !config_path.is_empty() {
+        for recipient in &recipients {
+            dispatch_runnable_work(
+                dispatch,
+                &ctx.socket_path,
+                Path::new(config_path),
+                ax_bin,
+                recipient,
+                workspace,
+                false,
+            )
+            .map_err(|e| {
+                HandlerError::Logic(format!(
+                    "broadcast dispatch {workspace} -> {recipient}: {e}"
+                ))
+            })?;
+        }
+    }
+
     let count = i64::try_from(recipients.len()).unwrap_or(i64::MAX);
     response(&env.id, &BroadcastResponse { recipients, count })
 }
@@ -823,6 +880,7 @@ mod tests {
     #[derive(Debug, Default, Clone)]
     struct FakeTmux {
         sessions: Arc<std::sync::Mutex<HashSet<String>>>,
+        wakes: Arc<std::sync::Mutex<Vec<(String, String)>>>,
     }
 
     impl TmuxBackend for FakeTmux {
@@ -888,6 +946,16 @@ mod tests {
                 .lock()
                 .expect("sessions lock")
                 .remove(workspace);
+            Ok(())
+        }
+    }
+
+    impl DispatchBackend for FakeTmux {
+        fn wake_workspace(&self, workspace: &str, prompt: &str) -> Result<(), ax_tmux::TmuxError> {
+            self.wakes
+                .lock()
+                .expect("wakes lock")
+                .push((workspace.to_owned(), prompt.to_owned()));
             Ok(())
         }
     }
@@ -1236,5 +1304,187 @@ mod tests {
                 config_path.display()
             )
         );
+    }
+
+    #[test]
+    fn send_message_dispatches_when_config_path_is_present() {
+        let root = TempDir::new().expect("tempdir");
+        let config_path = write_config(
+            &root,
+            "project: demo\nworkspaces:\n  worker:\n    dir: ./worker\n    runtime: claude\n",
+        );
+        let ctx = test_ctx(root.path().join("daemon.sock"));
+        ctx.registry.register("orchestrator", "/tmp/orch", "", "");
+        let tmux = FakeTmux::default();
+        let env = Envelope::new(
+            "send-1",
+            MessageType::SendMessage,
+            &SendMessagePayload {
+                to: "worker".into(),
+                message: "ping".into(),
+                config_path: config_path.display().to_string(),
+            },
+        )
+        .expect("encode envelope");
+
+        let response = handle_send_message_with_dispatch(
+            &ctx,
+            &env,
+            "orchestrator",
+            &tmux,
+            Path::new("/tmp/ax-rs"),
+        )
+        .expect("send message");
+
+        let decoded: SendMessageResponse = decode_response(&response);
+        assert_eq!(decoded.status, "sent");
+        assert_eq!(ctx.queue.pending_count("worker"), 1);
+        assert!(tmux.session_exists("worker"));
+        let wakes = tmux.wakes.lock().expect("wakes lock");
+        assert_eq!(wakes.len(), 1);
+        assert_eq!(wakes[0].0, "worker");
+        assert!(wakes[0].1.contains(r#"send_message(to="orchestrator")"#));
+    }
+
+    #[test]
+    fn send_message_skips_dispatch_when_config_path_is_empty() {
+        let root = TempDir::new().expect("tempdir");
+        let ctx = test_ctx(root.path().join("daemon.sock"));
+        ctx.registry.register("orchestrator", "/tmp/orch", "", "");
+        let tmux = FakeTmux::default();
+        let env = Envelope::new(
+            "send-2",
+            MessageType::SendMessage,
+            &SendMessagePayload {
+                to: "worker".into(),
+                message: "ping".into(),
+                config_path: String::new(),
+            },
+        )
+        .expect("encode envelope");
+
+        let response = handle_send_message_with_dispatch(
+            &ctx,
+            &env,
+            "orchestrator",
+            &tmux,
+            Path::new("/tmp/ax-rs"),
+        )
+        .expect("send message");
+
+        let decoded: SendMessageResponse = decode_response(&response);
+        assert_eq!(decoded.status, "sent");
+        assert_eq!(ctx.queue.pending_count("worker"), 1);
+        assert!(!tmux.session_exists("worker"));
+        assert!(tmux.wakes.lock().expect("wakes lock").is_empty());
+    }
+
+    #[test]
+    fn send_message_keeps_message_queued_when_dispatch_fails() {
+        let root = TempDir::new().expect("tempdir");
+        let config_path = write_config(
+            &root,
+            "project: demo\nworkspaces:\n  worker:\n    dir: ./worker\n    runtime: claude\n",
+        );
+        let ctx = test_ctx(root.path().join("daemon.sock"));
+        ctx.registry.register("orchestrator", "/tmp/orch", "", "");
+        let tmux = FakeTmux::default();
+        let env = Envelope::new(
+            "send-3",
+            MessageType::SendMessage,
+            &SendMessagePayload {
+                to: "missing".into(),
+                message: "ping".into(),
+                config_path: config_path.display().to_string(),
+            },
+        )
+        .expect("encode envelope");
+
+        let err = handle_send_message_with_dispatch(
+            &ctx,
+            &env,
+            "orchestrator",
+            &tmux,
+            Path::new("/tmp/ax-rs"),
+        )
+        .expect_err("dispatch should fail");
+        assert!(err.to_string().contains(
+            r#"dispatch orchestrator -> missing: dispatch target "missing" is not defined"#
+        ));
+        assert_eq!(ctx.queue.pending_count("missing"), 1);
+    }
+
+    #[test]
+    fn broadcast_dispatches_to_each_recipient_when_config_path_is_present() {
+        let root = TempDir::new().expect("tempdir");
+        let config_path = write_config(
+            &root,
+            "project: demo\nworkspaces:\n  worker-a:\n    dir: ./worker-a\n    runtime: claude\n  worker-b:\n    dir: ./worker-b\n    runtime: claude\n",
+        );
+        let ctx = test_ctx(root.path().join("daemon.sock"));
+        ctx.registry.register("orchestrator", "/tmp/orch", "", "");
+        ctx.registry.register("worker-a", "/tmp/a", "", "");
+        ctx.registry.register("worker-b", "/tmp/b", "", "");
+        let tmux = FakeTmux::default();
+        let env = Envelope::new(
+            "broadcast-1",
+            MessageType::Broadcast,
+            &BroadcastPayload {
+                message: "team notice".into(),
+                config_path: config_path.display().to_string(),
+            },
+        )
+        .expect("encode envelope");
+
+        let response = handle_broadcast_with_dispatch(
+            &ctx,
+            &env,
+            "orchestrator",
+            &tmux,
+            Path::new("/tmp/ax-rs"),
+        )
+        .expect("broadcast");
+
+        let decoded: BroadcastResponse = decode_response(&response);
+        assert_eq!(decoded.count, 2);
+        assert_eq!(ctx.queue.pending_count("worker-a"), 1);
+        assert_eq!(ctx.queue.pending_count("worker-b"), 1);
+        let mut wakes = tmux.wakes.lock().expect("wakes lock").clone();
+        wakes.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(wakes.len(), 2);
+        assert_eq!(wakes[0].0, "worker-a");
+        assert_eq!(wakes[1].0, "worker-b");
+    }
+
+    #[test]
+    fn broadcast_skips_dispatch_when_config_path_is_empty() {
+        let root = TempDir::new().expect("tempdir");
+        let ctx = test_ctx(root.path().join("daemon.sock"));
+        ctx.registry.register("orchestrator", "/tmp/orch", "", "");
+        ctx.registry.register("worker-a", "/tmp/a", "", "");
+        let tmux = FakeTmux::default();
+        let env = Envelope::new(
+            "broadcast-2",
+            MessageType::Broadcast,
+            &BroadcastPayload {
+                message: "team notice".into(),
+                config_path: String::new(),
+            },
+        )
+        .expect("encode envelope");
+
+        let response = handle_broadcast_with_dispatch(
+            &ctx,
+            &env,
+            "orchestrator",
+            &tmux,
+            Path::new("/tmp/ax-rs"),
+        )
+        .expect("broadcast");
+
+        let decoded: BroadcastResponse = decode_response(&response);
+        assert_eq!(decoded.count, 1);
+        assert_eq!(ctx.queue.pending_count("worker-a"), 1);
+        assert!(tmux.wakes.lock().expect("wakes lock").is_empty());
     }
 }
