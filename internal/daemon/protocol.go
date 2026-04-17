@@ -61,12 +61,14 @@ type RegisterPayload struct {
 }
 
 type SendMessagePayload struct {
-	To      string `json:"to"`
-	Message string `json:"message"`
+	To         string `json:"to"`
+	Message    string `json:"message"`
+	ConfigPath string `json:"config_path,omitempty"`
 }
 
 type BroadcastPayload struct {
-	Message string `json:"message"`
+	Message    string `json:"message"`
+	ConfigPath string `json:"config_path,omitempty"`
 }
 
 type ReadMessagesPayload struct {

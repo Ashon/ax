@@ -5,20 +5,18 @@ import (
 	"strings"
 
 	"github.com/ashon/ax/internal/mcpserver"
-	"github.com/ashon/ax/internal/workspace"
 	"github.com/spf13/cobra"
 )
 
 type sendClient interface {
 	Connect() error
 	Close() error
-	SendMessage(to, message string) (*mcpserver.SendMessageResult, error)
+	SendMessage(to, message, configPath string) (*mcpserver.SendMessageResult, error)
 }
 
 var (
-	sendNewClient            = func(socketPath, workspace string) sendClient { return mcpserver.NewDaemonClient(socketPath, workspace) }
-	sendResolveConfigPath    = resolveConfigPath
-	sendDispatchRunnableWork = workspace.DispatchRunnableWork
+	sendNewClient         = func(socketPath, workspace string) sendClient { return mcpserver.NewDaemonClient(socketPath, workspace) }
+	sendResolveConfigPath = resolveConfigPath
 )
 
 var sendCmd = &cobra.Command{
@@ -30,13 +28,18 @@ var sendCmd = &cobra.Command{
 		to := args[0]
 		message := strings.Join(args[1:], " ")
 
+		cfgPath, err := sendResolveConfigPath()
+		if err != nil {
+			return fmt.Errorf("resolve dispatch config: %w", err)
+		}
+
 		client := sendNewClient(socketPath, "orchestrator")
 		if err := client.Connect(); err != nil {
 			return fmt.Errorf("connect to daemon: %w (is daemon running?)", err)
 		}
 		defer client.Close()
 
-		sendResult, err := client.SendMessage(to, message)
+		sendResult, err := client.SendMessage(to, message, cfgPath)
 		if err != nil {
 			return fmt.Errorf("send: %w", err)
 		}
@@ -47,14 +50,6 @@ var sendCmd = &cobra.Command{
 		}
 
 		fmt.Printf("Message sent to %q (id: %s)\n", to, sendResult.MessageID)
-
-		cfgPath, err := sendResolveConfigPath()
-		if err != nil {
-			return fmt.Errorf("message queued for %q but dispatch target resolution failed: %w", to, err)
-		}
-		if err := sendDispatchRunnableWork(socketPath, cfgPath, to, "orchestrator", false); err != nil {
-			return fmt.Errorf("message queued for %q but dispatch failed: %w", to, err)
-		}
 		fmt.Printf("Agent %q readied for queued work.\n", to)
 
 		return nil

@@ -41,11 +41,10 @@ type Daemon struct {
 	taskStore      *TaskStore
 	taskSnapshots  *taskSnapshotWriter
 	teamController *teamController
-	wakeScheduler  *WakeScheduler
-	sessionMgr     *sessionManager
-	sessionMgrOnce sync.Once
-	listener       net.Listener
-	logger         *log.Logger
+	wakeScheduler *WakeScheduler
+	sessionMgr    *sessionManager
+	listener      net.Listener
+	logger        *log.Logger
 }
 
 func New(socketPath string) *Daemon {
@@ -93,24 +92,21 @@ func New(socketPath string) *Daemon {
 		wakeScheduler:  NewWakeScheduler(queue, logger),
 		logger:         logger,
 	}
-	d.sessionMgr = newSessionManager(sp, d.registry, d.queue, d.taskStore, d.wakeScheduler, d.logger)
+	d.sessionMgr = newSessionManager(sessionManagerDeps{
+		socketPath:    sp,
+		registry:      d.registry,
+		queue:         d.queue,
+		taskStore:     d.taskStore,
+		wakeScheduler: d.wakeScheduler,
+		logger:        d.logger,
+	})
 	d.wakeScheduler.SetQueueRefiller(d.recoverRunnableTaskMessages)
-	d.wakeScheduler.SetMissingSessionEnsurer(d.sessionManager().ensurePendingWakeTarget)
+	d.wakeScheduler.SetMissingSessionEnsurer(d.sessionMgr.ensurePendingWakeTarget)
 	d.wakeScheduler.SetRetryAfterSuccessfulWake(func(workspace string) bool {
 		_, ok := d.registry.Get(workspace)
 		return !ok
 	})
 	return d
-}
-
-func (d *Daemon) sessionManager() *sessionManager {
-	if d == nil {
-		return nil
-	}
-	d.sessionMgrOnce.Do(func() {
-		d.sessionMgr = newSessionManager(d.socketPath, d.registry, d.queue, d.taskStore, d.wakeScheduler, d.logger)
-	})
-	return d.sessionMgr
 }
 
 func (d *Daemon) Run(ctx context.Context) error {

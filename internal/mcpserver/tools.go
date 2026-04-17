@@ -234,20 +234,12 @@ func inspectAgentHandler(client *DaemonClient, configPath string) server.ToolHan
 
 		fullMessage := question + "\n\n[ax] 작업 완료 후 반드시 send_message(to=\"" + client.workspace + "\") 로 결과를 보내주세요."
 
-		sendResult, err := client.SendMessage(name, fullMessage)
+		sendResult, err := sendWorkspaceMessage(client, configPath, name, fullMessage)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Failed to send inspection request: %v", err)), nil
 		}
 		if sendResult.Suppressed {
 			return mcp.NewToolResultText(fmt.Sprintf("Inspection request to %q was suppressed as a duplicate no-op/status update.", name)), nil
-		}
-
-		dispatchConfigPath, err := resolveToolConfigPath(client, configPath)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Failed to resolve wake config: %v", err)), nil
-		}
-		if err := dispatchRunnableTarget(client.socketPath, dispatchConfigPath, name, client.workspace, false); err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Inspection request to %q was queued but wake failed: %v", name, err)), nil
 		}
 
 		reply, err := waitForWorkspaceReply(ctx, client, name, timeout)
@@ -595,8 +587,6 @@ func waitForWorkspaceReply(ctx context.Context, client *DaemonClient, from strin
 
 var taskIDPattern = regexp.MustCompile(`(?i)task id:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`)
 
-var dispatchRunnableTarget = workspace.DispatchRunnableWork
-
 type startTaskResult = daemon.StartTaskResponse
 
 type workspaceTaskView string
@@ -626,7 +616,7 @@ func sendMessageHandler(client *DaemonClient, configPath string) server.ToolHand
 		to, _ := request.RequireString("to")
 		message, _ := request.RequireString("message")
 
-		sendResult, _, err := sendWorkspaceMessage(client, configPath, to, message)
+		sendResult, err := sendWorkspaceMessage(client, configPath, to, message)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Failed to send message: %v", err)), nil
 		}
@@ -638,45 +628,12 @@ func sendMessageHandler(client *DaemonClient, configPath string) server.ToolHand
 	}
 }
 
-func sendWorkspaceMessage(client *DaemonClient, configPath, target, message string) (*SendMessageResult, bool, error) {
-	sendResult, err := client.SendMessage(target, message)
-	if err != nil {
-		return nil, false, err
-	}
-	if sendResult.Suppressed {
-		return sendResult, false, nil
-	}
-
+func sendWorkspaceMessage(client *DaemonClient, configPath, target, message string) (*SendMessageResult, error) {
 	dispatchConfigPath, err := resolveToolConfigPath(client, configPath)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
-
-	freshStart, err := prepareFreshTaskStart(client, target, message)
-	if err != nil {
-		return nil, false, err
-	}
-
-	if err := dispatchRunnableTarget(client.socketPath, dispatchConfigPath, target, client.workspace, freshStart); err != nil {
-		return nil, false, err
-	}
-	return sendResult, freshStart, nil
-}
-
-func prepareFreshTaskStart(client *DaemonClient, target, message string) (bool, error) {
-	taskID, ok := extractTaskID(message)
-	if !ok {
-		return false, nil
-	}
-
-	task, err := client.GetTask(taskID)
-	if err != nil {
-		return false, nil
-	}
-	if task.Assignee != target || task.CreatedBy != client.workspace || task.StartMode != types.TaskStartFresh {
-		return false, nil
-	}
-	return true, nil
+	return client.SendMessage(target, message, dispatchConfigPath)
 }
 
 func extractTaskID(message string) (string, bool) {
@@ -716,24 +673,18 @@ func broadcastMessageHandler(client *DaemonClient, configPath string) server.Too
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		message, _ := request.RequireString("message")
 
-		recipients, err := client.BroadcastMessage(message)
+		dispatchConfigPath, err := resolveToolConfigPath(client, configPath)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to resolve wake config: %v", err)), nil
+		}
+
+		recipients, err := client.BroadcastMessage(message, dispatchConfigPath)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Failed to broadcast: %v", err)), nil
 		}
 
 		if len(recipients) == 0 {
 			return mcp.NewToolResultText("No other workspaces to broadcast to."), nil
-		}
-
-		dispatchConfigPath, err := resolveToolConfigPath(client, configPath)
-		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("Failed to resolve wake config: %v", err)), nil
-		}
-
-		for _, r := range recipients {
-			if err := dispatchRunnableTarget(client.socketPath, dispatchConfigPath, r, client.workspace, false); err != nil {
-				return mcp.NewToolResultError(fmt.Sprintf("Broadcast reached %q but wake failed: %v", r, err)), nil
-			}
 		}
 
 		return mcp.NewToolResultText(fmt.Sprintf("Broadcast sent to %d workspace(s): %s",
@@ -838,7 +789,7 @@ func requestHandler(client *DaemonClient, configPath string) server.ToolHandlerF
 		fullMessage := message + "\n\n[ax/request] 이 메시지는 동기 요청입니다. `" + client.workspace + "`가 당신의 응답을 기다리고 있습니다. 작업이 끝나면 즉시 `send_message(to=\"" + client.workspace + "\")`로 결과를 회신하세요. 하위 워크스페이스에 위임할 때는 `request`가 아닌 `send_message`를 병렬로 사용한 뒤 `read_messages`로 수집하세요."
 
 		// Send message via daemon
-		sendResult, _, err := sendWorkspaceMessage(client, configPath, to, fullMessage)
+		sendResult, err := sendWorkspaceMessage(client, configPath, to, fullMessage)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Failed to send: %v", err)), nil
 		}

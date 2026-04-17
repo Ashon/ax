@@ -9,8 +9,6 @@ import (
 )
 
 func TestHandleStartTaskEnvelopeDispatchesViaDaemonWithStoredConfigPath(t *testing.T) {
-	restoreDaemonDispatchRunnableWork(t)
-
 	stateDir := t.TempDir()
 	d := &Daemon{
 		socketPath:    "/tmp/ax.sock",
@@ -22,31 +20,39 @@ func TestHandleStartTaskEnvelopeDispatchesViaDaemonWithStoredConfigPath(t *testi
 		logger:        log.New(io.Discard, "", 0),
 	}
 
+	dispatched := false
+	d.sessionMgr = newSessionManager(sessionManagerDeps{
+		socketPath:    d.socketPath,
+		registry:      d.registry,
+		queue:         d.queue,
+		taskStore:     d.taskStore,
+		wakeScheduler: d.wakeScheduler,
+		logger:        d.logger,
+		dispatchRunnable: func(socketPath, configPath, target, sender string, fresh bool) error {
+			dispatched = true
+			if socketPath != "/tmp/ax.sock" {
+				t.Fatalf("unexpected socket path %q", socketPath)
+			}
+			if configPath != "/tmp/project/.ax/config.yaml" {
+				t.Fatalf("unexpected config path %q", configPath)
+			}
+			if target != "worker" {
+				t.Fatalf("unexpected target %q", target)
+			}
+			if sender != "orchestrator" {
+				t.Fatalf("unexpected sender %q", sender)
+			}
+			if fresh {
+				t.Fatal("unexpected fresh dispatch")
+			}
+			return nil
+		},
+	})
+
 	clientConn, serverConn := net.Pipe()
 	defer clientConn.Close()
 	defer serverConn.Close()
 	d.registry.Register("orchestrator", "", "", "/tmp/project/.ax/config.yaml", 0, clientConn)
-
-	dispatched := false
-	daemonDispatchRunnableWork = func(socketPath, configPath, target, sender string, fresh bool) error {
-		dispatched = true
-		if socketPath != "/tmp/ax.sock" {
-			t.Fatalf("unexpected socket path %q", socketPath)
-		}
-		if configPath != "/tmp/project/.ax/config.yaml" {
-			t.Fatalf("unexpected config path %q", configPath)
-		}
-		if target != "worker" {
-			t.Fatalf("unexpected target %q", target)
-		}
-		if sender != "orchestrator" {
-			t.Fatalf("unexpected sender %q", sender)
-		}
-		if fresh {
-			t.Fatal("unexpected fresh dispatch")
-		}
-		return nil
-	}
 
 	env, _ := NewEnvelope("start-task", MsgStartTask, &StartTaskPayload{
 		Title:    "daemon dispatch",
@@ -75,13 +81,4 @@ func TestHandleStartTaskEnvelopeDispatchesViaDaemonWithStoredConfigPath(t *testi
 	if !dispatched {
 		t.Fatal("expected daemon to dispatch queued task")
 	}
-}
-
-func restoreDaemonDispatchRunnableWork(t *testing.T) {
-	t.Helper()
-
-	old := daemonDispatchRunnableWork
-	t.Cleanup(func() {
-		daemonDispatchRunnableWork = old
-	})
 }

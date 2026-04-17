@@ -283,10 +283,11 @@ type SendMessageResult struct {
 	Suppressed bool
 }
 
-func (c *DaemonClient) SendMessage(to, message string) (*SendMessageResult, error) {
+func (c *DaemonClient) SendMessage(to, message, configPath string) (*SendMessageResult, error) {
 	resp, err := c.sendRequest(daemon.MsgSendMessage, &daemon.SendMessagePayload{
-		To:      to,
-		Message: message,
+		To:         to,
+		Message:    message,
+		ConfigPath: configPath,
 	})
 	if err != nil {
 		return nil, err
@@ -371,9 +372,10 @@ func mergeUniqueMessages(first, second []types.Message) []types.Message {
 	return merged
 }
 
-func (c *DaemonClient) BroadcastMessage(message string) ([]string, error) {
+func (c *DaemonClient) BroadcastMessage(message, configPath string) ([]string, error) {
 	resp, err := c.sendRequest(daemon.MsgBroadcast, &daemon.BroadcastPayload{
-		Message: message,
+		Message:    message,
+		ConfigPath: configPath,
 	})
 	if err != nil {
 		return nil, err

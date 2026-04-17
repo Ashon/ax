@@ -29,13 +29,13 @@ func (d *Daemon) runIdleSleepLoop(ctx context.Context) {
 }
 
 func (d *Daemon) processIdleSleep(now time.Time) {
-	d.sessionManager().stopIdle(now)
+	d.sessionMgr.stopIdle(now)
 }
 
 func (d *Daemon) shouldSleepWorkspace(registered RegisteredWorkspace, now time.Time) bool {
-	return d.sessionManager().shouldSleep(registered, now)
+	return d.sessionMgr.shouldSleep(registered, now)
 }
 
 func (d *Daemon) hasOpenAssignedTasks(assignee string) bool {
-	return d.sessionManager().hasOpenAssignedTasks(assignee)
+	return d.sessionMgr.hasOpenAssignedTasks(assignee)
 }

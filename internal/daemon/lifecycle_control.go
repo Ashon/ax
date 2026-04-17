@@ -5,13 +5,6 @@ import (
 	"strings"
 
 	"github.com/ashon/ax/internal/types"
-	"github.com/ashon/ax/internal/workspace"
-)
-
-var (
-	controlStartNamedTarget   = workspace.StartNamedTarget
-	controlStopNamedTarget    = workspace.StopNamedTarget
-	controlRestartNamedTarget = workspace.RestartNamedTarget
 )
 
 func parseLifecycleAction(value types.LifecycleAction) (types.LifecycleAction, error) {
@@ -46,7 +39,7 @@ func (d *Daemon) handleControlLifecycleEnvelope(env *Envelope, requester string)
 		return nil, err
 	}
 
-	target, err := d.sessionManager().control(configPath, targetName, action)
+	target, err := d.sessionMgr.control(configPath, targetName, action)
 	if err != nil {
 		return nil, err
 	}

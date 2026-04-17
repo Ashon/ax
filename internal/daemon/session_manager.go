@@ -7,7 +7,27 @@ import (
 	"time"
 
 	"github.com/ashon/ax/internal/types"
+	"github.com/ashon/ax/internal/workspace"
 )
+
+type dispatchRunnableFunc func(socketPath, configPath, target, sender string, fresh bool) error
+type lifecycleControlFunc func(socketPath, configPath, target string) (types.LifecycleTarget, error)
+
+type sessionManagerDeps struct {
+	socketPath    string
+	registry      *Registry
+	queue         *MessageQueue
+	taskStore     *TaskStore
+	wakeScheduler *WakeScheduler
+	logger        *log.Logger
+
+	// Injectable collaborators. nil falls back to the production
+	// workspace.* implementations.
+	dispatchRunnable dispatchRunnableFunc
+	startTarget      lifecycleControlFunc
+	stopTarget       lifecycleControlFunc
+	restartTarget    lifecycleControlFunc
+}
 
 type sessionManager struct {
 	socketPath    string
@@ -16,16 +36,37 @@ type sessionManager struct {
 	taskStore     *TaskStore
 	wakeScheduler *WakeScheduler
 	logger        *log.Logger
+
+	dispatchRunnable dispatchRunnableFunc
+	startTarget      lifecycleControlFunc
+	stopTarget       lifecycleControlFunc
+	restartTarget    lifecycleControlFunc
 }
 
-func newSessionManager(socketPath string, registry *Registry, queue *MessageQueue, taskStore *TaskStore, wakeScheduler *WakeScheduler, logger *log.Logger) *sessionManager {
+func newSessionManager(deps sessionManagerDeps) *sessionManager {
+	if deps.dispatchRunnable == nil {
+		deps.dispatchRunnable = workspace.DispatchRunnableWork
+	}
+	if deps.startTarget == nil {
+		deps.startTarget = workspace.StartNamedTarget
+	}
+	if deps.stopTarget == nil {
+		deps.stopTarget = workspace.StopNamedTarget
+	}
+	if deps.restartTarget == nil {
+		deps.restartTarget = workspace.RestartNamedTarget
+	}
 	return &sessionManager{
-		socketPath:    socketPath,
-		registry:      registry,
-		queue:         queue,
-		taskStore:     taskStore,
-		wakeScheduler: wakeScheduler,
-		logger:        logger,
+		socketPath:       deps.socketPath,
+		registry:         deps.registry,
+		queue:            deps.queue,
+		taskStore:        deps.taskStore,
+		wakeScheduler:    deps.wakeScheduler,
+		logger:           deps.logger,
+		dispatchRunnable: deps.dispatchRunnable,
+		startTarget:      deps.startTarget,
+		stopTarget:       deps.stopTarget,
+		restartTarget:    deps.restartTarget,
 	}
 }
 
@@ -37,18 +78,18 @@ func isAlwaysOnTarget(name string) bool {
 func (m *sessionManager) control(configPath, targetName string, action types.LifecycleAction) (types.LifecycleTarget, error) {
 	switch action {
 	case types.LifecycleActionStart:
-		return controlStartNamedTarget(m.socketPath, configPath, targetName)
+		return m.startTarget(m.socketPath, configPath, targetName)
 	case types.LifecycleActionStop:
-		return controlStopNamedTarget(m.socketPath, configPath, targetName)
+		return m.stopTarget(m.socketPath, configPath, targetName)
 	case types.LifecycleActionRestart:
-		return controlRestartNamedTarget(m.socketPath, configPath, targetName)
+		return m.restartTarget(m.socketPath, configPath, targetName)
 	default:
 		return types.LifecycleTarget{}, fmt.Errorf("invalid lifecycle action %q", action)
 	}
 }
 
 func (m *sessionManager) ensureRunnable(configPath, target, sender string, fresh bool) error {
-	return daemonDispatchRunnableWork(m.socketPath, configPath, target, sender, fresh)
+	return m.dispatchRunnable(m.socketPath, configPath, target, sender, fresh)
 }
 
 func (m *sessionManager) stopIdle(now time.Time) {

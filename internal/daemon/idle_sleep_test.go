@@ -10,8 +10,20 @@ import (
 	"github.com/ashon/ax/internal/types"
 )
 
+func installIdleStopStub(d *Daemon, stop lifecycleControlFunc) {
+	d.sessionMgr = newSessionManager(sessionManagerDeps{
+		socketPath:    d.socketPath,
+		registry:      d.registry,
+		queue:         d.queue,
+		taskStore:     d.taskStore,
+		wakeScheduler: d.wakeScheduler,
+		logger:        d.logger,
+		stopTarget:    stop,
+	})
+}
+
 func TestProcessIdleSleepStopsEligibleWorkspace(t *testing.T) {
-	restoreIdleSleepStubs(t)
+	restoreIdleSleepTmuxStubs(t)
 
 	stateDir := t.TempDir()
 	d := &Daemon{
@@ -35,7 +47,7 @@ func TestProcessIdleSleepStopsEligibleWorkspace(t *testing.T) {
 	idleSleepSessionIdle = func(name string) bool { return name == "worker" }
 
 	stopped := false
-	controlStopNamedTarget = func(socketPath, configPath, target string) (types.LifecycleTarget, error) {
+	installIdleStopStub(d, func(socketPath, configPath, target string) (types.LifecycleTarget, error) {
 		stopped = true
 		if socketPath != "/tmp/ax.sock" {
 			t.Fatalf("unexpected socket path %q", socketPath)
@@ -47,7 +59,7 @@ func TestProcessIdleSleepStopsEligibleWorkspace(t *testing.T) {
 			t.Fatalf("unexpected target %q", target)
 		}
 		return types.LifecycleTarget{Name: target, Kind: types.LifecycleTargetWorkspace, ManagedSession: true}, nil
-	}
+	})
 
 	d.processIdleSleep(now)
 
@@ -60,7 +72,7 @@ func TestProcessIdleSleepStopsEligibleWorkspace(t *testing.T) {
 }
 
 func TestProcessIdleSleepSkipsWorkspaceWithOpenTasks(t *testing.T) {
-	restoreIdleSleepStubs(t)
+	restoreIdleSleepTmuxStubs(t)
 
 	stateDir := t.TempDir()
 	d := &Daemon{
@@ -86,16 +98,16 @@ func TestProcessIdleSleepSkipsWorkspaceWithOpenTasks(t *testing.T) {
 
 	idleSleepSessionExists = func(name string) bool { return true }
 	idleSleepSessionIdle = func(name string) bool { return true }
-	controlStopNamedTarget = func(socketPath, configPath, target string) (types.LifecycleTarget, error) {
+	installIdleStopStub(d, func(socketPath, configPath, target string) (types.LifecycleTarget, error) {
 		t.Fatal("idle sleep should not stop a workspace with open tasks")
 		return types.LifecycleTarget{}, nil
-	}
+	})
 
 	d.processIdleSleep(now)
 }
 
 func TestProcessIdleSleepSkipsRootOrchestrator(t *testing.T) {
-	restoreIdleSleepStubs(t)
+	restoreIdleSleepTmuxStubs(t)
 
 	stateDir := t.TempDir()
 	d := &Daemon{
@@ -117,16 +129,16 @@ func TestProcessIdleSleepSkipsRootOrchestrator(t *testing.T) {
 
 	idleSleepSessionExists = func(name string) bool { return true }
 	idleSleepSessionIdle = func(name string) bool { return true }
-	controlStopNamedTarget = func(socketPath, configPath, target string) (types.LifecycleTarget, error) {
+	installIdleStopStub(d, func(socketPath, configPath, target string) (types.LifecycleTarget, error) {
 		t.Fatal("root orchestrator should not be auto-slept")
 		return types.LifecycleTarget{}, nil
-	}
+	})
 
 	d.processIdleSleep(now)
 }
 
 func TestProcessIdleSleepSkipsChildOrchestrator(t *testing.T) {
-	restoreIdleSleepStubs(t)
+	restoreIdleSleepTmuxStubs(t)
 
 	stateDir := t.TempDir()
 	d := &Daemon{
@@ -148,23 +160,21 @@ func TestProcessIdleSleepSkipsChildOrchestrator(t *testing.T) {
 
 	idleSleepSessionExists = func(name string) bool { return true }
 	idleSleepSessionIdle = func(name string) bool { return true }
-	controlStopNamedTarget = func(socketPath, configPath, target string) (types.LifecycleTarget, error) {
+	installIdleStopStub(d, func(socketPath, configPath, target string) (types.LifecycleTarget, error) {
 		t.Fatal("child orchestrator should not be auto-slept")
 		return types.LifecycleTarget{}, nil
-	}
+	})
 
 	d.processIdleSleep(now)
 }
 
-func restoreIdleSleepStubs(t *testing.T) {
+func restoreIdleSleepTmuxStubs(t *testing.T) {
 	t.Helper()
 
 	oldExists := idleSleepSessionExists
 	oldIdle := idleSleepSessionIdle
-	oldStop := controlStopNamedTarget
 	t.Cleanup(func() {
 		idleSleepSessionExists = oldExists
 		idleSleepSessionIdle = oldIdle
-		controlStopNamedTarget = oldStop
 	})
 }

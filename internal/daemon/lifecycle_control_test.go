@@ -9,17 +9,17 @@ import (
 	"github.com/ashon/ax/internal/types"
 )
 
-func restoreLifecycleControlStubs(t *testing.T) {
-	t.Helper()
-
-	oldStart := controlStartNamedTarget
-	oldStop := controlStopNamedTarget
-	oldRestart := controlRestartNamedTarget
-
-	t.Cleanup(func() {
-		controlStartNamedTarget = oldStart
-		controlStopNamedTarget = oldStop
-		controlRestartNamedTarget = oldRestart
+func installLifecycleStubs(d *Daemon, start, stop, restart lifecycleControlFunc) {
+	d.sessionMgr = newSessionManager(sessionManagerDeps{
+		socketPath:    d.socketPath,
+		registry:      d.registry,
+		queue:         d.queue,
+		taskStore:     d.taskStore,
+		wakeScheduler: d.wakeScheduler,
+		logger:        d.logger,
+		startTarget:   start,
+		stopTarget:    stop,
+		restartTarget: restart,
 	})
 }
 
@@ -41,24 +41,26 @@ func decodeLifecycleControlResponse(t *testing.T, env *Envelope) ControlLifecycl
 }
 
 func TestHandleEnvelopeRoutesControlLifecycleStart(t *testing.T) {
-	restoreLifecycleControlStubs(t)
-
-	var gotSocketPath, gotConfigPath, gotName string
-	controlStartNamedTarget = func(socketPath, configPath, target string) (types.LifecycleTarget, error) {
-		gotSocketPath = socketPath
-		gotConfigPath = configPath
-		gotName = target
-		return types.LifecycleTarget{
-			Name:           target,
-			Kind:           types.LifecycleTargetWorkspace,
-			ManagedSession: true,
-		}, nil
-	}
-
 	d := &Daemon{
 		socketPath: "/tmp/daemon.sock",
 		logger:     log.New(io.Discard, "", 0),
 	}
+
+	var gotSocketPath, gotConfigPath, gotName string
+	installLifecycleStubs(d,
+		func(socketPath, configPath, target string) (types.LifecycleTarget, error) {
+			gotSocketPath = socketPath
+			gotConfigPath = configPath
+			gotName = target
+			return types.LifecycleTarget{
+				Name:           target,
+				Kind:           types.LifecycleTargetWorkspace,
+				ManagedSession: true,
+			}, nil
+		},
+		nil, nil,
+	)
+
 	requester := "ax.orchestrator"
 	env, err := NewEnvelope("ctl-1", MsgControlLifecycle, &ControlLifecyclePayload{
 		ConfigPath: "/tmp/project/.ax/config.yaml",
@@ -91,8 +93,6 @@ func TestHandleEnvelopeRoutesControlLifecycleStart(t *testing.T) {
 }
 
 func TestHandleControlLifecycleRequiresRegistration(t *testing.T) {
-	restoreLifecycleControlStubs(t)
-
 	d := &Daemon{socketPath: "/tmp/daemon.sock"}
 	requester := ""
 	env, err := NewEnvelope("ctl-2", MsgControlLifecycle, &ControlLifecyclePayload{
@@ -110,8 +110,6 @@ func TestHandleControlLifecycleRequiresRegistration(t *testing.T) {
 }
 
 func TestHandleControlLifecycleRequiresConfigPath(t *testing.T) {
-	restoreLifecycleControlStubs(t)
-
 	d := &Daemon{socketPath: "/tmp/daemon.sock"}
 	requester := "ax.orchestrator"
 	env, err := NewEnvelope("ctl-3", MsgControlLifecycle, &ControlLifecyclePayload{
@@ -128,8 +126,6 @@ func TestHandleControlLifecycleRequiresConfigPath(t *testing.T) {
 }
 
 func TestHandleControlLifecycleRejectsInvalidAction(t *testing.T) {
-	restoreLifecycleControlStubs(t)
-
 	d := &Daemon{socketPath: "/tmp/daemon.sock"}
 	requester := "ax.orchestrator"
 	env, err := NewEnvelope("ctl-4", MsgControlLifecycle, &ControlLifecyclePayload{
@@ -147,13 +143,15 @@ func TestHandleControlLifecycleRejectsInvalidAction(t *testing.T) {
 }
 
 func TestHandleControlLifecyclePropagatesLifecycleErrors(t *testing.T) {
-	restoreLifecycleControlStubs(t)
-
-	controlStopNamedTarget = func(socketPath, configPath, target string) (types.LifecycleTarget, error) {
-		return types.LifecycleTarget{}, assertErr(`orchestrator "orchestrator" does not support targeted stop because it is not a managed session`)
-	}
-
 	d := &Daemon{socketPath: "/tmp/daemon.sock"}
+	installLifecycleStubs(d,
+		nil,
+		func(socketPath, configPath, target string) (types.LifecycleTarget, error) {
+			return types.LifecycleTarget{}, assertErr(`orchestrator "orchestrator" does not support targeted stop because it is not a managed session`)
+		},
+		nil,
+	)
+
 	requester := "ax.orchestrator"
 	env, err := NewEnvelope("ctl-5", MsgControlLifecycle, &ControlLifecyclePayload{
 		ConfigPath: "/tmp/project/.ax/config.yaml",

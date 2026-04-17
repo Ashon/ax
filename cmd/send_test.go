@@ -7,12 +7,13 @@ import (
 )
 
 type stubSendClient struct {
-	connected bool
-	closed    bool
-	sendTo    string
-	sendMsg   string
-	result    *mcpserver.SendMessageResult
-	err       error
+	connected   bool
+	closed      bool
+	sendTo      string
+	sendMsg     string
+	sendConfig  string
+	result      *mcpserver.SendMessageResult
+	err         error
 }
 
 func (c *stubSendClient) Connect() error {
@@ -25,9 +26,10 @@ func (c *stubSendClient) Close() error {
 	return nil
 }
 
-func (c *stubSendClient) SendMessage(to, message string) (*mcpserver.SendMessageResult, error) {
+func (c *stubSendClient) SendMessage(to, message, configPath string) (*mcpserver.SendMessageResult, error) {
 	c.sendTo = to
 	c.sendMsg = message
+	c.sendConfig = configPath
 	return c.result, c.err
 }
 
@@ -35,12 +37,10 @@ func TestSendCommandDispatchesQueuedWorkOnDemand(t *testing.T) {
 	oldSocketPath := socketPath
 	oldSendNewClient := sendNewClient
 	oldSendResolveConfigPath := sendResolveConfigPath
-	oldSendDispatchRunnableWork := sendDispatchRunnableWork
 	t.Cleanup(func() {
 		socketPath = oldSocketPath
 		sendNewClient = oldSendNewClient
 		sendResolveConfigPath = oldSendResolveConfigPath
-		sendDispatchRunnableWork = oldSendDispatchRunnableWork
 	})
 
 	socketPath = "/tmp/ax.sock"
@@ -61,26 +61,6 @@ func TestSendCommandDispatchesQueuedWorkOnDemand(t *testing.T) {
 	sendResolveConfigPath = func() (string, error) {
 		return "/tmp/test-config.yaml", nil
 	}
-	dispatched := false
-	sendDispatchRunnableWork = func(socketPath, configPath, target, sender string, fresh bool) error {
-		dispatched = true
-		if socketPath != "/tmp/ax.sock" {
-			t.Fatalf("unexpected dispatch socket path %q", socketPath)
-		}
-		if configPath != "/tmp/test-config.yaml" {
-			t.Fatalf("unexpected dispatch config path %q", configPath)
-		}
-		if target != "worker" {
-			t.Fatalf("unexpected dispatch target %q", target)
-		}
-		if sender != "orchestrator" {
-			t.Fatalf("unexpected dispatch sender %q", sender)
-		}
-		if fresh {
-			t.Fatal("send command should not request fresh dispatch")
-		}
-		return nil
-	}
 
 	if err := sendCmd.RunE(sendCmd, []string{"worker", "hello", "world"}); err != nil {
 		t.Fatalf("send command failed: %v", err)
@@ -95,7 +75,7 @@ func TestSendCommandDispatchesQueuedWorkOnDemand(t *testing.T) {
 	if client.sendTo != "worker" || client.sendMsg != "hello world" {
 		t.Fatalf("unexpected send payload: to=%q message=%q", client.sendTo, client.sendMsg)
 	}
-	if !dispatched {
-		t.Fatal("expected queued work to be dispatched")
+	if client.sendConfig != "/tmp/test-config.yaml" {
+		t.Fatalf("expected send to carry dispatch config path, got %q", client.sendConfig)
 	}
 }

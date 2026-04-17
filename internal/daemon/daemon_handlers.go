@@ -9,10 +9,7 @@ import (
 	"github.com/ashon/ax/internal/tmux"
 	"github.com/ashon/ax/internal/types"
 	"github.com/ashon/ax/internal/usage"
-	"github.com/ashon/ax/internal/workspace"
 )
-
-var daemonDispatchRunnableWork = workspace.DispatchRunnableWork
 
 func requireRegisteredWorkspace(workspace string) error {
 	if workspace == "" {
@@ -96,10 +93,29 @@ func (d *Daemon) handleSendMessageEnvelope(env *Envelope, workspace string) (*En
 	}
 	d.refreshTaskSnapshots()
 
+	if strings.TrimSpace(p.ConfigPath) != "" {
+		fresh := d.freshTaskStartForMessage(p.To, workspace, p.Message)
+		if err := d.sessionMgr.ensureRunnable(p.ConfigPath, p.To, workspace, fresh); err != nil {
+			return nil, fmt.Errorf("dispatch %s -> %s: %w", workspace, p.To, err)
+		}
+	}
+
 	return NewResponseEnvelope(env.ID, map[string]string{
 		"message_id": msg.ID,
 		"status":     "sent",
 	})
+}
+
+func (d *Daemon) freshTaskStartForMessage(target, sender, message string) bool {
+	taskID := extractTaskID(message)
+	if taskID == "" {
+		return false
+	}
+	task, ok := d.taskStore.Get(taskID)
+	if !ok {
+		return false
+	}
+	return task.Assignee == target && task.CreatedBy == sender && task.StartMode == types.TaskStartFresh
 }
 
 func (d *Daemon) handleBroadcastEnvelope(env *Envelope, workspace string) (*Envelope, error) {
@@ -137,6 +153,15 @@ func (d *Daemon) handleBroadcastEnvelope(env *Envelope, workspace string) (*Enve
 
 	d.registry.Touch(workspace)
 	d.refreshTaskSnapshots()
+
+	if strings.TrimSpace(p.ConfigPath) != "" {
+		for _, recipient := range recipients {
+			if err := d.sessionMgr.ensureRunnable(p.ConfigPath, recipient, workspace, false); err != nil {
+				return nil, fmt.Errorf("broadcast dispatch %s -> %s: %w", workspace, recipient, err)
+			}
+		}
+	}
+
 	return NewResponseEnvelope(env.ID, map[string]interface{}{
 		"recipients": recipients,
 		"count":      len(recipients),
@@ -442,11 +467,17 @@ func (d *Daemon) handleInterveneTaskEnvelope(env *Envelope, workspace string) (*
 
 	switch p.Action {
 	case "wake":
-		if !tmux.SessionExists(task.Assignee) {
-			return nil, fmt.Errorf("workspace %q is not running", task.Assignee)
-		}
-		if err := tmux.WakeWorkspace(task.Assignee, WakePrompt(workspace, false)); err != nil {
-			return nil, err
+		if strings.TrimSpace(task.DispatchConfigPath) != "" {
+			if err := d.sessionMgr.ensureRunnable(task.DispatchConfigPath, task.Assignee, workspace, false); err != nil {
+				return nil, fmt.Errorf("wake task %s: %w", task.ID, err)
+			}
+		} else {
+			if !tmux.SessionExists(task.Assignee) {
+				return nil, fmt.Errorf("workspace %q is not running", task.Assignee)
+			}
+			if err := tmux.WakeWorkspace(task.Assignee, WakePrompt(workspace, false)); err != nil {
+				return nil, err
+			}
 		}
 		resp.Status = "woken"
 	case "interrupt":
@@ -472,7 +503,7 @@ func (d *Daemon) handleInterveneTaskEnvelope(env *Envelope, workspace string) (*
 		}
 		d.wakeScheduler.Schedule(task.Assignee, workspace)
 		if strings.TrimSpace(retried.DispatchConfigPath) != "" {
-			if err := d.sessionManager().ensureRunnable(retried.DispatchConfigPath, task.Assignee, workspace, false); err != nil {
+			if err := d.sessionMgr.ensureRunnable(retried.DispatchConfigPath, task.Assignee, workspace, false); err != nil {
 				return nil, fmt.Errorf("retry dispatch task %s: %w", task.ID, err)
 			}
 		}
@@ -641,7 +672,7 @@ func (d *Daemon) dispatchTaskStart(task types.Task) (TaskDispatch, error) {
 	if strings.TrimSpace(task.DispatchConfigPath) == "" {
 		return dispatch, nil
 	}
-	if err := d.sessionManager().ensureRunnable(task.DispatchConfigPath, task.Assignee, task.CreatedBy, task.StartMode == types.TaskStartFresh); err != nil {
+	if err := d.sessionMgr.ensureRunnable(task.DispatchConfigPath, task.Assignee, task.CreatedBy, task.StartMode == types.TaskStartFresh); err != nil {
 		return dispatch, fmt.Errorf("dispatch task %s: %w", task.ID, err)
 	}
 	return dispatch, nil

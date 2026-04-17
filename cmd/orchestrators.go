@@ -125,7 +125,7 @@ func refreshOrchestratorTree(newChildName string) error {
 				"New sub-project `%s` registered. Run list_agents/list_workspaces to see its workspaces and sub-orchestrator.",
 				newChildName,
 			)
-			_, _ = client.SendMessage(rootName, msg)
+			_, _ = client.SendMessage(rootName, msg, "")
 		}
 	}
 	return nil
