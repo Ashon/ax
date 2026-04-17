@@ -1,6 +1,7 @@
 package mcpserver
 
 import (
+	"github.com/ashon/ax/internal/types"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -30,7 +31,7 @@ func registerAgentTools(srv *server.MCPServer, client *DaemonClient, configPath 
 			mcp.WithDescription("Start a configured workspace agent or managed child orchestrator by exact name. Root orchestrator lifecycle is not supported by this MCP surface."),
 			mcp.WithString("name", mcp.Required(), mcp.Description("Exact configured workspace or managed child orchestrator name")),
 		),
-		agentLifecycleHandler(client, configPath, agentLifecycleActionStart),
+		agentLifecycleHandler(client, configPath, types.LifecycleActionStart),
 	)
 
 	srv.AddTool(
@@ -38,7 +39,7 @@ func registerAgentTools(srv *server.MCPServer, client *DaemonClient, configPath 
 			mcp.WithDescription("Stop a configured workspace agent or managed child orchestrator by exact name. This removes the managed session and cleans generated artifacts for that target."),
 			mcp.WithString("name", mcp.Required(), mcp.Description("Exact configured workspace or managed child orchestrator name")),
 		),
-		agentLifecycleHandler(client, configPath, agentLifecycleActionStop),
+		agentLifecycleHandler(client, configPath, types.LifecycleActionStop),
 	)
 
 	srv.AddTool(
@@ -46,6 +47,6 @@ func registerAgentTools(srv *server.MCPServer, client *DaemonClient, configPath 
 			mcp.WithDescription("Restart a configured workspace agent or managed child orchestrator by exact name from a fresh managed session. Root orchestrator lifecycle is not supported by this MCP surface."),
 			mcp.WithString("name", mcp.Required(), mcp.Description("Exact configured workspace or managed child orchestrator name")),
 		),
-		agentLifecycleHandler(client, configPath, agentLifecycleActionRestart),
+		agentLifecycleHandler(client, configPath, types.LifecycleActionRestart),
 	)
 }

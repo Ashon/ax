@@ -413,6 +413,22 @@ func (c *DaemonClient) SetStatus(status string) error {
 	return err
 }
 
+func (c *DaemonClient) AgentLifecycle(configPath, name string, action types.LifecycleAction) (*daemon.AgentLifecycleResponse, error) {
+	resp, err := c.sendRequest(daemon.MsgAgentLifecycle, &daemon.AgentLifecyclePayload{
+		ConfigPath: configPath,
+		Name:       name,
+		Action:     action,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var result daemon.AgentLifecycleResponse
+	if err := decodeResponseData(resp, &result); err != nil {
+		return nil, fmt.Errorf("decode agent_lifecycle response: %w", err)
+	}
+	return &result, nil
+}
+
 func (c *DaemonClient) ControlLifecycle(configPath, name string, action types.LifecycleAction) (*daemon.ControlLifecycleResponse, error) {
 	resp, err := c.sendRequest(daemon.MsgControlLifecycle, &daemon.ControlLifecyclePayload{
 		ConfigPath: configPath,

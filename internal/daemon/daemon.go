@@ -43,6 +43,7 @@ type Daemon struct {
 	teamController *teamController
 	wakeScheduler *WakeScheduler
 	sessionMgr    *sessionManager
+	agentOps      *agentLifecycleOps
 	listener      net.Listener
 	logger        *log.Logger
 }
@@ -100,6 +101,7 @@ func New(socketPath string) *Daemon {
 		wakeScheduler: d.wakeScheduler,
 		logger:        d.logger,
 	})
+	d.agentOps = defaultAgentLifecycleOps()
 	d.wakeScheduler.SetQueueRefiller(d.recoverRunnableTaskMessages)
 	d.wakeScheduler.SetMissingSessionEnsurer(d.sessionMgr.ensurePendingWakeTarget)
 	d.wakeScheduler.SetRetryAfterSuccessfulWake(func(workspace string) bool {
@@ -239,6 +241,9 @@ func (d *Daemon) handleEnvelope(conn net.Conn, env *Envelope, workspace *string)
 
 	case MsgControlLifecycle:
 		return d.handleControlLifecycleEnvelope(env, *workspace)
+
+	case MsgAgentLifecycle:
+		return d.handleAgentLifecycleEnvelope(env, *workspace)
 
 	case MsgSetShared:
 		return d.handleSetSharedEnvelope(env)

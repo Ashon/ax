@@ -14,7 +14,6 @@ import (
 	"github.com/ashon/ax/internal/daemon"
 	"github.com/ashon/ax/internal/tmux"
 	"github.com/ashon/ax/internal/types"
-	"github.com/ashon/ax/internal/workspace"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -55,49 +54,7 @@ const (
 	agentStateRunning = "running"
 )
 
-type agentLifecycleAction string
-
-const (
-	agentLifecycleActionStart   agentLifecycleAction = "start"
-	agentLifecycleActionStop    agentLifecycleAction = "stop"
-	agentLifecycleActionRestart agentLifecycleAction = "restart"
-)
-
-type agentLifecycleTarget struct {
-	Name           string
-	Kind           string
-	ManagedSession bool
-	Workspace      *config.Workspace
-	Orchestrator   *workspace.DesiredOrchestrator
-	Limit          string
-}
-
-type agentLifecycleResult struct {
-	Name                string `json:"name"`
-	Action              string `json:"action"`
-	TargetKind          string `json:"target_kind"`
-	ManagedSession      bool   `json:"managed_session"`
-	ExactMatch          bool   `json:"exact_match"`
-	Status              string `json:"status"`
-	SessionExistsBefore bool   `json:"session_exists_before"`
-	SessionExistsAfter  bool   `json:"session_exists_after"`
-}
-
-type lifecycleWorkspaceManager interface {
-	Create(name string, ws config.Workspace) error
-	Restart(name string, ws config.Workspace) error
-	Destroy(name, dir string) error
-}
-
-var (
-	workspaceIsIdle              = tmux.IsIdle
-	lifecycleSessionExists       = tmux.SessionExists
-	newLifecycleWorkspaceManager = func(socketPath, configPath string) lifecycleWorkspaceManager {
-		return workspace.NewManager(socketPath, configPath)
-	}
-	ensureLifecycleOrchestrator       = workspace.EnsureOrchestrator
-	cleanupLifecycleOrchestratorState = workspace.CleanupOrchestratorState
-)
+var workspaceIsIdle = tmux.IsIdle
 
 type workspaceListResult struct {
 	Workspace  string                `json:"workspace"`
@@ -257,19 +214,19 @@ func inspectAgentHandler(client *DaemonClient, configPath string) server.ToolHan
 	}
 }
 
-func agentLifecycleHandler(client *DaemonClient, configPath string, action agentLifecycleAction) server.ToolHandlerFunc {
+func agentLifecycleHandler(client *DaemonClient, configPath string, action types.LifecycleAction) server.ToolHandlerFunc {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		name, err := request.RequireString("name")
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
 
-		target, resolvedConfigPath, err := resolveAgentLifecycleTarget(client, configPath, name)
+		resolvedConfigPath, err := resolveToolConfigPath(client, configPath)
 		if err != nil {
-			return mcp.NewToolResultError(err.Error()), nil
+			return mcp.NewToolResultError(fmt.Sprintf("resolve config path: %v", err)), nil
 		}
 
-		result, err := applyAgentLifecycleAction(client.socketPath, resolvedConfigPath, target, action)
+		result, err := client.AgentLifecycle(resolvedConfigPath, name, action)
 		if err != nil {
 			return mcp.NewToolResultError(err.Error()), nil
 		}
@@ -277,154 +234,6 @@ func agentLifecycleHandler(client *DaemonClient, configPath string, action agent
 		data, _ := json.MarshalIndent(result, "", "  ")
 		return mcp.NewToolResultText(string(data)), nil
 	}
-}
-
-func resolveAgentLifecycleTarget(client *DaemonClient, configPath, name string) (agentLifecycleTarget, string, error) {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return agentLifecycleTarget{}, "", fmt.Errorf("name is required")
-	}
-
-	cfgPath, cfg, err := loadToolConfig(client, configPath)
-	if err != nil {
-		return agentLifecycleTarget{}, "", fmt.Errorf("load ax config: %w", err)
-	}
-
-	tree, err := config.LoadTree(cfgPath)
-	if err != nil {
-		return agentLifecycleTarget{}, "", fmt.Errorf("load config tree: %w", err)
-	}
-	includeRoot := tree == nil || !tree.DisableRootOrchestrator
-	desired, err := workspace.BuildDesiredState(cfg, tree, client.socketPath, cfgPath, includeRoot)
-	if err != nil {
-		return agentLifecycleTarget{}, "", fmt.Errorf("build desired state: %w", err)
-	}
-
-	if entry, ok := desired.Workspaces[name]; ok {
-		ws := entry.Workspace
-		return agentLifecycleTarget{
-			Name:           name,
-			Kind:           "workspace",
-			ManagedSession: true,
-			Workspace:      &ws,
-		}, cfgPath, nil
-	}
-
-	if entry, ok := desired.Orchestrators[name]; ok {
-		target := agentLifecycleTarget{
-			Name:           name,
-			Kind:           "orchestrator",
-			ManagedSession: entry.ManagedSession,
-			Orchestrator:   &entry,
-		}
-		if entry.Root || !entry.ManagedSession {
-			target.Limit = "root orchestrator lifecycle is not supported here because it is not a daemon-managed session"
-		}
-		return target, cfgPath, nil
-	}
-
-	return agentLifecycleTarget{}, cfgPath, fmt.Errorf("Agent %q is not defined exactly in %s; use list_agents for exact configured names", name, cfgPath)
-}
-
-func applyAgentLifecycleAction(socketPath, configPath string, target agentLifecycleTarget, action agentLifecycleAction) (*agentLifecycleResult, error) {
-	if strings.TrimSpace(target.Limit) != "" {
-		return nil, fmt.Errorf("Agent %q does not support %s: %s", target.Name, action, target.Limit)
-	}
-
-	existedBefore := lifecycleSessionExists(target.Name)
-	result := &agentLifecycleResult{
-		Name:                target.Name,
-		Action:              string(action),
-		TargetKind:          target.Kind,
-		ManagedSession:      target.ManagedSession,
-		ExactMatch:          true,
-		SessionExistsBefore: existedBefore,
-	}
-
-	switch target.Kind {
-	case "workspace":
-		if target.Workspace == nil {
-			return nil, fmt.Errorf("workspace target %q is missing configuration", target.Name)
-		}
-		manager := newLifecycleWorkspaceManager(socketPath, configPath)
-		switch action {
-		case agentLifecycleActionStart:
-			if existedBefore {
-				result.Status = "already_running"
-				break
-			}
-			if err := manager.Create(target.Name, *target.Workspace); err != nil {
-				return nil, fmt.Errorf("start workspace %q: %w", target.Name, err)
-			}
-			result.Status = "started"
-		case agentLifecycleActionStop:
-			if err := manager.Destroy(target.Name, target.Workspace.Dir); err != nil {
-				return nil, fmt.Errorf("stop workspace %q: %w", target.Name, err)
-			}
-			if existedBefore {
-				result.Status = "stopped"
-			} else {
-				result.Status = "already_stopped"
-			}
-		case agentLifecycleActionRestart:
-			if err := manager.Restart(target.Name, *target.Workspace); err != nil {
-				return nil, fmt.Errorf("restart workspace %q: %w", target.Name, err)
-			}
-			result.Status = "restarted"
-		default:
-			return nil, fmt.Errorf("unsupported lifecycle action %q", action)
-		}
-	case "orchestrator":
-		if target.Orchestrator == nil || target.Orchestrator.Node == nil {
-			return nil, fmt.Errorf("orchestrator target %q is missing project metadata", target.Name)
-		}
-		switch action {
-		case agentLifecycleActionStart:
-			if existedBefore {
-				result.Status = "already_running"
-				break
-			}
-			if err := ensureLifecycleOrchestrator(target.Orchestrator.Node, target.Orchestrator.ParentName, socketPath, configPath, true); err != nil {
-				return nil, fmt.Errorf("start orchestrator %q: %w", target.Name, err)
-			}
-			result.Status = "started"
-		case agentLifecycleActionStop:
-			if err := cleanupLifecycleOrchestratorState(target.Name, target.Orchestrator.ArtifactDir); err != nil {
-				return nil, fmt.Errorf("stop orchestrator %q: %w", target.Name, err)
-			}
-			if existedBefore {
-				result.Status = "stopped"
-			} else {
-				result.Status = "already_stopped"
-			}
-		case agentLifecycleActionRestart:
-			if err := cleanupLifecycleOrchestratorState(target.Name, target.Orchestrator.ArtifactDir); err != nil {
-				return nil, fmt.Errorf("restart orchestrator %q: %w", target.Name, err)
-			}
-			if err := ensureLifecycleOrchestrator(target.Orchestrator.Node, target.Orchestrator.ParentName, socketPath, configPath, true); err != nil {
-				return nil, fmt.Errorf("restart orchestrator %q: %w", target.Name, err)
-			}
-			result.Status = "restarted"
-		default:
-			return nil, fmt.Errorf("unsupported lifecycle action %q", action)
-		}
-	default:
-		return nil, fmt.Errorf("unsupported lifecycle target kind %q", target.Kind)
-	}
-
-	result.SessionExistsAfter = lifecycleSessionExists(target.Name)
-	switch action {
-	case agentLifecycleActionStart, agentLifecycleActionRestart:
-		if !result.SessionExistsAfter {
-			return nil, fmt.Errorf("%s %q completed without leaving a running session", action, target.Name)
-		}
-	case agentLifecycleActionStop:
-		if result.SessionExistsAfter {
-			return nil, fmt.Errorf("stop %q completed but the session is still running", target.Name)
-		}
-	}
-
-	return result, nil
 }
 
 func resolveToolConfigPath(client *DaemonClient, configPath string) (string, error) {

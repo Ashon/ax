@@ -19,6 +19,7 @@ const (
 	MsgListWorkspaces   MessageType = "list_workspaces"
 	MsgSetStatus        MessageType = "set_status"
 	MsgControlLifecycle MessageType = "control_lifecycle"
+	MsgAgentLifecycle   MessageType = "agent_lifecycle"
 	MsgSetShared        MessageType = "set_shared"
 	MsgGetShared        MessageType = "get_shared"
 	MsgListShared       MessageType = "list_shared"
@@ -84,6 +85,23 @@ type ControlLifecyclePayload struct {
 	ConfigPath string                `json:"config_path,omitempty"`
 	Name       string                `json:"name"`
 	Action     types.LifecycleAction `json:"action"`
+}
+
+type AgentLifecyclePayload struct {
+	ConfigPath string                `json:"config_path,omitempty"`
+	Name       string                `json:"name"`
+	Action     types.LifecycleAction `json:"action"`
+}
+
+type AgentLifecycleResponse struct {
+	Name                string `json:"name"`
+	Action              string `json:"action"`
+	TargetKind          string `json:"target_kind"`
+	ManagedSession      bool   `json:"managed_session"`
+	ExactMatch          bool   `json:"exact_match"`
+	Status              string `json:"status"`
+	SessionExistsBefore bool   `json:"session_exists_before"`
+	SessionExistsAfter  bool   `json:"session_exists_after"`
 }
 
 type SetSharedPayload struct {
