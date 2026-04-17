@@ -11,14 +11,21 @@
 
 #![forbid(unsafe_code)]
 
+mod dispatch;
 mod instructions;
+mod lifecycle;
 mod manager;
 mod mcp_config;
 mod orchestrator;
 mod orchestrator_prompt;
 mod reconcile;
 
+pub use dispatch::{
+    dispatch_runnable_work, dispatch_runnable_work_with_options, ensure_dispatch_target,
+    load_dispatch_desired_state, DispatchBackend, DispatchError, DispatchOptions,
+};
 pub use instructions::{remove_instructions, write_instructions, InstructionsError};
+pub use lifecycle::{restart_named_target, start_named_target, stop_named_target, LifecycleError};
 pub use manager::{
     cleanup_workspace_artifacts, cleanup_workspace_state, ensure_artifacts, managed_run_agent_args,
     Manager, RealTmux, TmuxBackend, WorkspaceError,
