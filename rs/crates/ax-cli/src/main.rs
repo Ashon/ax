@@ -6,6 +6,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitCode, Stdio};
 
+use ax_agent::{run_with_options, LaunchOptions};
 use ax_config::find_config_file;
 use ax_daemon::{expand_socket_path, DEFAULT_SOCKET_PATH};
 use ax_workspace::{
@@ -25,8 +26,8 @@ Notes:
   --config defaults to the discovered ax config (.ax/config.yaml or ax.yaml)
   --socket defaults to ~/.local/state/ax/daemon.sock
   --ax-bin defaults to the current ax-rs executable
-  ax-rs run-agent / mcp-server are compatibility pass-throughs to the Go ax binary
-  Set AX_GO_BINARY=/path/to/ax to override the delegated Go binary (default: ax)
+  ax-rs run-agent is handled natively; mcp-server is still delegated to Go ax
+  Set AX_GO_BINARY=/path/to/ax to override the delegated Go binary for mcp-server (default: ax)
 ";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +52,14 @@ enum ParsedCommand {
         target: String,
         options: CommonOptions,
     },
+    RunAgent {
+        runtime: String,
+        workspace: String,
+        socket_path: PathBuf,
+        config_path: Option<PathBuf>,
+        fresh: bool,
+        extra_args: Vec<String>,
+    },
     Dispatch {
         target: String,
         sender: String,
@@ -67,6 +76,7 @@ enum CliError {
     Usage(String),
     Lifecycle(ax_workspace::LifecycleError),
     Dispatch(ax_workspace::DispatchError),
+    RunAgent(ax_agent::LaunchError),
     DelegateLaunch {
         binary: String,
         source: std::io::Error,
@@ -82,6 +92,7 @@ impl fmt::Display for CliError {
             Self::Usage(message) => f.write_str(message),
             Self::Lifecycle(source) => write!(f, "{source}"),
             Self::Dispatch(source) => write!(f, "{source}"),
+            Self::RunAgent(source) => write!(f, "{source}"),
             Self::DelegateLaunch { binary, source } => {
                 write!(f, "launch delegated ax binary {binary:?}: {source}")
             }
@@ -101,6 +112,12 @@ impl From<ax_workspace::LifecycleError> for CliError {
 impl From<ax_workspace::DispatchError> for CliError {
     fn from(source: ax_workspace::DispatchError) -> Self {
         Self::Dispatch(source)
+    }
+}
+
+impl From<ax_agent::LaunchError> for CliError {
+    fn from(source: ax_agent::LaunchError) -> Self {
+        Self::RunAgent(source)
     }
 }
 
@@ -197,6 +214,27 @@ where
             println!("dispatched {:?} from {:?}", target, sender);
             Ok(ExitCode::SUCCESS)
         }
+        ParsedCommand::RunAgent {
+            runtime,
+            workspace,
+            socket_path,
+            config_path,
+            fresh,
+            extra_args,
+        } => {
+            let status = run_with_options(
+                &runtime,
+                &workspace,
+                &socket_path,
+                current_exe,
+                config_path.as_deref(),
+                &LaunchOptions {
+                    extra_args,
+                    fresh_start: fresh,
+                },
+            )?;
+            Ok(ExitCode::from(status.code().unwrap_or(1) as u8))
+        }
         ParsedCommand::Delegate { argv } => delegate_to_go_ax(&argv, current_exe),
     }
 }
@@ -217,7 +255,10 @@ where
     if matches!(command.as_str(), "-h" | "--help" | "help") {
         return Ok(ParsedCommand::Help);
     }
-    if matches!(command.as_str(), "run-agent" | "mcp-server") {
+    if command == "run-agent" {
+        return parse_run_agent_args(&argv, cwd);
+    }
+    if command == "mcp-server" {
         return Ok(ParsedCommand::Delegate { argv });
     }
 
@@ -313,6 +354,71 @@ where
             options,
         }),
     }
+}
+
+fn parse_run_agent_args(argv: &[OsString], cwd: &Path) -> Result<ParsedCommand, CliError> {
+    let mut runtime = "claude".to_owned();
+    let mut workspace: Option<String> = None;
+    let mut socket_path = expand_socket_path(DEFAULT_SOCKET_PATH);
+    let mut config_path: Option<PathBuf> = None;
+    let mut fresh = false;
+    let mut extra_args = Vec::new();
+
+    let mut i = 1;
+    while i < argv.len() {
+        let arg = &argv[i];
+        match arg.to_string_lossy().as_ref() {
+            "-h" | "--help" => return Ok(ParsedCommand::Help),
+            "--" => {
+                extra_args.extend(
+                    argv.iter()
+                        .skip(i + 1)
+                        .map(|value| value.to_string_lossy().into_owned()),
+                );
+                break;
+            }
+            "--runtime" => {
+                i += 1;
+                runtime = parse_string_arg(argv.get(i), "--runtime")?;
+            }
+            "--workspace" => {
+                i += 1;
+                workspace = Some(parse_string_arg(argv.get(i), "--workspace")?);
+            }
+            "--socket" => {
+                i += 1;
+                socket_path = parse_socket_path(argv.get(i), "--socket")?;
+            }
+            "--config" => {
+                i += 1;
+                config_path = Some(parse_path_arg(argv.get(i), "--config", cwd)?);
+            }
+            "--fresh" => {
+                fresh = true;
+            }
+            other if other.starts_with('-') => {
+                return Err(CliError::Usage(format!(
+                    "unknown flag {other:?}\n\n{USAGE}"
+                )));
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unexpected extra argument {other:?}; use `--` before runtime args\n\n{USAGE}"
+                )));
+            }
+        }
+        i += 1;
+    }
+
+    Ok(ParsedCommand::RunAgent {
+        runtime,
+        workspace: workspace
+            .ok_or_else(|| CliError::Usage(format!("--workspace is required\n\n{USAGE}")))?,
+        socket_path,
+        config_path,
+        fresh,
+        extra_args,
+    })
 }
 
 fn parse_string_arg(value: Option<&OsString>, flag: &str) -> Result<String, CliError> {
@@ -506,6 +612,11 @@ mod tests {
                 "run-agent".into(),
                 "--runtime".into(),
                 "claude".into(),
+                "--workspace".into(),
+                "worker".into(),
+                "--".into(),
+                "--model".into(),
+                "gpt-5.4".into(),
             ],
             Path::new("/missing"),
             Path::new("/tmp/ax-rs"),
@@ -514,8 +625,13 @@ mod tests {
 
         assert_eq!(
             parsed,
-            ParsedCommand::Delegate {
-                argv: vec!["run-agent".into(), "--runtime".into(), "claude".into()],
+            ParsedCommand::RunAgent {
+                runtime: "claude".to_owned(),
+                workspace: "worker".to_owned(),
+                socket_path: expand_socket_path(DEFAULT_SOCKET_PATH),
+                config_path: None,
+                fresh: false,
+                extra_args: vec!["--model".to_owned(), "gpt-5.4".to_owned()],
             }
         );
     }
@@ -538,5 +654,42 @@ mod tests {
                 format!("dispatch requires --sender\n\n{USAGE}")
             );
         });
+    }
+
+    #[test]
+    fn run_agent_parses_flags_and_extra_args() {
+        let parsed = parse_args(
+            vec![
+                "ax-rs".into(),
+                "run-agent".into(),
+                "--runtime".into(),
+                "codex".into(),
+                "--workspace".into(),
+                "worker".into(),
+                "--socket".into(),
+                "~/daemon.sock".into(),
+                "--config".into(),
+                "ax.yaml".into(),
+                "--fresh".into(),
+                "--".into(),
+                "--model".into(),
+                "gpt-5.4".into(),
+            ],
+            Path::new("/repo"),
+            Path::new("/tmp/ax-rs"),
+        )
+        .expect("parse");
+
+        assert_eq!(
+            parsed,
+            ParsedCommand::RunAgent {
+                runtime: "codex".to_owned(),
+                workspace: "worker".to_owned(),
+                socket_path: expand_socket_path("~/daemon.sock"),
+                config_path: Some(PathBuf::from("/repo").join("ax.yaml")),
+                fresh: true,
+                extra_args: vec!["--model".to_owned(), "gpt-5.4".to_owned()],
+            }
+        );
     }
 }

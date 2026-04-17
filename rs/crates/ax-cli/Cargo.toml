@@ -15,6 +15,7 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+ax-agent = { path = "../ax-agent" }
 ax-config = { path = "../ax-config" }
 ax-daemon = { path = "../ax-daemon" }
 ax-workspace = { path = "../ax-workspace" }

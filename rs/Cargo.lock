@@ -38,6 +38,7 @@ dependencies = [
 name = "ax-cli"
 version = "0.1.0"
 dependencies = [
+ "ax-agent",
  "ax-config",
  "ax-daemon",
  "ax-workspace",
