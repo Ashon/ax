@@ -19,6 +19,7 @@ ax-agent = { path = "../ax-agent" }
 ax-config = { path = "../ax-config" }
 ax-daemon = { path = "../ax-daemon" }
 ax-workspace = { path = "../ax-workspace" }
+tokio = { version = "1", features = ["rt-multi-thread", "signal"] }
 
 [dev-dependencies]
 tempfile = "3"

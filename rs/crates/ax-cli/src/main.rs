@@ -3,12 +3,14 @@
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitCode, Stdio};
 
 use ax_agent::{run_with_options, LaunchOptions};
 use ax_config::find_config_file;
-use ax_daemon::{expand_socket_path, DEFAULT_SOCKET_PATH};
+use ax_daemon::{expand_socket_path, Daemon, DEFAULT_SOCKET_PATH};
 use ax_workspace::{
     dispatch_runnable_work, restart_named_target, start_named_target, stop_named_target, RealTmux,
 };
@@ -17,10 +19,15 @@ const USAGE: &str = "\
 ax-rs - thin Rust entrypoint for migrated workspace control
 
 Usage:
+  ax-rs daemon start [--socket PATH]
+  ax-rs daemon stop [--socket PATH]
+  ax-rs daemon status [--socket PATH]
   ax-rs start <target> [--config PATH] [--socket PATH] [--ax-bin PATH]
   ax-rs stop <target> [--config PATH] [--socket PATH] [--ax-bin PATH]
   ax-rs restart <target> [--config PATH] [--socket PATH] [--ax-bin PATH]
   ax-rs dispatch <target> --sender NAME [--fresh] [--config PATH] [--socket PATH] [--ax-bin PATH]
+  ax-rs run-agent --workspace NAME [--runtime RUNTIME] [--socket PATH] [--config PATH] [--fresh] [-- ...]
+  ax-rs mcp-server ...
 
 Notes:
   --config defaults to the discovered ax config (.ax/config.yaml or ax.yaml)
@@ -44,9 +51,20 @@ enum LifecycleAction {
     Restart,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DaemonAction {
+    Start,
+    Stop,
+    Status,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ParsedCommand {
     Help,
+    Daemon {
+        action: DaemonAction,
+        socket_path: PathBuf,
+    },
     Lifecycle {
         action: LifecycleAction,
         target: String,
@@ -74,6 +92,7 @@ enum ParsedCommand {
 #[derive(Debug)]
 enum CliError {
     Usage(String),
+    Daemon(DaemonCliError),
     Lifecycle(ax_workspace::LifecycleError),
     Dispatch(ax_workspace::DispatchError),
     RunAgent(ax_agent::LaunchError),
@@ -86,10 +105,50 @@ enum CliError {
     },
 }
 
+#[derive(Debug)]
+enum DaemonCliError {
+    MissingStateDir {
+        socket_path: PathBuf,
+    },
+    BuildRuntime {
+        source: io::Error,
+    },
+    LoadState {
+        state_dir: PathBuf,
+        source: ax_daemon::DaemonError,
+    },
+    Bind(ax_daemon::DaemonError),
+    SignalSetup {
+        source: io::Error,
+    },
+    SignalWait {
+        source: io::Error,
+    },
+    WritePid {
+        path: PathBuf,
+        source: io::Error,
+    },
+    ReadPid {
+        path: PathBuf,
+        source: io::Error,
+    },
+    MissingPidFile,
+    InvalidPidFile,
+    SignalCommand {
+        signal: &'static str,
+        source: io::Error,
+    },
+    SignalFailed {
+        signal: &'static str,
+        stderr: String,
+    },
+}
+
 impl fmt::Display for CliError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Usage(message) => f.write_str(message),
+            Self::Daemon(source) => write!(f, "{source}"),
             Self::Lifecycle(source) => write!(f, "{source}"),
             Self::Dispatch(source) => write!(f, "{source}"),
             Self::RunAgent(source) => write!(f, "{source}"),
@@ -100,6 +159,41 @@ impl fmt::Display for CliError {
                 write!(f, "delegated ax binary {binary:?} resolves to ax-rs itself")
             }
         }
+    }
+}
+
+impl fmt::Display for DaemonCliError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingStateDir { socket_path } => {
+                write!(f, "resolve daemon state dir from socket {:?}", socket_path)
+            }
+            Self::BuildRuntime { source } => write!(f, "build tokio runtime: {source}"),
+            Self::LoadState { state_dir, source } => {
+                write!(f, "load daemon state from {:?}: {source}", state_dir)
+            }
+            Self::Bind(source) => write!(f, "{source}"),
+            Self::SignalSetup { source } => write!(f, "install shutdown signal handler: {source}"),
+            Self::SignalWait { source } => write!(f, "wait for shutdown signal: {source}"),
+            Self::WritePid { path, source } => write!(f, "write pid file {:?}: {source}", path),
+            Self::ReadPid { path, source } => write!(f, "read pid file {:?}: {source}", path),
+            Self::MissingPidFile => f.write_str("daemon not running (no pid file)"),
+            Self::InvalidPidFile => f.write_str("invalid pid file"),
+            Self::SignalCommand { signal, source } => write!(f, "signal {signal}: {source}"),
+            Self::SignalFailed { signal, stderr } => {
+                if stderr.is_empty() {
+                    write!(f, "signal {signal} failed")
+                } else {
+                    write!(f, "signal {signal} failed: {stderr}")
+                }
+            }
+        }
+    }
+}
+
+impl From<DaemonCliError> for CliError {
+    fn from(source: DaemonCliError) -> Self {
+        Self::Daemon(source)
     }
 }
 
@@ -155,6 +249,10 @@ where
             print!("{USAGE}");
             Ok(ExitCode::SUCCESS)
         }
+        ParsedCommand::Daemon {
+            action,
+            socket_path,
+        } => run_daemon_command(action, &socket_path),
         ParsedCommand::Lifecycle {
             action,
             target,
@@ -255,6 +353,9 @@ where
     if matches!(command.as_str(), "-h" | "--help" | "help") {
         return Ok(ParsedCommand::Help);
     }
+    if command == "daemon" {
+        return parse_daemon_args(&argv);
+    }
     if command == "run-agent" {
         return parse_run_agent_args(&argv, cwd);
     }
@@ -354,6 +455,53 @@ where
             options,
         }),
     }
+}
+
+fn parse_daemon_args(argv: &[OsString]) -> Result<ParsedCommand, CliError> {
+    let Some(subcommand) = argv.get(1) else {
+        return Ok(ParsedCommand::Help);
+    };
+
+    let action = match subcommand.to_string_lossy().as_ref() {
+        "-h" | "--help" => return Ok(ParsedCommand::Help),
+        "start" => DaemonAction::Start,
+        "stop" => DaemonAction::Stop,
+        "status" => DaemonAction::Status,
+        other => {
+            return Err(CliError::Usage(format!(
+                "unknown daemon command {other:?}\n\n{USAGE}"
+            )));
+        }
+    };
+
+    let mut socket_path = expand_socket_path(DEFAULT_SOCKET_PATH);
+    let mut i = 2;
+    while i < argv.len() {
+        let arg = &argv[i];
+        match arg.to_string_lossy().as_ref() {
+            "-h" | "--help" => return Ok(ParsedCommand::Help),
+            "--socket" => {
+                i += 1;
+                socket_path = parse_socket_path(argv.get(i), "--socket")?;
+            }
+            other if other.starts_with('-') => {
+                return Err(CliError::Usage(format!(
+                    "unknown flag {other:?}\n\n{USAGE}"
+                )));
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unexpected extra argument {other:?}\n\n{USAGE}"
+                )));
+            }
+        }
+        i += 1;
+    }
+
+    Ok(ParsedCommand::Daemon {
+        action,
+        socket_path,
+    })
 }
 
 fn parse_run_agent_args(argv: &[OsString], cwd: &Path) -> Result<ParsedCommand, CliError> {
@@ -462,6 +610,170 @@ fn resolve_config_path(config_override: Option<PathBuf>, cwd: &Path) -> Result<P
             cwd.display()
         ))
     })
+}
+
+fn run_daemon_command(action: DaemonAction, socket_path: &Path) -> Result<ExitCode, CliError> {
+    match action {
+        DaemonAction::Start => run_daemon_start(socket_path),
+        DaemonAction::Stop => {
+            let pid = read_daemon_pid(socket_path)?;
+            send_signal(pid, "-TERM")?;
+            println!("Sent SIGTERM to daemon (pid {pid})");
+            Ok(ExitCode::SUCCESS)
+        }
+        DaemonAction::Status => {
+            match daemon_status(socket_path)? {
+                DaemonStatus::Running(pid) => {
+                    println!("Daemon: running (pid {pid})");
+                    println!("Socket: {}", socket_path.display());
+                }
+                DaemonStatus::NotRunning => println!("Daemon: not running"),
+                DaemonStatus::StalePid => println!("Daemon: not running (stale pid)"),
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+fn run_daemon_start(socket_path: &Path) -> Result<ExitCode, CliError> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|source| DaemonCliError::BuildRuntime { source })?;
+    runtime.block_on(run_daemon_until_signal(socket_path.to_path_buf()))?;
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn run_daemon_until_signal(socket_path: PathBuf) -> Result<(), DaemonCliError> {
+    let state_dir = daemon_state_dir(&socket_path)?;
+    let pid_path = state_dir.join("daemon.pid");
+    let daemon = Daemon::new(socket_path)
+        .with_state_dir(&state_dir)
+        .map_err(|source| DaemonCliError::LoadState {
+            state_dir: state_dir.clone(),
+            source,
+        })?;
+    let handle = daemon.bind().await.map_err(DaemonCliError::Bind)?;
+    if let Err(source) = write_pid_file(&pid_path) {
+        handle.shutdown().await;
+        return Err(DaemonCliError::WritePid {
+            path: pid_path,
+            source,
+        });
+    }
+
+    let wait_result = wait_for_shutdown_signal().await;
+    handle.shutdown().await;
+    if let Err(source) = fs::remove_file(&pid_path) {
+        if source.kind() != io::ErrorKind::NotFound {
+            eprintln!("remove pid file {:?}: {source}", pid_path);
+        }
+    }
+    wait_result
+}
+
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() -> Result<(), DaemonCliError> {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let mut terminate =
+        signal(SignalKind::terminate()).map_err(|source| DaemonCliError::SignalSetup { source })?;
+    let ctrl_c = tokio::signal::ctrl_c();
+    tokio::pin!(ctrl_c);
+
+    tokio::select! {
+        result = &mut ctrl_c => result.map_err(|source| DaemonCliError::SignalWait { source }),
+        _ = terminate.recv() => Ok(()),
+    }
+}
+
+fn daemon_state_dir(socket_path: &Path) -> Result<PathBuf, DaemonCliError> {
+    socket_path
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| DaemonCliError::MissingStateDir {
+            socket_path: socket_path.to_path_buf(),
+        })
+}
+
+fn daemon_pid_path(socket_path: &Path) -> Result<PathBuf, DaemonCliError> {
+    Ok(daemon_state_dir(socket_path)?.join("daemon.pid"))
+}
+
+fn write_pid_file(path: &Path) -> Result<(), io::Error> {
+    fs::write(path, std::process::id().to_string())
+}
+
+fn read_daemon_pid(socket_path: &Path) -> Result<i32, CliError> {
+    let pid_path = daemon_pid_path(socket_path)?;
+    let data = fs::read_to_string(&pid_path).map_err(|source| {
+        if source.kind() == io::ErrorKind::NotFound {
+            DaemonCliError::MissingPidFile
+        } else {
+            DaemonCliError::ReadPid {
+                path: pid_path.clone(),
+                source,
+            }
+        }
+    })?;
+    parse_pid(&data).ok_or(DaemonCliError::InvalidPidFile.into())
+}
+
+fn parse_pid(raw: &str) -> Option<i32> {
+    let pid = raw.trim().parse::<i32>().ok()?;
+    (pid > 0).then_some(pid)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DaemonStatus {
+    Running(i32),
+    NotRunning,
+    StalePid,
+}
+
+fn daemon_status(socket_path: &Path) -> Result<DaemonStatus, CliError> {
+    let pid_path = daemon_pid_path(socket_path)?;
+    let data = match fs::read_to_string(&pid_path) {
+        Ok(data) => data,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {
+            return Ok(DaemonStatus::NotRunning)
+        }
+        Err(source) => {
+            return Err(DaemonCliError::ReadPid {
+                path: pid_path,
+                source,
+            }
+            .into());
+        }
+    };
+
+    let Some(pid) = parse_pid(&data) else {
+        return Ok(DaemonStatus::StalePid);
+    };
+    if send_signal(pid, "-0")? {
+        Ok(DaemonStatus::Running(pid))
+    } else {
+        Ok(DaemonStatus::StalePid)
+    }
+}
+
+fn send_signal(pid: i32, signal: &'static str) -> Result<bool, CliError> {
+    let output = ProcessCommand::new("kill")
+        .arg(signal)
+        .arg(pid.to_string())
+        .output()
+        .map_err(|source| DaemonCliError::SignalCommand { signal, source })?;
+    if output.status.success() {
+        return Ok(true);
+    }
+    if signal == "-0" {
+        return Ok(false);
+    }
+    Err(DaemonCliError::SignalFailed {
+        signal,
+        stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+    }
+    .into())
 }
 
 fn delegate_to_go_ax(argv: &[OsString], current_exe: &Path) -> Result<ExitCode, CliError> {
@@ -691,5 +1003,37 @@ mod tests {
                 extra_args: vec!["--model".to_owned(), "gpt-5.4".to_owned()],
             }
         );
+    }
+
+    #[test]
+    fn daemon_parses_socket_override_without_config_resolution() {
+        let parsed = parse_args(
+            vec![
+                "ax-rs".into(),
+                "daemon".into(),
+                "status".into(),
+                "--socket".into(),
+                "~/daemon.sock".into(),
+            ],
+            Path::new("/missing"),
+            Path::new("/tmp/ax-rs"),
+        )
+        .expect("parse");
+
+        assert_eq!(
+            parsed,
+            ParsedCommand::Daemon {
+                action: DaemonAction::Status,
+                socket_path: expand_socket_path("~/daemon.sock"),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_pid_rejects_invalid_values() {
+        assert_eq!(parse_pid("12345\n"), Some(12_345));
+        assert_eq!(parse_pid("0"), None);
+        assert_eq!(parse_pid("-7"), None);
+        assert_eq!(parse_pid("abc"), None);
     }
 }
