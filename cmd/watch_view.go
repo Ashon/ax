@@ -92,13 +92,17 @@ func (m watchModel) View() string {
 
 func (m watchModel) renderFooter(totalW int) string {
 	summary := footerSummarySt.Render(fitDisplayText(m.footerTokenSummary(totalW), totalW))
-	helpText := " ↑↓ agent · [/ ] task · f filter · x interrupt · tab msgs/tasks/tokens/off · q quit"
+	helpText := m.quickActionHelpText()
 	if m.streamOnly {
 		helpText = " [/ ] task · f filter · tab msgs/tasks/tokens · q quit"
 	}
 	help := lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(
 		fitDisplayText(helpText, totalW))
-	return lipgloss.JoinVertical(lipgloss.Left, summary, help)
+	if m.noticeText == "" {
+		return lipgloss.JoinVertical(lipgloss.Left, summary, help)
+	}
+	notice := m.quickActionNoticeStyle().Render(fitDisplayText(" "+m.noticeText, totalW))
+	return lipgloss.JoinVertical(lipgloss.Left, summary, notice, help)
 }
 
 func (m watchModel) renderSelectedStream(totalW, totalH int) string {
@@ -142,11 +146,18 @@ func renderPanelTopBorder(borderStyle lipgloss.Style, title string, innerW int, 
 	return borderStyle.Render("╭─") + title + borderStyle.Render(strings.Repeat("─", fill)) + help + borderStyle.Render("╮")
 }
 
-func watchAgentsPanelHelpCandidates() []string {
+func watchAgentsPanelHelpCandidates(menuOpen bool) []string {
+	if menuOpen {
+		return []string{
+			"↑↓ action · enter run · esc close",
+			"↑↓ action · enter · esc",
+			"↑↓ action",
+		}
+	}
 	return []string{
-		"↑↓ agent · x interrupt · q quit",
-		"↑↓ agent · x · q",
-		"↑↓ agent · x",
+		"↑↓ agent · enter actions · x",
+		"↑↓ agent · enter · x",
+		"↑↓ agent",
 	}
 }
 

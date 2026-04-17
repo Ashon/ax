@@ -17,6 +17,33 @@ import (
 	xansi "github.com/charmbracelet/x/ansi"
 )
 
+type stubWatchLifecycleClient struct {
+	configPath string
+	name       string
+	action     types.LifecycleAction
+	err        error
+}
+
+func (c *stubWatchLifecycleClient) ControlLifecycle(configPath, name string, action types.LifecycleAction) (*daemon.ControlLifecycleResponse, error) {
+	c.configPath = configPath
+	c.name = name
+	c.action = action
+	if c.err != nil {
+		return nil, c.err
+	}
+	return &daemon.ControlLifecycleResponse{
+		Target: types.LifecycleTarget{
+			Name:           name,
+			Kind:           types.LifecycleTargetWorkspace,
+			ManagedSession: true,
+		},
+		Action:  action,
+		Running: action != types.LifecycleActionStop,
+	}, nil
+}
+
+func (c *stubWatchLifecycleClient) Close() error { return nil }
+
 func TestResolveWatchInitialViewDefaultAndSelections(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -167,6 +194,294 @@ func TestWatchStreamOnlyTabCyclesVisibleViews(t *testing.T) {
 	got = next.(watchModel)
 	if got.stream != streamTasks {
 		t.Fatalf("expected messages -> tasks in stream-only cycle, got %v", got.stream)
+	}
+}
+
+func TestWatchEnterOpensQuickActionsSurface(t *testing.T) {
+	oldLifecycleSupported := watchLifecycleSupported
+	oldConfigPath := configPath
+	watchLifecycleSupported = func(string) bool { return true }
+	configPath = filepath.Join(t.TempDir(), "missing.yaml")
+	defer func() {
+		watchLifecycleSupported = oldLifecycleSupported
+		configPath = oldConfigPath
+	}()
+
+	m := watchModel{
+		width:    96,
+		height:   24,
+		selected: 0,
+		sessions: []tmux.SessionInfo{
+			{Name: "ax-ax_cli", Workspace: "ax.cli"},
+		},
+		captures: map[string]string{
+			"ax.cli": "Ready\n❯",
+		},
+		runtimes: map[string]string{
+			"ax.cli": "codex",
+		},
+	}
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	got := next.(watchModel)
+	if !got.quickActionsOpen {
+		t.Fatal("expected quick actions to open on Enter")
+	}
+	if len(got.quickActions) != 6 {
+		t.Fatalf("quick action count = %d, want 6", len(got.quickActions))
+	}
+
+	view := xansi.Strip(got.View())
+	for _, want := range []string{"actions 1/6", "Inspect", "Open tasks", "Open messages", "enter run", "esc close"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected %q in quick-actions view %q", want, view)
+		}
+	}
+	if strings.Count(view, "╭") < 2 || strings.Count(view, "╰") < 2 {
+		t.Fatalf("expected nested quick-action border in view %q", view)
+	}
+}
+
+func TestRenderSidebarAnchorsQuickActionsBelowSelectedAgent(t *testing.T) {
+	oldConfigPath := configPath
+	configPath = filepath.Join(t.TempDir(), "missing.yaml")
+	defer func() { configPath = oldConfigPath }()
+
+	m := watchModel{
+		selected:            0,
+		quickActionsOpen:    true,
+		quickActionSelected: 0,
+		quickActions: []watchQuickAction{
+			{ID: watchQuickActionInspect, Label: "Inspect"},
+			{ID: watchQuickActionTasks, Label: "Open tasks"},
+			{ID: watchQuickActionMessages, Label: "Open messages"},
+			{ID: watchQuickActionInterrupt, Label: "Interrupt"},
+		},
+		sessions: []tmux.SessionInfo{
+			{Name: "ax-ax_cli", Workspace: "ax.cli"},
+			{Name: "ax-ax_runtime", Workspace: "ax.runtime"},
+		},
+		runtimes: map[string]string{
+			"ax.cli":     "codex",
+			"ax.runtime": "claude",
+		},
+		workspaceInfos: map[string]types.WorkspaceInfo{
+			"ax.cli": {
+				Name:       "ax.cli",
+				Status:     types.StatusOnline,
+				StatusText: "Selected status detail",
+			},
+			"ax.runtime": {
+				Name:       "ax.runtime",
+				Status:     types.StatusOnline,
+				StatusText: "Other workspace detail",
+			},
+		},
+	}
+
+	view := xansi.Strip(m.renderSidebar(38, 10))
+	if strings.Contains(view, "Selected status detail") {
+		t.Fatalf("did not expect selected detail line while quick actions are open: %q", view)
+	}
+
+	lines := strings.Split(view, "\n")
+	selectedLine := -1
+	overlayLine := -1
+	for i, line := range lines {
+		if strings.Contains(line, "▸") && strings.Contains(line, "cli") {
+			selectedLine = i
+		}
+		if strings.Contains(line, "actions 1/4") {
+			overlayLine = i
+		}
+	}
+	if selectedLine < 0 {
+		t.Fatalf("expected selected agent line in sidebar view %q", view)
+	}
+	if overlayLine != selectedLine+1 {
+		t.Fatalf("expected quick-action overlay directly below selected agent, got selected=%d overlay=%d in view %q", selectedLine, overlayLine, view)
+	}
+	if !strings.Contains(lines[overlayLine], "╭─") {
+		t.Fatalf("expected bordered quick-action header at overlay line %q", lines[overlayLine])
+	}
+}
+
+func TestRenderSidebarClipsQuickActionsOverlayInShortPane(t *testing.T) {
+	oldConfigPath := configPath
+	configPath = filepath.Join(t.TempDir(), "missing.yaml")
+	defer func() { configPath = oldConfigPath }()
+
+	m := watchModel{
+		selected:            1,
+		quickActionsOpen:    true,
+		quickActionSelected: 0,
+		quickActions: []watchQuickAction{
+			{ID: watchQuickActionInspect, Label: "Inspect"},
+			{ID: watchQuickActionTasks, Label: "Open tasks"},
+			{ID: watchQuickActionMessages, Label: "Open messages"},
+			{ID: watchQuickActionInterrupt, Label: "Interrupt"},
+		},
+		sessions: []tmux.SessionInfo{
+			{Name: "ax-ax_cli", Workspace: "ax.cli"},
+			{Name: "ax-ax_runtime", Workspace: "ax.runtime"},
+		},
+		runtimes: map[string]string{
+			"ax.cli":     "codex",
+			"ax.runtime": "claude",
+		},
+		workspaceInfos: map[string]types.WorkspaceInfo{
+			"ax.cli":     {Name: "ax.cli", Status: types.StatusOnline},
+			"ax.runtime": {Name: "ax.runtime", Status: types.StatusOnline},
+		},
+	}
+
+	view := xansi.Strip(m.renderSidebar(38, 6))
+	if !strings.Contains(view, "actions 1/4") {
+		t.Fatalf("expected clipped quick-action overlay header in short sidebar view %q", view)
+	}
+	for _, line := range strings.Split(view, "\n") {
+		if w := lipgloss.Width(line); w > 38 {
+			t.Fatalf("rendered sidebar line width %d exceeds pane width: %q", w, line)
+		}
+	}
+}
+
+func TestWatchQuickActionsHideUnsupportedLifecycleControls(t *testing.T) {
+	oldLifecycleSupported := watchLifecycleSupported
+	watchLifecycleSupported = func(string) bool { return false }
+	defer func() { watchLifecycleSupported = oldLifecycleSupported }()
+
+	m := watchModel{
+		width:    96,
+		height:   18,
+		selected: 0,
+		sessions: []tmux.SessionInfo{
+			{Name: "ax-orchestrator", Workspace: "orchestrator"},
+		},
+		captures: map[string]string{
+			"orchestrator": "Ready\n❯",
+		},
+		runtimes: map[string]string{
+			"orchestrator": "codex",
+		},
+	}
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	got := next.(watchModel)
+	if len(got.quickActions) != 4 {
+		t.Fatalf("quick action count = %d, want 4", len(got.quickActions))
+	}
+
+	view := xansi.Strip(got.View())
+	for _, unwanted := range []string{"Restart", "Stop"} {
+		if strings.Contains(view, unwanted) {
+			t.Fatalf("did not expect %q in unsupported quick-actions view %q", unwanted, view)
+		}
+	}
+}
+
+func TestWatchQuickActionsOpenTasksFocusesSelectedWorkspace(t *testing.T) {
+	oldLifecycleSupported := watchLifecycleSupported
+	watchLifecycleSupported = func(string) bool { return false }
+	defer func() { watchLifecycleSupported = oldLifecycleSupported }()
+
+	now := time.Now()
+	m := watchModel{
+		selected: 0,
+		sessions: []tmux.SessionInfo{
+			{Name: "ax-ax_cli", Workspace: "ax.cli"},
+		},
+		tasks: []types.Task{
+			{
+				ID:        "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+				Title:     "Other workspace task",
+				Assignee:  "ax.runtime",
+				Status:    types.TaskInProgress,
+				UpdatedAt: now,
+				CreatedAt: now.Add(-2 * time.Minute),
+			},
+			{
+				ID:        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+				Title:     "Selected workspace task",
+				Assignee:  "ax.cli",
+				Status:    types.TaskInProgress,
+				UpdatedAt: now.Add(-time.Minute),
+				CreatedAt: now.Add(-3 * time.Minute),
+			},
+		},
+	}
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	got := next.(watchModel)
+	next, _ = got.Update(tea.KeyMsg{Type: tea.KeyDown})
+	got = next.(watchModel)
+	next, _ = got.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	got = next.(watchModel)
+
+	if got.stream != streamTasks {
+		t.Fatalf("stream = %v, want %v", got.stream, streamTasks)
+	}
+	if got.taskSelected != 1 {
+		t.Fatalf("taskSelected = %d, want 1", got.taskSelected)
+	}
+	if got.quickActionsOpen {
+		t.Fatal("expected quick actions to close after opening tasks")
+	}
+}
+
+func TestWatchQuickActionsRestartRequiresConfirmation(t *testing.T) {
+	oldLifecycleSupported := watchLifecycleSupported
+	oldResolveConfigPath := watchResolveConfigPath
+	oldNewClient := watchNewClient
+	watchLifecycleSupported = func(string) bool { return true }
+	watchResolveConfigPath = func() (string, error) { return "/tmp/ax.yaml", nil }
+	client := &stubWatchLifecycleClient{}
+	watchNewClient = func() (watchLifecycleClient, error) { return client, nil }
+	defer func() {
+		watchLifecycleSupported = oldLifecycleSupported
+		watchResolveConfigPath = oldResolveConfigPath
+		watchNewClient = oldNewClient
+	}()
+
+	m := watchModel{
+		selected: 0,
+		sessions: []tmux.SessionInfo{
+			{Name: "ax-ax_cli", Workspace: "ax.cli"},
+		},
+	}
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	got := next.(watchModel)
+	for i := 0; i < 4; i++ {
+		next, _ = got.Update(tea.KeyMsg{Type: tea.KeyDown})
+		got = next.(watchModel)
+	}
+
+	next, _ = got.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	got = next.(watchModel)
+	if !got.quickActionConfirm {
+		t.Fatal("expected restart to require confirmation")
+	}
+	if client.action != "" {
+		t.Fatalf("did not expect lifecycle action before confirmation, got %q", client.action)
+	}
+
+	next, _ = got.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	got = next.(watchModel)
+	if got.quickActionsOpen {
+		t.Fatal("expected quick actions to close after confirmed restart")
+	}
+	if client.action != types.LifecycleActionRestart {
+		t.Fatalf("action = %q, want %q", client.action, types.LifecycleActionRestart)
+	}
+	if client.name != "ax.cli" {
+		t.Fatalf("name = %q, want ax.cli", client.name)
+	}
+	if client.configPath != "/tmp/ax.yaml" {
+		t.Fatalf("configPath = %q, want /tmp/ax.yaml", client.configPath)
+	}
+	if !strings.Contains(got.noticeText, "Restart requested for ax.cli") {
+		t.Fatalf("expected restart notice, got %q", got.noticeText)
 	}
 }
 

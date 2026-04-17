@@ -107,6 +107,13 @@ type watchModel struct {
 	workspaceInfos         map[string]types.WorkspaceInfo
 	workspaceInfoUpdatedAt time.Time
 	trendUpdatedAt         time.Time
+	quickActions           []watchQuickAction
+	quickActionsOpen       bool
+	quickActionSelected    int
+	quickActionConfirm     bool
+	noticeText             string
+	noticeErr              bool
+	noticeUntil            time.Time
 	stream                 streamView
 	streamOnly             bool
 	mainResize             tmuxResizeState
@@ -185,15 +192,33 @@ func (m watchModel) Init() tea.Cmd {
 func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "q", "ctrl+c":
+		if msg.String() == "q" || msg.String() == "ctrl+c" {
 			return m, tea.Quit
+		}
+		if m.quickActionsOpen {
+			switch msg.String() {
+			case "esc":
+				m.closeQuickActions()
+			case "up", "k":
+				m.moveQuickActionSelection(-1)
+			case "down", "j":
+				m.moveQuickActionSelection(1)
+			case "enter":
+				m.runSelectedQuickAction()
+			}
+			return m, nil
+		}
+		switch msg.String() {
 		case "up", "k":
 			m.selected = moveSelection(m.selected, m.sessions, -1)
 			m.forceDataRefresh = true
 		case "down", "j":
 			m.selected = moveSelection(m.selected, m.sessions, 1)
 			m.forceDataRefresh = true
+		case "enter":
+			if !m.streamOnly {
+				m.openQuickActions()
+			}
 		case "tab":
 			if m.streamOnly {
 				switch m.stream {
@@ -234,6 +259,10 @@ func (m watchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.sessionsRefreshedAt = now
 		}
 		m.selected = clampSelection(m.selected, m.sessions)
+		if m.quickActionsOpen && m.selectedWorkspaceName() == "" {
+			m.closeQuickActions()
+		}
+		m.clearExpiredNotice(now)
 
 		// Resize selected session's tmux window to match main panel
 		if !m.streamOnly && m.selected < len(m.sessions) && m.width > 0 {

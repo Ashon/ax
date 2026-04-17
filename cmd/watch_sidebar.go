@@ -40,14 +40,21 @@ type workspaceAttention struct {
 	Queued   int
 }
 
+type sidebarOverlayRow struct {
+	text  string
+	style lipgloss.Style
+}
+
 func (m watchModel) renderSidebar(w, h int) string {
 	innerW := w - 2
 	innerH := h - 2
 	attentionByWorkspace := summarizeWorkspaceAttention(m.tasks)
+	selectedLevel := 0
+	selectedLineIndex := -1
 
 	// Title
 	title := headerStyle.Render(" agents ")
-	topLine := renderPanelTopBorder(borderClr, title, innerW, watchAgentsPanelHelpCandidates()...)
+	topLine := renderPanelTopBorder(borderClr, title, innerW, watchAgentsPanelHelpCandidates(m.quickActionsOpen)...)
 
 	var lines []string
 	stateNow := m.dataRefreshedAt
@@ -93,6 +100,7 @@ func (m watchModel) renderSidebar(w, h int) string {
 
 			nameStyle := unselectedStyle
 			if entry.sessionIndex == m.selected {
+				selectedLevel = entry.level
 				cursor = selectedStyle.Render("▸ ")
 				nameStyle = selectedStyle
 			}
@@ -107,10 +115,13 @@ func (m watchModel) renderSidebar(w, h int) string {
 		}
 
 		lines = append(lines, renderWatchSidebarLine(left, right, innerW))
-		if secondary != "" && entry.sessionIndex == m.selected {
-			prefix := "    " + strings.Repeat("  ", entry.level)
-			secondaryLine := prefix + fitDisplayText(secondary, max(0, innerW-lipgloss.Width(prefix)))
-			lines = append(lines, renderWatchSidebarLine(selectedStyle.Render(secondaryLine), "", innerW))
+		if entry.sessionIndex == m.selected {
+			selectedLineIndex = len(lines) - 1
+			if !m.quickActionsOpen && secondary != "" {
+				prefix := "    " + strings.Repeat("  ", entry.level)
+				secondaryLine := prefix + fitDisplayText(secondary, max(0, innerW-lipgloss.Width(prefix)))
+				lines = append(lines, renderWatchSidebarLine(selectedStyle.Render(secondaryLine), "", innerW))
+			}
 		}
 	}
 
@@ -122,6 +133,9 @@ func (m watchModel) renderSidebar(w, h int) string {
 	if len(lines) > innerH {
 		lines = lines[:innerH]
 	}
+	if m.quickActionsOpen {
+		lines = overlaySidebarFrom(lines, m.renderSelectedQuickActionLines(selectedLevel, innerW), selectedLineIndex+1)
+	}
 
 	botLine := borderClr.Render("╰" + strings.Repeat("─", innerW) + "╯")
 
@@ -129,6 +143,17 @@ func (m watchModel) renderSidebar(w, h int) string {
 	all = append(all, lines...)
 	all = append(all, botLine)
 	return strings.Join(all, "\n")
+}
+
+func overlaySidebarFrom(lines, overlay []string, start int) []string {
+	if len(lines) == 0 || len(overlay) == 0 || start < 0 || start >= len(lines) {
+		return lines
+	}
+	if maxLines := len(lines) - start; len(overlay) > maxLines {
+		overlay = overlay[:maxLines]
+	}
+	copy(lines[start:], overlay)
+	return lines
 }
 
 func buildSidebarEntries(sessions []tmux.SessionInfo) []sidebarEntry {
@@ -169,6 +194,72 @@ func buildSidebarEntries(sessions []tmux.SessionInfo) []sidebarEntry {
 	var entries []sidebarEntry
 	appendSidebarEntries(root, 0, &entries)
 	return entries
+}
+
+func (m watchModel) renderSelectedQuickActionLines(level, innerW int) []string {
+	prefix := "    " + strings.Repeat("  ", level)
+	workspaceName := m.selectedWorkspaceName()
+	if m.quickActionConfirm {
+		action, ok := m.selectedQuickAction()
+		if !ok {
+			return nil
+		}
+		return renderWatchSidebarOverlay(prefix, innerW, []string{
+			strings.TrimSpace(workspaceName + " " + strings.ToLower(action.Label)),
+			"confirm",
+		}, []sidebarOverlayRow{
+			{text: action.confirmationPrompt(), style: selectedStyle},
+			{text: "enter confirm · esc cancel", style: selectedStyle},
+		})
+	}
+
+	start, end := m.quickActionViewport()
+	rows := make([]sidebarOverlayRow, 0, end-start)
+	for i := start; i < end; i++ {
+		action := m.quickActions[i]
+		raw := "  " + action.Label
+		style := unselectedStyle
+		if i == clampIndex(m.quickActionSelected, len(m.quickActions)) {
+			raw = "▸ " + action.Label
+			style = selectedStyle
+		}
+		rows = append(rows, sidebarOverlayRow{text: raw, style: style})
+	}
+	return renderWatchSidebarOverlay(prefix, innerW, []string{
+		strings.TrimSpace(fmt.Sprintf("%s actions %d/%d", workspaceName, m.quickActionSelected+1, len(m.quickActions))),
+		fmt.Sprintf("actions %d/%d", m.quickActionSelected+1, len(m.quickActions)),
+		"actions",
+	}, rows)
+}
+
+func renderWatchSidebarOverlay(prefix string, innerW int, titleCandidates []string, rows []sidebarOverlayRow) []string {
+	prefixW := lipgloss.Width(prefix)
+	contentW := innerW - prefixW - 2
+	if contentW <= 0 {
+		lines := make([]string, 0, len(rows))
+		for _, row := range rows {
+			raw := prefix + fitDisplayText(row.text, max(0, innerW-prefixW))
+			lines = append(lines, renderWatchSidebarLine(row.style.Render(raw), "", innerW))
+		}
+		return lines
+	}
+
+	title := ""
+	if titleText := firstFittingDisplay(max(0, contentW-3), titleCandidates...); titleText != "" {
+		title = headerStyle.Render(" " + titleText + " ")
+	}
+
+	lines := []string{
+		renderWatchSidebarLine(prefix+renderPanelTopBorder(borderClr, title, contentW), "", innerW),
+	}
+	for _, row := range rows {
+		text := fitDisplayText(row.text, contentW)
+		padding := contentW - lipgloss.Width(text)
+		line := prefix + borderClr.Render("│") + row.style.Render(text) + strings.Repeat(" ", padding) + borderClr.Render("│")
+		lines = append(lines, renderWatchSidebarLine(line, "", innerW))
+	}
+	lines = append(lines, renderWatchSidebarLine(prefix+borderClr.Render("╰"+strings.Repeat("─", contentW)+"╯"), "", innerW))
+	return lines
 }
 
 // buildSidebarFromTree renders a project tree into sidebar entries.
