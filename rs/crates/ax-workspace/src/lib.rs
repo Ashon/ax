@@ -14,6 +14,8 @@
 mod instructions;
 mod manager;
 mod mcp_config;
+mod orchestrator;
+mod orchestrator_prompt;
 mod reconcile;
 
 pub use instructions::{remove_instructions, write_instructions, InstructionsError};
@@ -22,6 +24,13 @@ pub use manager::{
     Manager, RealTmux, TmuxBackend, WorkspaceError,
 };
 pub use mcp_config::{remove_mcp_config, write_mcp_config, McpConfigError, MCP_CONFIG_FILE};
+pub use orchestrator::{
+    cleanup_orchestrator_artifacts, cleanup_orchestrator_state, ensure_orchestrator,
+    orchestrator_dir_for_node, orchestrator_name, root_orchestrator_dir, OrchestratorError,
+};
+pub use orchestrator_prompt::{
+    orchestrator_prompt, write_orchestrator_prompt, OrchestratorPromptError,
+};
 pub use reconcile::{
     build_desired_state, DesiredState, DesiredWorkspace, ReconcileAction, ReconcileError,
     ReconcileOptions, ReconcileReport, Reconciler, WorkspaceState, RUNTIME_STATE_FILE,

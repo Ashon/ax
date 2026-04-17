@@ -99,6 +99,7 @@ version = "0.1.0"
 dependencies = [
  "ax-agent",
  "ax-config",
+ "ax-proto",
  "ax-tmux",
  "hex",
  "serde",

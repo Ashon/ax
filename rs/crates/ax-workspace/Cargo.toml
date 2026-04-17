@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 ax-agent = { path = "../ax-agent" }
 ax-config = { path = "../ax-config" }
+ax-proto = { path = "../ax-proto" }
 ax-tmux = { path = "../ax-tmux" }
 hex.workspace = true
 serde = { workspace = true }
