@@ -297,10 +297,7 @@ fn orchestrator_session_name(prefix: &str) -> String {
 
 fn describe_orchestrator(claim: &OrchestratorClaim) -> String {
     if claim.child_name.is_empty() {
-        format!(
-            "the root orchestrator in {}",
-            claim.config_path.display()
-        )
+        format!("the root orchestrator in {}", claim.config_path.display())
     } else {
         format!(
             "child {name:?} in {cfg} -> {dir} (prefix {pfx:?}, orchestrator {orch:?})",
@@ -361,8 +358,7 @@ fn load_validated_config(abs: &Path) -> Result<Config, TreeError> {
                 .to_string_lossy()
                 .into_owned();
             if ws.codex_model_reasoning_effort.trim().is_empty() {
-                ws.codex_model_reasoning_effort
-                    .clone_from(&fallback_effort);
+                ws.codex_model_reasoning_effort.clone_from(&fallback_effort);
             }
         }
     }
