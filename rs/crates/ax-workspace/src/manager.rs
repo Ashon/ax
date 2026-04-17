@@ -12,6 +12,7 @@ use ax_agent::{prepare_codex_home, remove_codex_home, Runtime};
 use ax_config::Workspace;
 use ax_tmux::{
     create_session, create_session_with_args, create_session_with_command, destroy_session,
+    SessionInfo,
 };
 
 use crate::{
@@ -43,6 +44,8 @@ pub enum WorkspaceError {
 
 pub trait TmuxBackend {
     fn session_exists(&self, workspace: &str) -> bool;
+    fn list_sessions(&self) -> Result<Vec<SessionInfo>, ax_tmux::TmuxError>;
+    fn is_idle(&self, workspace: &str) -> bool;
     fn create_session(
         &self,
         workspace: &str,
@@ -73,6 +76,14 @@ pub struct RealTmux;
 impl TmuxBackend for RealTmux {
     fn session_exists(&self, workspace: &str) -> bool {
         ax_tmux::session_exists(workspace)
+    }
+
+    fn list_sessions(&self) -> Result<Vec<SessionInfo>, ax_tmux::TmuxError> {
+        ax_tmux::list_sessions()
+    }
+
+    fn is_idle(&self, workspace: &str) -> bool {
+        ax_tmux::is_idle(workspace)
     }
 
     fn create_session(
@@ -295,7 +306,7 @@ pub fn managed_run_agent_args(
     args
 }
 
-fn cleanup_workspace_state<B: TmuxBackend>(
+pub fn cleanup_workspace_state<B: TmuxBackend>(
     tmux: &B,
     name: &str,
     dir: &str,

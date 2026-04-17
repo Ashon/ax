@@ -7,6 +7,7 @@ use std::sync::Mutex;
 
 use ax_agent::{codex_home_path, Runtime};
 use ax_config::Workspace;
+use ax_tmux::SessionInfo;
 use ax_workspace::{ensure_artifacts, managed_run_agent_args, Manager, TmuxBackend};
 
 static HOME_LOCK: Mutex<()> = Mutex::new(());
@@ -41,6 +42,14 @@ impl FakeTmux {
 impl TmuxBackend for FakeTmux {
     fn session_exists(&self, _workspace: &str) -> bool {
         self.state.session_exists.get()
+    }
+
+    fn list_sessions(&self) -> Result<Vec<SessionInfo>, ax_tmux::TmuxError> {
+        Ok(Vec::new())
+    }
+
+    fn is_idle(&self, _workspace: &str) -> bool {
+        true
     }
 
     fn create_session(

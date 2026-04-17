@@ -100,8 +100,10 @@ dependencies = [
  "ax-agent",
  "ax-config",
  "ax-tmux",
+ "hex",
  "serde",
  "serde_json",
+ "sha1",
  "tempfile",
  "thiserror",
 ]

@@ -14,10 +14,15 @@
 mod instructions;
 mod manager;
 mod mcp_config;
+mod reconcile;
 
 pub use instructions::{remove_instructions, write_instructions, InstructionsError};
 pub use manager::{
-    cleanup_workspace_artifacts, ensure_artifacts, managed_run_agent_args, Manager, RealTmux,
-    TmuxBackend, WorkspaceError,
+    cleanup_workspace_artifacts, cleanup_workspace_state, ensure_artifacts, managed_run_agent_args,
+    Manager, RealTmux, TmuxBackend, WorkspaceError,
 };
 pub use mcp_config::{remove_mcp_config, write_mcp_config, McpConfigError, MCP_CONFIG_FILE};
+pub use reconcile::{
+    build_desired_state, DesiredState, DesiredWorkspace, ReconcileAction, ReconcileError,
+    ReconcileOptions, ReconcileReport, Reconciler, WorkspaceState, RUNTIME_STATE_FILE,
+};
