@@ -112,9 +112,10 @@ pub struct WorkspaceHistory {
     pub agents: Vec<AgentHistory>,
 }
 
-/// One transcript file's scan result. Kept crate-private in this slice;
-/// multi-binding attribution will hoist it public when needed.
-#[derive(Debug, Default)]
+/// One transcript file's scan result. Exposed at `pub(crate)` so the
+/// codex scanner can build these too; callers outside the crate only
+/// ever see the rolled-up [`WorkspaceHistory`].
+#[derive(Debug, Default, Clone)]
 pub(crate) struct TranscriptSeries {
     pub cwd: String,
     pub session_id: String,
@@ -123,6 +124,28 @@ pub(crate) struct TranscriptSeries {
     pub transcript: PathBuf,
     pub current: CurrentSnapshot,
     pub buckets: Vec<Bucket>,
+}
+
+/// Daemon's view of one ax workspace we want usage data for.
+#[derive(Debug, Clone, Default)]
+pub struct WorkspaceBinding {
+    pub name: String,
+    pub dir: String,
+    /// Resolved Claude project directory. Callers usually derive this
+    /// via `ax_agent::claude_project_path`.
+    pub claude_project_dir: Option<PathBuf>,
+    /// Resolved `CODEX_HOME`. Callers usually derive this via
+    /// `ax_agent::codex_home_path`.
+    pub codex_home: Option<PathBuf>,
+}
+
+/// Multi-binding response returned by [`query_history`].
+#[derive(Debug, Clone, Default)]
+pub struct HistoryResponse {
+    pub since: DateTime<Utc>,
+    pub until: DateTime<Utc>,
+    pub bucket_minutes: i64,
+    pub workspaces: Vec<WorkspaceHistory>,
 }
 
 // ---------- public single-binding entry point ----------
@@ -449,4 +472,330 @@ fn add_mcp(a: MCPProxyMetrics, b: MCPProxyMetrics) -> MCPProxyMetrics {
         tool_use_tokens: a.tool_use_tokens + b.tool_use_tokens,
         tool_use_turns: a.tool_use_turns + b.tool_use_turns,
     }
+}
+
+// ---------- multi-binding entry point ----------
+
+/// Scan every binding's Claude transcripts plus its Codex sessions and
+/// return one [`WorkspaceHistory`] per binding. Mirrors Go's
+/// `QueryHistory`.
+///
+/// Callers populate `binding.claude_project_dir` and/or
+/// `binding.codex_home` before calling; missing paths simply mean "no
+/// data from that runtime for this workspace".
+pub fn query_history(
+    bindings: &[WorkspaceBinding],
+    query: &HistoryQuery,
+) -> Result<HistoryResponse, HistoryError> {
+    let bucket_minutes = (query.bucket_size.as_secs() / 60) as i64;
+    let mut resp = HistoryResponse {
+        since: query.since,
+        until: query.until,
+        bucket_minutes,
+        workspaces: Vec::with_capacity(bindings.len()),
+    };
+    if bindings.is_empty() {
+        return Ok(resp);
+    }
+
+    // Claude scan: group by dir so shared-cwd workspaces don't re-read
+    // the same transcripts.
+    let mut seen_dirs: std::collections::BTreeMap<String, DirScanState> =
+        std::collections::BTreeMap::new();
+    for binding in bindings {
+        let key = binding.dir.clone();
+        if seen_dirs.contains_key(&key) || binding.claude_project_dir.is_none() {
+            continue;
+        }
+        let project_dir = binding.claude_project_dir.as_ref().unwrap();
+        let mut state = DirScanState::default();
+        if !project_dir.exists() {
+            seen_dirs.insert(key, state);
+            continue;
+        }
+        state.project_exists = true;
+        let paths = discover_transcripts(project_dir)?;
+        if !paths.is_empty() {
+            state.transcripts_found = true;
+            for path in paths {
+                if let Some(series) = scan_transcript(&path, query)? {
+                    state.series.push(series);
+                }
+            }
+        }
+        seen_dirs.insert(key, state);
+    }
+
+    // Codex scan per-binding (one CODEX_HOME per workspace).
+    let mut codex_by_binding: std::collections::BTreeMap<String, Vec<TranscriptSeries>> =
+        std::collections::BTreeMap::new();
+    let mut codex_flags: std::collections::BTreeMap<String, (bool, bool)> =
+        std::collections::BTreeMap::new();
+    for binding in bindings {
+        if let Some(home) = &binding.codex_home {
+            let res = crate::codex::scan_codex_for_binding(&binding.name, home, query)?;
+            codex_flags.insert(binding.name.clone(), (res.home_exists, res.sessions_found));
+            if !res.series.is_empty() {
+                codex_by_binding.insert(binding.name.clone(), res.series);
+            }
+        }
+    }
+
+    // Collect all Claude series across dirs for attribution.
+    let mut all_claude: Vec<&TranscriptSeries> = Vec::new();
+    for state in seen_dirs.values() {
+        all_claude.extend(state.series.iter());
+    }
+    let assignments = assign_series(bindings, &all_claude);
+
+    // Compose per-binding WorkspaceHistory.
+    for binding in bindings {
+        let mut ws = WorkspaceHistory {
+            workspace: binding.name.clone(),
+            dir: binding.dir.clone(),
+            ..WorkspaceHistory::default()
+        };
+        let claude_series = assignments.get(&binding.name).cloned().unwrap_or_default();
+        let mut series: Vec<TranscriptSeries> = claude_series.into_iter().cloned().collect();
+        if let Some(codex_series) = codex_by_binding.remove(&binding.name) {
+            series.extend(codex_series);
+        }
+
+        if series.is_empty() {
+            let state = seen_dirs.get(&binding.dir).cloned().unwrap_or_default();
+            let (codex_home_exists, codex_sessions_found) = codex_flags
+                .get(&binding.name)
+                .copied()
+                .unwrap_or((false, false));
+            ws.unavailable_reason = unavailable_reason_for(
+                &binding.dir,
+                state.project_exists,
+                state.transcripts_found,
+                codex_home_exists,
+                codex_sessions_found,
+            );
+            resp.workspaces.push(ws);
+            continue;
+        }
+
+        let agents = build_agent_histories(&series, query.bucket_size);
+        ws.available = true;
+        ws.recent_buckets = aggregate_buckets(
+            agents.iter().map(|a| a.recent_buckets.clone()).collect(),
+            query.bucket_size,
+        );
+        ws.current_snapshot =
+            aggregate_snapshots(agents.iter().map(|a| a.current_snapshot.clone()).collect());
+        ws.agents = agents;
+        resp.workspaces.push(ws);
+    }
+    resp.workspaces
+        .sort_by(|a, b| a.workspace.cmp(&b.workspace));
+    Ok(resp)
+}
+
+/// Rebuild `WorkspaceHistory` into the ax-proto `WorkspaceTrend` shape the
+/// daemon exposes over MCP. Keeps the library self-contained so callers
+/// that just want usage numbers don't need ax-proto.
+#[must_use]
+pub fn query_workspace_trends(resp: &HistoryResponse) -> Vec<ax_proto::usage::WorkspaceTrend> {
+    use ax_proto::usage::{AgentTrend, UsageBucket, WorkspaceTrend};
+
+    let bucket_duration = chrono::Duration::minutes(resp.bucket_minutes);
+    resp.workspaces
+        .iter()
+        .map(|ws| {
+            let buckets: Vec<UsageBucket> = ws
+                .recent_buckets
+                .iter()
+                .map(|b| UsageBucket {
+                    start: b.start,
+                    end: if b.end.timestamp() == 0 {
+                        b.start + bucket_duration
+                    } else {
+                        b.end
+                    },
+                    totals: b.tokens,
+                    mcp_proxy: b.mcp_proxy,
+                    turns: b.turns,
+                })
+                .collect();
+            let total = sum_bucket_totals(&buckets);
+            let mcp_proxy = sum_bucket_mcp(&buckets);
+            let agents = ws
+                .agents
+                .iter()
+                .map(|a| AgentTrend {
+                    agent: a.agent.clone(),
+                    available: a.available,
+                    latest_session_id: a.latest_session_id.clone(),
+                    latest_transcript_path: a.latest_transcript.clone(),
+                    buckets: a
+                        .recent_buckets
+                        .iter()
+                        .map(|b| UsageBucket {
+                            start: b.start,
+                            end: if b.end.timestamp() == 0 {
+                                b.start + bucket_duration
+                            } else {
+                                b.end
+                            },
+                            totals: b.tokens,
+                            mcp_proxy: b.mcp_proxy,
+                            turns: b.turns,
+                        })
+                        .collect(),
+                    total: a.current_snapshot.cumulative_totals,
+                    mcp_proxy: a.current_snapshot.cumulative_mcp_proxy,
+                    last_activity: a.current_snapshot.last_activity,
+                    latest_tokens: a.current_snapshot.current_context,
+                    latest_mcp_proxy: a.current_snapshot.current_mcp_proxy,
+                    latest_model: a.current_snapshot.current_model.clone(),
+                })
+                .collect();
+            WorkspaceTrend {
+                workspace: ws.workspace.clone(),
+                cwd: ws.dir.clone(),
+                available: ws.available,
+                error: String::new(),
+                unavailable_reason: ws.unavailable_reason.clone(),
+                window_start: resp.since,
+                window_end: resp.until,
+                bucket_minutes: resp.bucket_minutes,
+                buckets,
+                total,
+                mcp_proxy,
+                last_activity: ws.current_snapshot.last_activity,
+                latest_tokens: ws.current_snapshot.current_context,
+                latest_mcp_proxy: ws.current_snapshot.current_mcp_proxy,
+                latest_model: ws.current_snapshot.current_model.clone(),
+                agents,
+            }
+        })
+        .collect()
+}
+
+fn sum_bucket_totals(buckets: &[ax_proto::usage::UsageBucket]) -> Tokens {
+    let mut total = Tokens::default();
+    for b in buckets {
+        total = total + b.totals;
+    }
+    total
+}
+
+fn sum_bucket_mcp(buckets: &[ax_proto::usage::UsageBucket]) -> MCPProxyMetrics {
+    let mut total = MCPProxyMetrics::default();
+    for b in buckets {
+        total = add_mcp(total, b.mcp_proxy);
+    }
+    total
+}
+
+#[derive(Debug, Default, Clone)]
+struct DirScanState {
+    project_exists: bool,
+    transcripts_found: bool,
+    series: Vec<TranscriptSeries>,
+}
+
+#[allow(clippy::fn_params_excessive_bools)]
+fn unavailable_reason_for(
+    dir: &str,
+    project_exists: bool,
+    transcripts_found: bool,
+    codex_home_exists: bool,
+    codex_sessions_found: bool,
+) -> String {
+    if dir.is_empty() {
+        return "missing_workspace_dir".to_owned();
+    }
+    if !project_exists && !codex_home_exists {
+        return "no_project_transcripts".to_owned();
+    }
+    if !transcripts_found && !codex_sessions_found {
+        return "no_transcripts".to_owned();
+    }
+    "workspace_unattributed".to_owned()
+}
+
+/// Attribute transcript series to bindings via the same three-step
+/// heuristic Go uses: workspace hint first, then shared session id, and
+/// finally a unique-cwd fallback.
+fn assign_series<'a>(
+    bindings: &[WorkspaceBinding],
+    series: &'a [&'a TranscriptSeries],
+) -> std::collections::BTreeMap<String, Vec<&'a TranscriptSeries>> {
+    let mut assignments: std::collections::BTreeMap<String, Vec<&TranscriptSeries>> =
+        std::collections::BTreeMap::new();
+    let mut binding_by_name: std::collections::BTreeMap<String, &WorkspaceBinding> =
+        std::collections::BTreeMap::new();
+    let mut unique_by_dir: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+
+    for binding in bindings {
+        binding_by_name.insert(binding.name.clone(), binding);
+        let dir = clean_path(&binding.dir);
+        if dir.is_empty() {
+            continue;
+        }
+        match unique_by_dir.get(&dir) {
+            Some(existing) if existing != &binding.name => {
+                // Mark as ambiguous.
+                unique_by_dir.insert(dir, String::new());
+            }
+            Some(_) => {}
+            None => {
+                unique_by_dir.insert(dir, binding.name.clone());
+            }
+        }
+    }
+
+    // Pass 1: direct workspace-hint match.
+    let mut session_workspace: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+    for s in series {
+        if s.workspace_hint.is_empty() {
+            continue;
+        }
+        let Some(binding) = binding_by_name.get(&s.workspace_hint) else {
+            continue;
+        };
+        if !binding.dir.is_empty()
+            && !s.cwd.is_empty()
+            && clean_path(&binding.dir) != clean_path(&s.cwd)
+        {
+            continue;
+        }
+        assignments.entry(binding.name.clone()).or_default().push(s);
+        if !s.session_id.is_empty() {
+            session_workspace.insert(s.session_id.clone(), binding.name.clone());
+        }
+    }
+
+    // Pass 2: hint-less series → session id → unique cwd.
+    for s in series {
+        if !s.workspace_hint.is_empty() {
+            continue;
+        }
+        let mut workspace = String::new();
+        if !s.session_id.is_empty() {
+            if let Some(name) = session_workspace.get(&s.session_id) {
+                workspace.clone_from(name);
+            }
+        }
+        if workspace.is_empty() && !s.cwd.is_empty() {
+            let dir = clean_path(&s.cwd);
+            if let Some(name) = unique_by_dir.get(&dir) {
+                if !name.is_empty() {
+                    workspace.clone_from(name);
+                }
+            }
+        }
+        if workspace.is_empty() {
+            continue;
+        }
+        assignments.entry(workspace).or_default().push(s);
+    }
+
+    assignments
 }
