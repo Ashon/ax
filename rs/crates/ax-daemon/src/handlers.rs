@@ -209,6 +209,13 @@ fn require_registered(workspace: &str) -> Result<(), HandlerError> {
     Ok(())
 }
 
+pub(crate) fn response_envelope<T: serde::Serialize>(
+    id: &str,
+    data: &T,
+) -> Result<Envelope, HandlerError> {
+    response(id, data)
+}
+
 fn response<T: serde::Serialize>(id: &str, data: &T) -> Result<Envelope, HandlerError> {
     let data = serde_json::value::RawValue::from_string(serde_json::to_string(data)?)?;
     Envelope::new(
@@ -289,6 +296,10 @@ pub(crate) fn handle_envelope(
         ),
         MessageType::ReadMessages => HandlerOutput::Response(
             handle_read_messages(ctx, env, workspace)
+                .unwrap_or_else(|e| error_envelope(&env.id, e.to_string())),
+        ),
+        MessageType::UsageTrends => HandlerOutput::Response(
+            crate::usage_trends::handle_usage_trends(env)
                 .unwrap_or_else(|e| error_envelope(&env.id, e.to_string())),
         ),
         _ => HandlerOutput::Response(error_envelope(

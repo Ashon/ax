@@ -10,7 +10,9 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+ax-agent = { path = "../ax-agent" }
 ax-proto = { path = "../ax-proto" }
+ax-usage = { path = "../ax-usage" }
 chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -20,5 +22,8 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+chrono = { workspace = true }
+hex = { workspace = true }
+sha1 = { workspace = true }
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "fs", "test-util"] }

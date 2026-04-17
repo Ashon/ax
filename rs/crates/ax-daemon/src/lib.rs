@@ -12,6 +12,7 @@ mod queue;
 mod registry;
 mod server;
 mod socket_path;
+mod usage_trends;
 
 pub use queue::MessageQueue;
 pub use registry::Registry;

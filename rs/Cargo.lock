@@ -47,10 +47,14 @@ dependencies = [
 name = "ax-daemon"
 version = "0.1.0"
 dependencies = [
+ "ax-agent",
  "ax-proto",
+ "ax-usage",
  "chrono",
+ "hex",
  "serde",
  "serde_json",
+ "sha1",
  "tempfile",
  "thiserror",
  "tokio",

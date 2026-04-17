@@ -599,77 +599,113 @@ pub fn query_history(
 /// that just want usage numbers don't need ax-proto.
 #[must_use]
 pub fn query_workspace_trends(resp: &HistoryResponse) -> Vec<ax_proto::usage::WorkspaceTrend> {
-    use ax_proto::usage::{AgentTrend, UsageBucket, WorkspaceTrend};
+    use ax_proto::usage::WorkspaceTrend;
 
     let bucket_duration = chrono::Duration::minutes(resp.bucket_minutes);
     resp.workspaces
         .iter()
         .map(|ws| {
-            let buckets: Vec<UsageBucket> = ws
-                .recent_buckets
-                .iter()
-                .map(|b| UsageBucket {
-                    start: b.start,
-                    end: if b.end.timestamp() == 0 {
-                        b.start + bucket_duration
-                    } else {
-                        b.end
-                    },
-                    totals: b.tokens,
-                    mcp_proxy: b.mcp_proxy,
-                    turns: b.turns,
-                })
-                .collect();
-            let total = sum_bucket_totals(&buckets);
-            let mcp_proxy = sum_bucket_mcp(&buckets);
-            let agents = ws
-                .agents
-                .iter()
-                .map(|a| AgentTrend {
-                    agent: a.agent.clone(),
-                    available: a.available,
-                    latest_session_id: a.latest_session_id.clone(),
-                    latest_transcript_path: a.latest_transcript.clone(),
-                    buckets: a
-                        .recent_buckets
-                        .iter()
-                        .map(|b| UsageBucket {
-                            start: b.start,
-                            end: if b.end.timestamp() == 0 {
-                                b.start + bucket_duration
-                            } else {
-                                b.end
-                            },
-                            totals: b.tokens,
-                            mcp_proxy: b.mcp_proxy,
-                            turns: b.turns,
-                        })
-                        .collect(),
-                    total: a.current_snapshot.cumulative_totals,
-                    mcp_proxy: a.current_snapshot.cumulative_mcp_proxy,
-                    last_activity: a.current_snapshot.last_activity,
-                    latest_tokens: a.current_snapshot.current_context,
-                    latest_mcp_proxy: a.current_snapshot.current_mcp_proxy,
-                    latest_model: a.current_snapshot.current_model.clone(),
-                })
-                .collect();
-            WorkspaceTrend {
+            let mut trend = WorkspaceTrend {
                 workspace: ws.workspace.clone(),
                 cwd: ws.dir.clone(),
                 available: ws.available,
-                error: String::new(),
                 unavailable_reason: ws.unavailable_reason.clone(),
                 window_start: resp.since,
                 window_end: resp.until,
                 bucket_minutes: resp.bucket_minutes,
+                ..WorkspaceTrend::default()
+            };
+            if !ws.available {
+                trend.error.clone_from(&ws.unavailable_reason);
+                return trend;
+            }
+            trend.buckets = make_usage_buckets(&ws.recent_buckets, bucket_duration);
+            trend.total = sum_bucket_totals(&trend.buckets);
+            trend.mcp_proxy = sum_bucket_mcp(&trend.buckets);
+            trend.last_activity = ws.current_snapshot.last_activity;
+            trend.latest_tokens = ws.current_snapshot.current_context;
+            trend.latest_mcp_proxy = ws.current_snapshot.current_mcp_proxy;
+            trend
+                .latest_model
+                .clone_from(&ws.current_snapshot.current_model);
+            trend.agents = make_agent_trends(&ws.agents, bucket_duration);
+            trend
+        })
+        .collect()
+}
+
+/// Convenience wrapper matching Go's `usage.QueryWorkspaceTrends`
+/// signature: builds the `HistoryQuery` window from `(now, since,
+/// bucket)`, runs [`query_history`], and reshapes the result. Zero
+/// `since` / `bucket` pick up the Go-compatible defaults.
+pub fn query_workspace_trends_for(
+    bindings: &[WorkspaceBinding],
+    now: DateTime<Utc>,
+    since: Duration,
+    bucket: Duration,
+) -> Result<Vec<ax_proto::usage::WorkspaceTrend>, HistoryError> {
+    let since = if since.as_secs() == 0 {
+        DEFAULT_HISTORY_WINDOW
+    } else {
+        since
+    };
+    let bucket = if bucket.as_secs() == 0 {
+        DEFAULT_BUCKET_SIZE
+    } else {
+        bucket
+    };
+    let window = chrono::Duration::from_std(since).unwrap_or(chrono::Duration::zero());
+    let query = HistoryQuery {
+        since: now - window,
+        until: now,
+        bucket_size: bucket,
+    };
+    let resp = query_history(bindings, &query)?;
+    Ok(query_workspace_trends(&resp))
+}
+
+fn make_usage_buckets(
+    buckets: &[Bucket],
+    bucket_duration: chrono::Duration,
+) -> Vec<ax_proto::usage::UsageBucket> {
+    buckets
+        .iter()
+        .map(|b| ax_proto::usage::UsageBucket {
+            start: b.start,
+            end: if b.end.timestamp() == 0 {
+                b.start + bucket_duration
+            } else {
+                b.end
+            },
+            totals: b.tokens,
+            mcp_proxy: b.mcp_proxy,
+            turns: b.turns,
+        })
+        .collect()
+}
+
+fn make_agent_trends(
+    agents: &[AgentHistory],
+    bucket_duration: chrono::Duration,
+) -> Vec<ax_proto::usage::AgentTrend> {
+    agents
+        .iter()
+        .map(|a| {
+            let buckets = make_usage_buckets(&a.recent_buckets, bucket_duration);
+            let total = sum_bucket_totals(&buckets);
+            let mcp_proxy = sum_bucket_mcp(&buckets);
+            ax_proto::usage::AgentTrend {
+                agent: a.agent.clone(),
+                available: a.available,
+                latest_session_id: a.latest_session_id.clone(),
+                latest_transcript_path: a.latest_transcript.clone(),
                 buckets,
                 total,
                 mcp_proxy,
-                last_activity: ws.current_snapshot.last_activity,
-                latest_tokens: ws.current_snapshot.current_context,
-                latest_mcp_proxy: ws.current_snapshot.current_mcp_proxy,
-                latest_model: ws.current_snapshot.current_model.clone(),
-                agents,
+                last_activity: a.current_snapshot.last_activity,
+                latest_tokens: a.current_snapshot.current_context,
+                latest_mcp_proxy: a.current_snapshot.current_mcp_proxy,
+                latest_model: a.current_snapshot.current_model.clone(),
             }
         })
         .collect()
