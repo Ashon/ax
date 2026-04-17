@@ -13,6 +13,7 @@ workspace = true
 ax-agent = { path = "../ax-agent" }
 ax-proto = { path = "../ax-proto" }
 ax-usage = { path = "../ax-usage" }
+ax-workspace = { path = "../ax-workspace" }
 chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -22,6 +23,7 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+ax-tmux = { path = "../ax-tmux" }
 chrono = { workspace = true }
 hex = { workspace = true }
 sha1 = { workspace = true }

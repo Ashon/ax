@@ -129,6 +129,7 @@ async fn run_accept_loop(
             accept = listener.accept() => match accept {
                 Ok((conn, _)) => {
                     let ctx = HandlerCtx {
+                        socket_path: socket_path.clone(),
                         registry: registry.clone(),
                         queue: queue.clone(),
                         shared: shared.clone(),

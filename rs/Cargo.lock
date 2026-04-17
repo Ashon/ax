@@ -60,7 +60,9 @@ version = "0.1.0"
 dependencies = [
  "ax-agent",
  "ax-proto",
+ "ax-tmux",
  "ax-usage",
+ "ax-workspace",
  "chrono",
  "hex",
  "serde",

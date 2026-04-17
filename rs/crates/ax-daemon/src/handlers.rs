@@ -6,22 +6,27 @@
 //! handler set. Persistence side-effects, task-store dispatch, and
 //! session-manager wake ensuring will land in later slices.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::Utc;
 use uuid::Uuid;
 
 use ax_proto::payloads::{
-    BroadcastPayload, GetSharedPayload, ReadMessagesPayload, RecallMemoriesPayload,
-    RegisterPayload, RememberMemoryPayload, SendMessagePayload, SetSharedPayload, SetStatusPayload,
+    BroadcastPayload, ControlLifecyclePayload, GetSharedPayload, ReadMessagesPayload,
+    RecallMemoriesPayload, RegisterPayload, RememberMemoryPayload, SendMessagePayload,
+    SetSharedPayload, SetStatusPayload,
 };
 use ax_proto::responses::{
-    BroadcastResponse, GetSharedResponse, ListSharedResponse, ListWorkspacesResponse,
-    MemoryResponse, ReadMessagesResponse, RecallMemoriesResponse, SendMessageResponse,
-    StatusResponse,
+    BroadcastResponse, ControlLifecycleResponse, GetSharedResponse, ListSharedResponse,
+    ListWorkspacesResponse, MemoryResponse, ReadMessagesResponse, RecallMemoriesResponse,
+    SendMessageResponse, StatusResponse,
 };
-use ax_proto::types::Message;
+use ax_proto::types::{LifecycleAction, Message};
 use ax_proto::{Envelope, ErrorPayload, MessageType, ResponsePayload};
+use ax_workspace::{
+    restart_named_target, start_named_target, stop_named_target, RealTmux, TmuxBackend,
+};
 
 use crate::memory::{Query as MemoryQuery, Store as MemoryStore};
 use crate::queue::MessageQueue;
@@ -30,6 +35,7 @@ use crate::shared_values::SharedValues;
 
 /// Context shared across handlers for one connected client.
 pub(crate) struct HandlerCtx {
+    pub socket_path: PathBuf,
     pub registry: Arc<Registry>,
     pub queue: Arc<MessageQueue>,
     pub shared: Arc<SharedValues>,
@@ -107,6 +113,15 @@ pub(crate) fn handle_set_status(
             status: "ok".into(),
         },
     )
+}
+
+pub(crate) fn handle_control_lifecycle(
+    ctx: &HandlerCtx,
+    env: &Envelope,
+    workspace: &str,
+) -> Result<Envelope, HandlerError> {
+    let ax_bin = current_ax_bin()?;
+    handle_control_lifecycle_with_tmux(ctx, env, workspace, &RealTmux, &ax_bin)
 }
 
 pub(crate) fn handle_send_message(
@@ -309,6 +324,75 @@ fn require_registered(workspace: &str) -> Result<(), HandlerError> {
     Ok(())
 }
 
+fn handle_control_lifecycle_with_tmux<B: TmuxBackend + Clone>(
+    ctx: &HandlerCtx,
+    env: &Envelope,
+    workspace: &str,
+    tmux: &B,
+    ax_bin: &Path,
+) -> Result<Envelope, HandlerError> {
+    let payload: ControlLifecyclePayload = env
+        .decode_payload()
+        .map_err(|e| HandlerError::DecodePayload("control_lifecycle", e))?;
+    require_registered(workspace)?;
+
+    let config_path = payload.config_path.trim();
+    if config_path.is_empty() {
+        return Err(HandlerError::Logic("config_path is required".into()));
+    }
+    let target_name = payload.name.trim();
+    if target_name.is_empty() {
+        return Err(HandlerError::Logic("name is required".into()));
+    }
+
+    let action = payload.action;
+    let target = control_lifecycle_target(
+        tmux,
+        &ctx.socket_path,
+        Path::new(config_path),
+        ax_bin,
+        target_name,
+        &action,
+    )?;
+    ctx.registry.touch(workspace, Utc::now());
+
+    response(
+        &env.id,
+        &ControlLifecycleResponse {
+            target,
+            running: !matches!(action, LifecycleAction::Stop),
+            action,
+        },
+    )
+}
+
+fn control_lifecycle_target<B: TmuxBackend + Clone>(
+    tmux: &B,
+    socket_path: &Path,
+    config_path: &Path,
+    ax_bin: &Path,
+    target_name: &str,
+    action: &LifecycleAction,
+) -> Result<ax_proto::types::LifecycleTarget, HandlerError> {
+    match action {
+        LifecycleAction::Start => {
+            start_named_target(tmux, socket_path, config_path, ax_bin, target_name)
+        }
+        LifecycleAction::Stop => {
+            stop_named_target(tmux, socket_path, config_path, ax_bin, target_name)
+        }
+        LifecycleAction::Restart => {
+            restart_named_target(tmux, socket_path, config_path, ax_bin, target_name)
+        }
+    }
+    .map_err(|e| HandlerError::Logic(e.to_string()))
+}
+
+fn current_ax_bin() -> Result<PathBuf, HandlerError> {
+    std::env::current_exe()
+        .map_err(|e| HandlerError::Logic(format!("resolve current executable: {e}")))
+}
+
 pub(crate) fn response_envelope<T: serde::Serialize>(
     id: &str,
     data: &T,
@@ -386,6 +470,10 @@ pub(crate) fn handle_envelope(
             handle_set_status(ctx, env, workspace)
                 .unwrap_or_else(|e| error_envelope(&env.id, e.to_string())),
         ),
+        MessageType::ControlLifecycle => HandlerOutput::Response(
+            handle_control_lifecycle(ctx, env, workspace)
+                .unwrap_or_else(|e| error_envelope(&env.id, e.to_string())),
+        ),
         MessageType::SendMessage => HandlerOutput::Response(
             handle_send_message(ctx, env, workspace)
                 .unwrap_or_else(|e| error_envelope(&env.id, e.to_string())),
@@ -434,4 +522,238 @@ pub(crate) enum HandlerOutput {
         receiver: tokio::sync::mpsc::Receiver<Envelope>,
         previous_outbox: Option<tokio::sync::mpsc::Sender<Envelope>>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::{BTreeMap, HashSet};
+    use std::fs;
+
+    use tempfile::TempDir;
+
+    use ax_proto::ResponsePayload;
+    use ax_workspace::TmuxBackend;
+
+    #[derive(Debug, Default, Clone)]
+    struct FakeTmux {
+        sessions: Arc<std::sync::Mutex<HashSet<String>>>,
+    }
+
+    impl TmuxBackend for FakeTmux {
+        fn session_exists(&self, workspace: &str) -> bool {
+            self.sessions
+                .lock()
+                .expect("sessions lock")
+                .contains(workspace)
+        }
+
+        fn list_sessions(&self) -> Result<Vec<ax_tmux::SessionInfo>, ax_tmux::TmuxError> {
+            Ok(Vec::new())
+        }
+
+        fn is_idle(&self, _workspace: &str) -> bool {
+            true
+        }
+
+        fn create_session(
+            &self,
+            workspace: &str,
+            _dir: &str,
+            _shell: &str,
+            _env: &BTreeMap<String, String>,
+        ) -> Result<(), ax_tmux::TmuxError> {
+            self.sessions
+                .lock()
+                .expect("sessions lock")
+                .insert(workspace.to_owned());
+            Ok(())
+        }
+
+        fn create_session_with_command(
+            &self,
+            workspace: &str,
+            _dir: &str,
+            _command: &str,
+            _env: &BTreeMap<String, String>,
+        ) -> Result<(), ax_tmux::TmuxError> {
+            self.sessions
+                .lock()
+                .expect("sessions lock")
+                .insert(workspace.to_owned());
+            Ok(())
+        }
+
+        fn create_session_with_args(
+            &self,
+            workspace: &str,
+            _dir: &str,
+            _argv: &[String],
+            _env: &BTreeMap<String, String>,
+        ) -> Result<(), ax_tmux::TmuxError> {
+            self.sessions
+                .lock()
+                .expect("sessions lock")
+                .insert(workspace.to_owned());
+            Ok(())
+        }
+
+        fn destroy_session(&self, workspace: &str) -> Result<(), ax_tmux::TmuxError> {
+            self.sessions
+                .lock()
+                .expect("sessions lock")
+                .remove(workspace);
+            Ok(())
+        }
+    }
+
+    fn test_ctx(socket_path: PathBuf) -> HandlerCtx {
+        HandlerCtx {
+            socket_path,
+            registry: Registry::new(),
+            queue: MessageQueue::new(),
+            shared: SharedValues::in_memory(),
+            memory: MemoryStore::in_memory(),
+        }
+    }
+
+    fn decode_response<T: for<'de> serde::Deserialize<'de>>(env: &Envelope) -> T {
+        assert_eq!(env.r#type, MessageType::Response);
+        let wrap: ResponsePayload = env.decode_payload().expect("response payload");
+        assert!(wrap.success);
+        serde_json::from_str(wrap.data.get()).expect("decode response body")
+    }
+
+    fn write_config(root: &TempDir, body: &str) -> PathBuf {
+        let config_path = root.path().join(".ax").join("config.yaml");
+        fs::create_dir_all(config_path.parent().expect("config dir")).expect("create config dir");
+        fs::write(&config_path, body).expect("write config");
+        config_path
+    }
+
+    #[test]
+    fn control_lifecycle_start_returns_running_target() {
+        let root = TempDir::new().expect("tempdir");
+        let config_path = write_config(
+            &root,
+            "project: demo\nworkspaces:\n  worker:\n    dir: ./worker\n    runtime: claude\n",
+        );
+        let ctx = test_ctx(root.path().join("daemon.sock"));
+        ctx.registry.register("caller", "/tmp/caller", "", "");
+        let env = Envelope::new(
+            "ctl-1",
+            MessageType::ControlLifecycle,
+            &ControlLifecyclePayload {
+                config_path: config_path.display().to_string(),
+                name: "worker".into(),
+                action: LifecycleAction::Start,
+            },
+        )
+        .expect("encode envelope");
+
+        let response = handle_control_lifecycle_with_tmux(
+            &ctx,
+            &env,
+            "caller",
+            &FakeTmux::default(),
+            Path::new("/tmp/ax-rs"),
+        )
+        .expect("control lifecycle");
+
+        let decoded: ControlLifecycleResponse = decode_response(&response);
+        assert_eq!(decoded.target.name, "worker");
+        assert!(decoded.running);
+        assert_eq!(decoded.action, LifecycleAction::Start);
+    }
+
+    #[test]
+    fn control_lifecycle_requires_registration() {
+        let root = TempDir::new().expect("tempdir");
+        let config_path = write_config(
+            &root,
+            "project: demo\nworkspaces:\n  worker:\n    dir: ./worker\n    runtime: claude\n",
+        );
+        let ctx = test_ctx(root.path().join("daemon.sock"));
+        let env = Envelope::new(
+            "ctl-2",
+            MessageType::ControlLifecycle,
+            &ControlLifecyclePayload {
+                config_path: config_path.display().to_string(),
+                name: "worker".into(),
+                action: LifecycleAction::Start,
+            },
+        )
+        .expect("encode envelope");
+
+        let err = handle_control_lifecycle_with_tmux(
+            &ctx,
+            &env,
+            "",
+            &FakeTmux::default(),
+            Path::new("/tmp/ax-rs"),
+        )
+        .expect_err("missing registration should fail");
+        assert_eq!(err.to_string(), "not registered");
+    }
+
+    #[test]
+    fn control_lifecycle_requires_config_path() {
+        let root = TempDir::new().expect("tempdir");
+        let ctx = test_ctx(root.path().join("daemon.sock"));
+        ctx.registry.register("caller", "/tmp/caller", "", "");
+        let env = Envelope::new(
+            "ctl-3",
+            MessageType::ControlLifecycle,
+            &ControlLifecyclePayload {
+                config_path: String::new(),
+                name: "worker".into(),
+                action: LifecycleAction::Start,
+            },
+        )
+        .expect("encode envelope");
+
+        let err = handle_control_lifecycle_with_tmux(
+            &ctx,
+            &env,
+            "caller",
+            &FakeTmux::default(),
+            Path::new("/tmp/ax-rs"),
+        )
+        .expect_err("missing config should fail");
+        assert_eq!(err.to_string(), "config_path is required");
+    }
+
+    #[test]
+    fn control_lifecycle_propagates_target_errors() {
+        let root = TempDir::new().expect("tempdir");
+        let config_path = write_config(
+            &root,
+            "project: demo\norchestrator_runtime: claude\nworkspaces:\n  worker:\n    dir: ./worker\n    runtime: claude\n",
+        );
+        let ctx = test_ctx(root.path().join("daemon.sock"));
+        ctx.registry.register("caller", "/tmp/caller", "", "");
+        let env = Envelope::new(
+            "ctl-4",
+            MessageType::ControlLifecycle,
+            &ControlLifecyclePayload {
+                config_path: config_path.display().to_string(),
+                name: "orchestrator".into(),
+                action: LifecycleAction::Stop,
+            },
+        )
+        .expect("encode envelope");
+
+        let err = handle_control_lifecycle_with_tmux(
+            &ctx,
+            &env,
+            "caller",
+            &FakeTmux::default(),
+            Path::new("/tmp/ax-rs"),
+        )
+        .expect_err("root orchestrator should fail");
+        assert_eq!(
+            err.to_string(),
+            "orchestrator \"orchestrator\" does not support targeted stop because it is not a managed session"
+        );
+    }
 }
