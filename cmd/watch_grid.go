@@ -360,31 +360,32 @@ func padCardInterior(content string, width int) string {
 }
 
 // overlayQuickActionsOnGrid patches the quick-action overlay into the grid
-// body just under the selected card, emulating the sidebar behaviour.
+// body just under the selected card, sized to match the card (not the whole
+// pane) so it visually attaches to the agent it targets.
 func (m watchModel) overlayQuickActionsOnGrid(items []flatItem, lines []string, innerW int) []string {
 	if !m.quickActionsOpen {
 		return lines
 	}
-	// Locate selected card's row in the rendered output. Group headers take
-	// 1 row; each agent row takes watchCardHeight + watchCardGapV rows. We
-	// walk items accumulating rows until we hit the selected card.
-	rowAcc := 0
 	columns := max(1, (innerW-watchGridPaddingLeft)/(watchCardWidth+watchCardGapH))
+	// Walk grid rows until we locate the selected card. Track both the row
+	// accumulator (lines before the card row) and the column position within
+	// the current card row so the overlay can be spliced at the correct
+	// offset and width rather than replacing entire lines.
+	rowAcc := 0
+	selectedCol := -1
 	var rowItems []flatItem
-	flushLen := 0
 	for _, item := range items {
 		if item.card == nil {
 			if len(rowItems) > 0 {
-				rowAcc += flushLen
+				rowAcc += watchCardHeight + watchCardGapV
 				rowItems = nil
-				flushLen = 0
 			}
 			rowAcc++
 			continue
 		}
 		rowItems = append(rowItems, item)
 		if item.card.sessionIndex == m.selected {
-			flushLen = watchCardHeight + watchCardGapV
+			selectedCol = len(rowItems) - 1
 			break
 		}
 		if len(rowItems) >= columns {
@@ -392,26 +393,71 @@ func (m watchModel) overlayQuickActionsOnGrid(items []flatItem, lines []string, 
 			rowItems = nil
 		}
 	}
-	if flushLen == 0 {
+	if selectedCol < 0 {
 		return lines
 	}
 	overlayStart := rowAcc + watchCardHeight
 	if overlayStart >= len(lines) {
 		return lines
 	}
-	overlayRows := m.renderGridQuickActionOverlay(innerW)
-	return overlaySidebarFrom(lines, overlayRows, overlayStart)
+	// Overlay width matches the card width so it visually attaches to the
+	// selected agent rather than stretching across the pane.
+	overlayWidth := watchCardWidth
+	colOffset := 1 + watchGridPaddingLeft + selectedCol*(watchCardWidth+watchCardGapH)
+	overlayRows := m.renderGridQuickActionOverlay(overlayWidth)
+	return spliceRowsAtColumn(lines, overlayRows, overlayStart, colOffset, overlayWidth)
 }
 
-func (m watchModel) renderGridQuickActionOverlay(innerW int) []string {
-	prefix := " " + strings.Repeat(" ", watchGridPaddingLeft)
+// spliceRowsAtColumn overwrites a rectangular sub-region of `lines` with the
+// provided overlay rows. Each lines entry is assumed to be already padded
+// with border characters on both sides; we preserve the runes outside the
+// target column range so the surrounding grid cells stay visible.
+func spliceRowsAtColumn(lines, overlay []string, rowStart, colStart, width int) []string {
+	if len(overlay) == 0 || len(lines) == 0 || rowStart < 0 || rowStart >= len(lines) {
+		return lines
+	}
+	maxRows := len(lines) - rowStart
+	if len(overlay) > maxRows {
+		overlay = overlay[:maxRows]
+	}
+	for i, overlayLine := range overlay {
+		base := lines[rowStart+i]
+		lines[rowStart+i] = overwriteAtColumn(base, overlayLine, colStart, width)
+	}
+	return lines
+}
+
+// overwriteAtColumn replaces the [colStart, colStart+width) rune range of
+// base with overlay, padding/truncating overlay to exactly width. base must
+// be wide enough to contain the range; otherwise it is returned unchanged.
+func overwriteAtColumn(base, overlay string, colStart, width int) string {
+	baseRunes := []rune(base)
+	if colStart+width > len(baseRunes) {
+		return base
+	}
+	// Normalise overlay to exactly the target rune width, trimming or padding
+	// as required so we never disturb the border column on the right.
+	if lipgloss.Width(overlay) > width {
+		overlay = fitDisplayText(overlay, width)
+	}
+	if pad := width - lipgloss.Width(overlay); pad > 0 {
+		overlay += strings.Repeat(" ", pad)
+	}
+	out := make([]rune, 0, len(baseRunes))
+	out = append(out, baseRunes[:colStart]...)
+	out = append(out, []rune(overlay)...)
+	out = append(out, baseRunes[colStart+width:]...)
+	return string(out)
+}
+
+func (m watchModel) renderGridQuickActionOverlay(width int) []string {
 	workspaceName := m.selectedWorkspaceName()
 	if m.quickActionConfirm {
 		action, ok := m.selectedQuickAction()
 		if !ok {
 			return nil
 		}
-		return renderWatchSidebarOverlay(prefix, innerW, []string{
+		return renderGridOverlayBox(width, []string{
 			strings.TrimSpace(workspaceName + " " + strings.ToLower(action.Label)),
 			"confirm",
 		}, []sidebarOverlayRow{
@@ -431,9 +477,33 @@ func (m watchModel) renderGridQuickActionOverlay(innerW int) []string {
 		}
 		rows = append(rows, sidebarOverlayRow{text: raw, style: style})
 	}
-	return renderWatchSidebarOverlay(prefix, innerW, []string{
+	return renderGridOverlayBox(width, []string{
 		strings.TrimSpace(fmt.Sprintf("%s actions %d/%d", workspaceName, m.quickActionSelected+1, len(m.quickActions))),
 		fmt.Sprintf("actions %d/%d", m.quickActionSelected+1, len(m.quickActions)),
 		"actions",
 	}, rows)
+}
+
+// renderGridOverlayBox draws a freestanding bordered box exactly `width`
+// columns wide. Unlike renderWatchSidebarOverlay it does not wrap each line
+// with outer pane borders; the caller is responsible for splicing the result
+// into the grid rows so only one set of border characters ends up visible.
+func renderGridOverlayBox(width int, titleCandidates []string, rows []sidebarOverlayRow) []string {
+	if width < 4 {
+		return nil
+	}
+	contentW := width - 2
+
+	title := ""
+	if titleText := firstFittingDisplay(max(0, contentW-3), titleCandidates...); titleText != "" {
+		title = headerStyle.Render(" " + titleText + " ")
+	}
+	lines := []string{renderPanelTopBorder(borderClr, title, contentW)}
+	for _, row := range rows {
+		text := fitDisplayText(row.text, contentW)
+		padding := contentW - lipgloss.Width(text)
+		lines = append(lines, borderClr.Render("│")+row.style.Render(text)+strings.Repeat(" ", padding)+borderClr.Render("│"))
+	}
+	lines = append(lines, borderClr.Render("╰"+strings.Repeat("─", contentW)+"╯"))
+	return lines
 }
