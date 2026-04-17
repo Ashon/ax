@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/ax-agent",
     "crates/ax-config",
+    "crates/ax-daemon",
     "crates/ax-proto",
     "crates/ax-tmux",
     "crates/ax-usage",
