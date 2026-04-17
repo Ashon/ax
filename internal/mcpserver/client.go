@@ -293,16 +293,15 @@ func (c *DaemonClient) SendMessage(to, message, configPath string) (*SendMessage
 	if err != nil {
 		return nil, err
 	}
-	var result map[string]string
+	var result daemon.SendMessageResponse
 	if err := decodeResponseData(resp, &result); err != nil {
 		return nil, fmt.Errorf("decode send_message response: %w", err)
 	}
-	sendResult := &SendMessageResult{
-		MessageID: result["message_id"],
-		Status:    result["status"],
-	}
-	sendResult.Suppressed = sendResult.Status == "suppressed"
-	return sendResult, nil
+	return &SendMessageResult{
+		MessageID:  result.MessageID,
+		Status:     result.Status,
+		Suppressed: result.Status == "suppressed",
+	}, nil
 }
 
 func (c *DaemonClient) ReadMessages(limit int, from string) ([]types.Message, error) {
@@ -381,18 +380,11 @@ func (c *DaemonClient) BroadcastMessage(message, configPath string) ([]string, e
 	if err != nil {
 		return nil, err
 	}
-	var result map[string]interface{}
+	var result daemon.BroadcastResponse
 	if err := decodeResponseData(resp, &result); err != nil {
 		return nil, fmt.Errorf("decode broadcast response: %w", err)
 	}
-	recipients, _ := result["recipients"].([]interface{})
-	var names []string
-	for _, r := range recipients {
-		if s, ok := r.(string); ok {
-			names = append(names, s)
-		}
-	}
-	return names, nil
+	return result.Recipients, nil
 }
 
 func (c *DaemonClient) ListWorkspaces() ([]types.WorkspaceInfo, error) {

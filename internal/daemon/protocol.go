@@ -267,6 +267,22 @@ type UsageTrendsResponse struct {
 	Trends []usage.WorkspaceTrend `json:"trends"`
 }
 
+// StatusResponse is the canonical shape for handlers whose only reply is a
+// single status verb (e.g. register, set_status, set_shared).
+type StatusResponse struct {
+	Status string `json:"status"`
+}
+
+type SendMessageResponse struct {
+	MessageID string `json:"message_id"`
+	Status    string `json:"status"`
+}
+
+type BroadcastResponse struct {
+	Recipients []string `json:"recipients"`
+	Count      int      `json:"count"`
+}
+
 // Task responses
 
 type TaskResponse struct {

@@ -44,7 +44,7 @@ func (d *Daemon) handleRegisterEnvelope(conn net.Conn, env *Envelope, workspace 
 	rehydrated := d.rehydrateRunnableTaskMessages(p.Workspace, false, true)
 	d.refreshTaskSnapshots()
 	d.logger.Printf("registered workspace %q (rehydrated_tasks=%d)", p.Workspace, rehydrated)
-	return NewResponseEnvelope(env.ID, map[string]string{"status": "registered"})
+	return NewResponseEnvelope(env.ID, &StatusResponse{Status: "registered"})
 }
 
 func (d *Daemon) handleUnregisterEnvelope(conn net.Conn, env *Envelope, workspace *string) (*Envelope, error) {
@@ -57,7 +57,7 @@ func (d *Daemon) handleUnregisterEnvelope(conn net.Conn, env *Envelope, workspac
 		}
 		*workspace = ""
 	}
-	return NewResponseEnvelope(env.ID, map[string]string{"status": "unregistered"})
+	return NewResponseEnvelope(env.ID, &StatusResponse{Status: "unregistered"})
 }
 
 func (d *Daemon) handleSendMessageEnvelope(env *Envelope, workspace string) (*Envelope, error) {
@@ -73,9 +73,8 @@ func (d *Daemon) handleSendMessageEnvelope(env *Envelope, workspace string) (*En
 	}
 	if d.shouldSuppressDuplicateMessage(workspace, p.To, p.Message) {
 		d.logger.Printf("suppressed duplicate no-op message %s -> %s: %s", workspace, p.To, truncate(p.Message, 50))
-		return NewResponseEnvelope(env.ID, map[string]string{
-			"message_id": "",
-			"status":     "suppressed",
+		return NewResponseEnvelope(env.ID, &SendMessageResponse{
+			Status: "suppressed",
 		})
 	}
 
@@ -100,9 +99,9 @@ func (d *Daemon) handleSendMessageEnvelope(env *Envelope, workspace string) (*En
 		}
 	}
 
-	return NewResponseEnvelope(env.ID, map[string]string{
-		"message_id": msg.ID,
-		"status":     "sent",
+	return NewResponseEnvelope(env.ID, &SendMessageResponse{
+		MessageID: msg.ID,
+		Status:    "sent",
 	})
 }
 
@@ -162,9 +161,9 @@ func (d *Daemon) handleBroadcastEnvelope(env *Envelope, workspace string) (*Enve
 		}
 	}
 
-	return NewResponseEnvelope(env.ID, map[string]interface{}{
-		"recipients": recipients,
-		"count":      len(recipients),
+	return NewResponseEnvelope(env.ID, &BroadcastResponse{
+		Recipients: recipients,
+		Count:      len(recipients),
 	})
 }
 
@@ -217,7 +216,7 @@ func (d *Daemon) handleSetStatusEnvelope(env *Envelope, workspace string) (*Enve
 	d.registry.SetStatus(workspace, p.Status)
 	d.registry.Touch(workspace)
 	d.refreshTaskSnapshots()
-	return NewResponseEnvelope(env.ID, map[string]string{"status": "updated"})
+	return NewResponseEnvelope(env.ID, &StatusResponse{Status: "updated"})
 }
 
 func (d *Daemon) handleSetSharedEnvelope(env *Envelope) (*Envelope, error) {
@@ -233,7 +232,7 @@ func (d *Daemon) handleSetSharedEnvelope(env *Envelope) (*Envelope, error) {
 	if err := persistSharedValues(d.sharedPath, sharedValuesCopy); err != nil {
 		d.logger.Printf("persist shared values: %v", err)
 	}
-	return NewResponseEnvelope(env.ID, map[string]string{"status": "stored"})
+	return NewResponseEnvelope(env.ID, &StatusResponse{Status: "stored"})
 }
 
 func (d *Daemon) handleGetSharedEnvelope(env *Envelope) (*Envelope, error) {
