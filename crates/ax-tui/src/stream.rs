@@ -15,15 +15,12 @@ use ax_daemon::{expand_socket_path, HistoryEntry};
 
 const HISTORY_FILE_NAME: &str = "message_history.jsonl";
 
-/// Which stream the body pane is showing. Only [`StreamView::Messages`]
-/// is wired in this slice; the others still resolve to a placeholder.
+/// Which stream the body pane is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) enum StreamView {
     Messages,
     Tasks,
     Tokens,
-    Hidden,
 }
 
 impl StreamView {
@@ -32,23 +29,18 @@ impl StreamView {
             Self::Messages => " messages ",
             Self::Tasks => " tasks ",
             Self::Tokens => " tokens ",
-            Self::Hidden => " grid ",
         }
     }
 
-    /// Tab-bar label — no surrounding whitespace, matches the button
-    /// text rendered in the bottom strip.
     pub(crate) fn tab_label(self) -> &'static str {
         match self {
             Self::Messages => "messages",
             Self::Tasks => "tasks",
             Self::Tokens => "tokens",
-            Self::Hidden => "grid",
         }
     }
 
-    /// Tab cycle order used by Tab/s and the tab-bar renderer.
-    pub(crate) const ALL: [Self; 4] = [Self::Messages, Self::Tasks, Self::Tokens, Self::Hidden];
+    pub(crate) const ALL: [Self; 3] = [Self::Messages, Self::Tasks, Self::Tokens];
 
     pub(crate) fn next(self) -> Self {
         let idx = Self::ALL.iter().position(|v| *v == self).unwrap_or(0);
@@ -195,10 +187,9 @@ mod tests {
     }
 
     #[test]
-    fn stream_view_next_cycles_all_four_tabs() {
+    fn stream_view_next_cycles_messages_tasks_tokens() {
         assert_eq!(StreamView::Messages.next(), StreamView::Tasks);
         assert_eq!(StreamView::Tasks.next(), StreamView::Tokens);
-        assert_eq!(StreamView::Tokens.next(), StreamView::Hidden);
-        assert_eq!(StreamView::Hidden.next(), StreamView::Messages);
+        assert_eq!(StreamView::Tokens.next(), StreamView::Messages);
     }
 }

@@ -148,76 +148,180 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_sidebar(f: &mut Frame, area: Rect, app: &App) {
+    let block = Block::default().borders(Borders::ALL).title(" agents ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
     if app.sidebar_entries.is_empty() {
         let empty = Paragraph::new(
             "No active agents. Run `ax up` in a project directory with .ax/config.yaml.",
         )
-        .wrap(Wrap { trim: true })
-        .block(Block::default().borders(Borders::ALL).title(" agents "));
-        f.render_widget(empty, area);
+        .wrap(Wrap { trim: true });
+        f.render_widget(empty, inner);
         return;
     }
 
+    let cols = SidebarColumns::fit(inner.width);
+    let header_area = Rect::new(inner.x, inner.y, inner.width, 1);
+    draw_sidebar_header(f, header_area, &cols);
+
+    let list_area = Rect::new(
+        inner.x,
+        inner.y + 1,
+        inner.width,
+        inner.height.saturating_sub(1),
+    );
     let items: Vec<ListItem> = app
         .sidebar_entries
         .iter()
         .enumerate()
-        .map(|(idx, entry)| sidebar_item(idx, entry, app))
+        .map(|(idx, entry)| sidebar_row(idx, entry, app, &cols))
         .collect();
-    let list = List::new(items).block(Block::default().borders(Borders::ALL).title(" agents "));
-    f.render_widget(list, area);
+    f.render_widget(List::new(items), list_area);
 }
 
-fn sidebar_item<'a>(idx: usize, entry: &'a SidebarEntry, app: &'a App) -> ListItem<'a> {
-    let indent = "  ".repeat(entry.level);
+/// Column widths for the agents table. `name` flexes to fill the
+/// remainder; the rest are fixed so rows line up across refreshes.
+struct SidebarColumns {
+    name: usize,
+    state: usize,
+    up: usize,
+    down: usize,
+    cost: usize,
+    info: usize,
+}
+
+impl SidebarColumns {
+    fn fit(width: u16) -> Self {
+        let state = 12;
+        let up = 8;
+        let down = 8;
+        let cost = 10;
+        let info = 14;
+        let gaps = 5; // 5 single-space gaps between 6 columns
+        let fixed = state + up + down + cost + info + gaps;
+        let name = (width as usize).saturating_sub(fixed).max(10);
+        Self {
+            name,
+            state,
+            up,
+            down,
+            cost,
+            info,
+        }
+    }
+}
+
+fn draw_sidebar_header(f: &mut Frame, area: Rect, cols: &SidebarColumns) {
+    let text = format!(
+        "{:<w1$} {:<w2$} {:<w3$} {:<w4$} {:<w5$} {:<w6$}",
+        "NAME",
+        "STATE",
+        "UP",
+        "DOWN",
+        "COST",
+        "INFO",
+        w1 = cols.name,
+        w2 = cols.state,
+        w3 = cols.up,
+        w4 = cols.down,
+        w5 = cols.cost,
+        w6 = cols.info,
+    );
+    let para = Paragraph::new(Line::from(Span::styled(
+        text,
+        Style::default().add_modifier(Modifier::DIM),
+    )));
+    f.render_widget(para, area);
+}
+
+fn sidebar_row<'a>(
+    idx: usize,
+    entry: &'a SidebarEntry,
+    app: &'a App,
+    cols: &SidebarColumns,
+) -> ListItem<'a> {
     if entry.group {
-        let span = Span::styled(
+        let indent = "  ".repeat(entry.level);
+        return ListItem::new(Line::from(Span::styled(
             format!("{indent}{}", entry.label),
             Style::default().add_modifier(Modifier::BOLD),
-        );
-        return ListItem::new(Line::from(span));
+        )));
     }
 
     let live = entry.session_index.is_some();
     let is_selected = idx == app.selected_entry;
+    let cursor = if is_selected { "▸" } else { " " };
+    let indent = "  ".repeat(entry.level);
     let marker = if live { "●" } else { "○" };
-    let marker_style = if live {
-        Style::default().fg(Color::Green)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
+    let name_raw = format!("{cursor} {indent}{marker} {}", entry.label);
 
-    let cursor = if is_selected { "▸ " } else { "  " };
-    let name_style = if is_selected {
-        Style::default().add_modifier(Modifier::REVERSED)
-    } else if live {
-        Style::default()
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
+    let info_opt = app.workspace_infos.get(&entry.workspace);
+    let state_raw = info_opt.map_or("offline", |w| agent_status_str(&w.status));
 
-    let agent_state = app
-        .workspace_infos
+    let capture = app
+        .captures
+        .entries
         .get(&entry.workspace)
-        .map_or("offline", |ws| agent_status_str(&ws.status));
-    let reconcile_label = if entry.reconcile.is_empty() {
-        agent_state
+        .map_or("", |e| e.content.as_str());
+    let tokens = crate::tokens::parse_agent_tokens(&entry.workspace, capture);
+    let up_raw = token_cell(&tokens.up, '↑');
+    let down_raw = token_cell(&tokens.down, '↓');
+    let cost_raw = if tokens.cost.is_empty() {
+        "-".to_owned()
     } else {
-        entry.reconcile.as_str()
+        tokens.cost
     };
 
-    let spans = vec![
-        Span::raw(cursor.to_string()),
-        Span::raw(indent),
-        Span::styled(format!("{marker} "), marker_style),
-        Span::styled(entry.label.clone(), name_style),
-        Span::raw("  "),
-        Span::styled(
-            reconcile_label.to_owned(),
-            Style::default().add_modifier(Modifier::DIM),
-        ),
-    ];
-    ListItem::new(Line::from(spans))
+    let info_raw = if entry.reconcile.is_empty() {
+        info_opt
+            .map(|w| w.status_text.clone())
+            .unwrap_or_default()
+    } else {
+        entry.reconcile.clone()
+    };
+
+    let text = format!(
+        "{name} {state} {up} {down} {cost} {info}",
+        name = pad_or_trunc(&name_raw, cols.name),
+        state = pad_or_trunc(state_raw, cols.state),
+        up = pad_or_trunc(&up_raw, cols.up),
+        down = pad_or_trunc(&down_raw, cols.down),
+        cost = pad_or_trunc(&cost_raw, cols.cost),
+        info = pad_or_trunc(&info_raw, cols.info),
+    );
+
+    let style = if is_selected {
+        Style::default().add_modifier(Modifier::REVERSED)
+    } else if !live {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default()
+    };
+    ListItem::new(Line::from(Span::styled(text, style)))
+}
+
+fn token_cell(raw: &str, arrow: char) -> String {
+    if raw.is_empty() {
+        return "-".to_owned();
+    }
+    let value = crate::tokens::parse_token_value(raw);
+    format!("{arrow}{}", crate::tokens::format_token_count(value))
+}
+
+fn pad_or_trunc(s: &str, width: usize) -> String {
+    let count = s.chars().count();
+    if count > width {
+        return crate::tasks::truncate(s, width);
+    }
+    let mut out = s.to_owned();
+    for _ in count..width {
+        out.push(' ');
+    }
+    out
 }
 
 fn draw_body(f: &mut Frame, area: Rect, app: &App) {
@@ -229,13 +333,11 @@ fn draw_body(f: &mut Frame, area: Rect, app: &App) {
         StreamView::Messages => draw_messages(f, area, app),
         StreamView::Tasks => draw_tasks(f, area, app),
         StreamView::Tokens => draw_tokens(f, area, app),
-        StreamView::Hidden => draw_selection_summary(f, area, app),
     }
 }
 
-/// Tab strip at the foot of the body pane so the rotating stream
-/// views (messages/tasks/tokens/grid) are visible at a glance. Tab/s
-/// and the number keys 1–4 still drive the switch.
+/// Tab strip above the stream pane. Tab/s and the number keys 1-3
+/// drive the switch.
 fn draw_stream_tabs(f: &mut Frame, area: Rect, app: &App) {
     if area.height == 0 || area.width == 0 {
         return;
@@ -317,27 +419,6 @@ fn draw_messages(f: &mut Frame, area: Rect, app: &App) {
         .map(|entry| Line::from(Span::raw(format_message_line(entry, inner_width.max(1)))))
         .collect();
     let para = Paragraph::new(lines).block(block);
-    f.render_widget(para, area);
-}
-
-#[allow(dead_code)]
-fn draw_stub_view(f: &mut Frame, area: Rect, app: &App) {
-    let text = format!(
-        "{} view lands in a follow-up slice — press Tab / s to cycle back to messages",
-        match app.stream {
-            StreamView::Tasks => "tasks",
-            StreamView::Tokens => "tokens",
-            _ => "stream",
-        }
-    );
-    let para = Paragraph::new(text)
-        .wrap(Wrap { trim: true })
-        .style(Style::default().add_modifier(Modifier::DIM))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(app.stream.title()),
-        );
     f.render_widget(para, area);
 }
 
@@ -720,122 +801,8 @@ fn build_detail_lines<'a>(
     out
 }
 
-fn draw_selection_summary(f: &mut Frame, area: Rect, app: &App) {
-    // Draw the tmux capture grid when there are live sessions to
-    // preview; fall back to the selection summary when the daemon
-    // is idle.
-    if !app.sessions.is_empty() {
-        draw_capture_grid(f, area, app);
-        return;
-    }
-    let body = match current_entry(app) {
-        Some(entry) => {
-            let ws = &entry.workspace;
-            let info = app
-                .workspace_infos
-                .get(ws)
-                .map_or_else(|| "(offline)".to_owned(), workspace_info_summary);
-            format!(
-                "workspace: {ws}\nsession: {}\nagent:    {}",
-                entry
-                    .session_index
-                    .and_then(|idx| app.sessions.get(idx))
-                    .map_or_else(|| "none".to_owned(), |s| s.name.clone()),
-                info,
-            )
-        }
-        None => "pick a workspace on the left".to_owned(),
-    };
-    let para = Paragraph::new(body).wrap(Wrap { trim: false }).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(app.stream.title()),
-    );
-    f.render_widget(para, area);
-}
-
-const CAPTURE_CARD_WIDTH: u16 = 36;
-const CAPTURE_CARD_HEIGHT: u16 = 8;
-
-fn draw_capture_grid(f: &mut Frame, area: Rect, app: &App) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(StreamView::Hidden.title());
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-
-    let columns = (inner.width / CAPTURE_CARD_WIDTH.max(1)).max(1) as usize;
-    let card_w = CAPTURE_CARD_WIDTH.min(inner.width);
-    let card_h = CAPTURE_CARD_HEIGHT.min(inner.height);
-    let rows = (inner.height / card_h.max(1)).max(1) as usize;
-    let budget = columns.saturating_mul(rows);
-
-    // Show every workspace that's running a tmux session, cut at
-    // the grid capacity; extras simply don't render (operator can
-    // enlarge the window or pick another view).
-    let focused = app.selected_workspace();
-    for (idx, session) in app.sessions.iter().take(budget).enumerate() {
-        let col = (idx % columns) as u16;
-        let row = (idx / columns) as u16;
-        let x = inner.x + col * card_w;
-        let y = inner.y + row * card_h;
-        let card_area = Rect::new(x, y, card_w, card_h);
-        draw_capture_card(f, card_area, session, app, focused);
-    }
-}
-
-fn draw_capture_card(
-    f: &mut Frame,
-    area: Rect,
-    session: &ax_tmux::SessionInfo,
-    app: &App,
-    focused: Option<&str>,
-) {
-    let selected = focused == Some(session.workspace.as_str());
-    let border_style = if selected {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let title = format!(" {} ", session.workspace);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(border_style)
-        .title(title);
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-    if inner.height == 0 || inner.width == 0 {
-        return;
-    }
-
-    let capture = app
-        .captures
-        .entries
-        .get(&session.workspace)
-        .map_or("", |entry| entry.content.as_str());
-    if capture.is_empty() {
-        let para =
-            Paragraph::new("(capturing…)").style(Style::default().add_modifier(Modifier::DIM));
-        f.render_widget(para, inner);
-        return;
-    }
-    let rows = inner.height as usize;
-    let width = inner.width as usize;
-    let lines: Vec<Line> = crate::captures::recent_lines(capture, rows)
-        .into_iter()
-        .map(|line| Line::from(Span::raw(sanitize_capture_line(line, width))))
-        .collect();
-    let para = Paragraph::new(lines);
-    f.render_widget(para, inner);
-}
-
-/// Strip ANSI escape sequences + truncate to the given width so
-/// capture previews don't break the grid border. We capture
-/// without `-e` (no escapes) so this is just a width clamp today;
-/// keeping the hook for when colour passthrough lands.
+/// Strip control characters + truncate to the given width so the
+/// single-workspace stream mirror doesn't break its border.
 fn sanitize_capture_line(line: &str, width: usize) -> String {
     let mut clean: String = line
         .chars()
@@ -855,21 +822,6 @@ fn sanitize_capture_line(line: &str, width: usize) -> String {
     let mut truncated: String = clean.chars().take(width - 1).collect();
     truncated.push('…');
     truncated
-}
-
-fn current_entry(app: &App) -> Option<&SidebarEntry> {
-    app.sidebar_entries
-        .get(app.selected_entry)
-        .filter(|e| !e.group && e.session_index.is_some())
-}
-
-fn workspace_info_summary(info: &ax_proto::types::WorkspaceInfo) -> String {
-    let status = agent_status_str(&info.status);
-    if info.status_text.is_empty() {
-        status.to_owned()
-    } else {
-        format!("{status} — {}", info.status_text)
-    }
 }
 
 fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
