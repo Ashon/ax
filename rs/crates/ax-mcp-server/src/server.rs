@@ -29,12 +29,14 @@ use ax_proto::payloads::{
     InterveneTaskPayload, ListTasksPayload, ReadMessagesPayload, RecallMemoriesPayload,
     RememberMemoryPayload, RemoveTaskPayload, SendMessagePayload, SetSharedPayload,
     SetStatusPayload, StartTaskPayload, TeamReconfigurePayload, UpdateTaskPayload,
+    UsageTrendWorkspace, UsageTrendsPayload,
 };
 use ax_proto::responses::{
     AgentLifecycleResponse, BroadcastResponse, GetSharedResponse, InterveneTaskResponse,
     ListSharedResponse, ListTasksResponse, ListWorkspacesResponse, MemoryResponse,
     ReadMessagesResponse, RecallMemoriesResponse, SendMessageResponse, StartTaskResponse,
     StatusResponse, TaskResponse, TeamApplyResponse, TeamPlanResponse, TeamStateResponse,
+    UsageTrendsResponse,
 };
 use ax_proto::types::{
     AgentStatus, LifecycleAction, TaskStatus, TeamApplyTicket, TeamChangeOp, TeamChildSpec,
@@ -375,6 +377,46 @@ pub struct SendKeysRequest {
     /// Ordered key sequence. Named tmux keys (Enter, Escape, `C-c`, …)
     /// are resolved as-is; anything else is typed literally.
     pub keys: Vec<String>,
+}
+
+const DEFAULT_INSPECT_QUESTION: &str = "현재 운영 상태를 간단히 요약해줘. 담당 역할, 최근 작업, 대기 중인 이슈, 핵심 지표나 리스크가 있으면 함께 알려줘. 포트폴리오 개발팀을 맡고 있다면 담당 서비스나 기능, 최근 변경사항, 남은 개발 과제, 배포 또는 운영 리스크를 짧게 포함해줘.";
+
+#[derive(Debug, schemars::JsonSchema, Deserialize)]
+pub struct InspectAgentRequest {
+    /// Configured agent/workspace name.
+    pub name: String,
+    /// Optional custom question. Defaults to asking for current
+    /// operating status, recent work, risks, and key metrics.
+    #[serde(default)]
+    pub question: Option<String>,
+    /// Max seconds to wait for reply. Defaults to 120.
+    #[serde(default)]
+    pub timeout: Option<i64>,
+}
+
+#[derive(Debug, schemars::JsonSchema, Deserialize)]
+pub struct RequestMessageRequest {
+    /// Target workspace name.
+    pub to: String,
+    /// Task or question to send.
+    pub message: String,
+    /// Max seconds to wait for reply. Defaults to 120.
+    #[serde(default)]
+    pub timeout: Option<i64>,
+}
+
+#[derive(Debug, Default, schemars::JsonSchema, Deserialize)]
+pub struct UsageTrendsRequest {
+    /// Optional workspace name filter. When omitted, queries all
+    /// active workspaces.
+    #[serde(default)]
+    pub workspace: Option<String>,
+    /// History window in minutes. Defaults to 180.
+    #[serde(default)]
+    pub since_minutes: Option<i64>,
+    /// Bucket size in minutes. Defaults to 5.
+    #[serde(default)]
+    pub bucket_minutes: Option<i64>,
 }
 
 #[derive(Debug, Default, schemars::JsonSchema, Deserialize)]
@@ -1493,6 +1535,159 @@ impl Server {
             resp.recipients.join(", ")
         ))]))
     }
+
+    /// `inspect_agent` — ask a target workspace for a status summary
+    /// and block until it replies (or the timeout expires).
+    #[tool(
+        description = "Ask a specific ax agent to summarize its current operating state. Useful after list_agents finds a target such as a portfolio development team agent."
+    )]
+    pub async fn inspect_agent(
+        &self,
+        Parameters(req): Parameters<InspectAgentRequest>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let cfg_path = self
+            .resolve_tool_config_path()
+            .await
+            .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
+        let cfg = Config::load(&cfg_path)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("load ax config: {e}"), None))?;
+        let ws = cfg.workspaces.get(&req.name).ok_or_else(|| {
+            rmcp::ErrorData::invalid_params(
+                format!(
+                    "Agent {:?} is not defined in {}",
+                    req.name,
+                    cfg_path.display()
+                ),
+                None,
+            )
+        })?;
+
+        let question = req
+            .question
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map_or_else(|| DEFAULT_INSPECT_QUESTION.to_owned(), ToOwned::to_owned);
+        let timeout = req.timeout.unwrap_or(120).max(1);
+
+        let caller = self.daemon.workspace().to_owned();
+        let full_message = format!(
+            "{question}\n\n[ax] 작업 완료 후 반드시 send_message(to=\"{caller}\") 로 결과를 보내주세요."
+        );
+
+        let sent = self
+            .send_workspace_message(&req.name, &full_message, &cfg_path)
+            .await?;
+        if sent.message_id.is_empty() {
+            return Ok(CallToolResult::success(vec![Content::text(format!(
+                "Inspection request to {:?} was suppressed as a duplicate no-op/status update.",
+                req.name
+            ))]));
+        }
+
+        let reply = self
+            .poll_for_reply(&req.name, timeout)
+            .await
+            .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&serde_json::json!({
+                "agent": req.name,
+                "description": ws.description,
+                "question": question,
+                "status_reply": reply,
+            }))
+            .unwrap_or_default(),
+        )]))
+    }
+
+    /// `request` — synchronous message to another workspace with a
+    /// reply-polling deadline. Recipients are told to call
+    /// `send_message` back once they are done.
+    #[tool(
+        description = "Send a task to another workspace agent and wait for the reply. This wakes the target agent via tmux and polls for a response. Use this instead of send_message when you need the result back."
+    )]
+    pub async fn request_message(
+        &self,
+        Parameters(req): Parameters<RequestMessageRequest>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let cfg_path = self
+            .resolve_tool_config_path()
+            .await
+            .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
+        let timeout = req.timeout.unwrap_or(120).max(1);
+        let caller = self.daemon.workspace().to_owned();
+        let full_message = format!(
+            "{}\n\n[ax/request] 이 메시지는 동기 요청입니다. `{caller}`가 당신의 응답을 기다리고 있습니다. 작업이 끝나면 즉시 `send_message(to=\"{caller}\")`로 결과를 회신하세요. 하위 워크스페이스에 위임할 때는 `request`가 아닌 `send_message`를 병렬로 사용한 뒤 `read_messages`로 수집하세요.",
+            req.message
+        );
+
+        let sent = self
+            .send_workspace_message(&req.to, &full_message, &cfg_path)
+            .await?;
+        if sent.message_id.is_empty() {
+            return Err(rmcp::ErrorData::internal_error(
+                format!(
+                    "Request to {:?} was suppressed as a duplicate no-op/status update",
+                    req.to
+                ),
+                None,
+            ));
+        }
+
+        let reply = self
+            .poll_for_reply(&req.to, timeout)
+            .await
+            .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
+        Ok(CallToolResult::success(vec![Content::text(reply)]))
+    }
+
+    /// `get_usage_trends` — recent Claude/Codex token trends per
+    /// workspace, optionally filtered by name.
+    #[tool(
+        description = "Return recent Claude token trend data for active ax workspaces, including per-agent breakout when transcript attribution is available."
+    )]
+    pub async fn get_usage_trends(
+        &self,
+        Parameters(req): Parameters<UsageTrendsRequest>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let workspace = req
+            .workspace
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_owned();
+        let since_minutes = req.since_minutes.filter(|v| *v > 0).unwrap_or(180);
+        let bucket_minutes = req.bucket_minutes.filter(|v| *v > 0).unwrap_or(5);
+
+        let requests = self
+            .build_usage_trend_requests(&workspace)
+            .await
+            .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
+
+        let resp: UsageTrendsResponse = self
+            .daemon
+            .request(
+                MessageType::UsageTrends,
+                &UsageTrendsPayload {
+                    workspaces: requests,
+                    since_minutes,
+                    bucket_minutes,
+                },
+            )
+            .await
+            .map_err(tool_error)?;
+
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&serde_json::json!({
+                "workspace": workspace,
+                "since_minutes": since_minutes,
+                "bucket_minutes": bucket_minutes,
+                "trends": resp.trends,
+            }))
+            .unwrap_or_default(),
+        )]))
+    }
 }
 
 impl Server {
@@ -1545,6 +1740,118 @@ impl Server {
             return Ok(PathBuf::from(state.state.effective_config_path));
         }
         Ok(base)
+    }
+
+    async fn send_workspace_message(
+        &self,
+        target: &str,
+        message: &str,
+        config_path: &Path,
+    ) -> Result<SendMessageResponse, rmcp::ErrorData> {
+        self.daemon
+            .request::<_, SendMessageResponse>(
+                MessageType::SendMessage,
+                &SendMessagePayload {
+                    to: target.to_owned(),
+                    message: message.to_owned(),
+                    config_path: config_path.display().to_string(),
+                },
+            )
+            .await
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(format!("Failed to send message: {e}"), None)
+            })
+    }
+
+    async fn poll_for_reply(&self, from: &str, timeout_secs: i64) -> Result<String, String> {
+        use std::time::{Duration, Instant};
+        let deadline = Instant::now() + Duration::from_secs(timeout_secs.max(1) as u64);
+        loop {
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "Timeout: no reply from {from:?} within {timeout_secs}s"
+                ));
+            }
+            let resp: ReadMessagesResponse = self
+                .daemon
+                .request(
+                    MessageType::ReadMessages,
+                    &ReadMessagesPayload {
+                        limit: 10,
+                        from: from.to_owned(),
+                    },
+                )
+                .await
+                .map_err(|e| format!("read_messages: {e}"))?;
+            if !resp.messages.is_empty() {
+                let mut out = String::new();
+                for msg in &resp.messages {
+                    out.push_str(&msg.content);
+                    out.push('\n');
+                }
+                return Ok(out.trim().to_owned());
+            }
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        }
+    }
+
+    async fn build_usage_trend_requests(
+        &self,
+        workspace_name: &str,
+    ) -> Result<Vec<UsageTrendWorkspace>, String> {
+        let active: ListWorkspacesResponse = self
+            .daemon
+            .request(MessageType::ListWorkspaces, &serde_json::json!({}))
+            .await
+            .map_err(|e| format!("list active workspaces: {e}"))?;
+        let mut active_by_name: BTreeMap<String, WorkspaceInfo> = BTreeMap::new();
+        for ws in &active.workspaces {
+            active_by_name.insert(ws.name.clone(), ws.clone());
+        }
+
+        if !workspace_name.is_empty() {
+            if let Some(ws) = active_by_name.get(workspace_name) {
+                if !ws.dir.trim().is_empty() {
+                    return Ok(vec![UsageTrendWorkspace {
+                        workspace: workspace_name.to_owned(),
+                        cwd: ws.dir.trim().to_owned(),
+                    }]);
+                }
+            }
+            let cfg_path = self.resolve_tool_config_path().await?;
+            let cfg = Config::load(&cfg_path)
+                .map_err(|e| format!("load ax config for workspace {workspace_name:?}: {e}"))?;
+            if let Some(ws) = cfg.workspaces.get(workspace_name) {
+                if !ws.dir.trim().is_empty() {
+                    return Ok(vec![UsageTrendWorkspace {
+                        workspace: workspace_name.to_owned(),
+                        cwd: ws.dir.trim().to_owned(),
+                    }]);
+                }
+            }
+            return Err(format!(
+                "workspace {workspace_name:?} not found in active registry or {}",
+                cfg_path.display()
+            ));
+        }
+
+        let mut requests: Vec<UsageTrendWorkspace> = Vec::with_capacity(active.workspaces.len());
+        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for ws in &active.workspaces {
+            if !seen.insert(ws.name.clone()) {
+                continue;
+            }
+            let cwd = ws.dir.trim();
+            if cwd.is_empty() {
+                continue;
+            }
+            requests.push(UsageTrendWorkspace {
+                workspace: ws.name.clone(),
+                cwd: cwd.to_owned(),
+            });
+        }
+        requests.sort_by(|a, b| a.workspace.cmp(&b.workspace));
+        Ok(requests)
     }
 
     fn resolve_base_config_path(&self) -> Result<PathBuf, String> {
