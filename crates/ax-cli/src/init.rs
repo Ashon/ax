@@ -63,6 +63,10 @@ pub(crate) struct InitOptions {
     pub socket_path: PathBuf,
     pub daemon_running: bool,
     pub axis: Axis,
+    /// When `true`, run in reconfigure mode: require an existing
+    /// config.yaml, hand it to the setup agent with a preserve-axis
+    /// directive, and let the agent rewrite workspaces in place.
+    pub reconfigure: bool,
 }
 
 pub(crate) fn run(opts: &InitOptions) -> Result<String, InitError> {
@@ -80,6 +84,10 @@ pub(crate) fn run(opts: &InitOptions) -> Result<String, InitError> {
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default()
     };
+
+    if opts.reconfigure {
+        return run_reconfigure(opts, &dir, &path);
+    }
 
     let already_exists = path.exists();
     if already_exists {
@@ -132,7 +140,16 @@ pub(crate) fn run(opts: &InitOptions) -> Result<String, InitError> {
 fn run_setup_agent(project_dir: &Path, config_path: &Path, runtime: &str, axis: Axis) -> Result<(), InitError> {
     let system_prompt = build_setup_system_prompt(config_path, runtime, axis);
     let user_prompt = "프로젝트 구조를 파악해서 워크스페이스 구성을 결정하고 config.yaml에 작성해주세요. 작성 완료 후 어떤 워크스페이스를 만들었는지 요약해주세요.";
+    invoke_setup_agent(project_dir, config_path, runtime, &system_prompt, user_prompt)
+}
 
+fn invoke_setup_agent(
+    project_dir: &Path,
+    config_path: &Path,
+    runtime: &str,
+    system_prompt: &str,
+    user_prompt: &str,
+) -> Result<(), InitError> {
     if runtime == "codex" {
         let Ok(bin) = which("codex") else {
             println!("codex CLI not found — skipping setup.");
@@ -177,7 +194,7 @@ fn run_setup_agent(project_dir: &Path, config_path: &Path, runtime: &str, axis: 
             "stream-json",
             "--verbose",
             "--append-system-prompt",
-            &system_prompt,
+            system_prompt,
             user_prompt,
         ])
         .current_dir(project_dir)
@@ -362,6 +379,117 @@ const AXIS_ROLE_DIRECTIVE: &str = "\
 const AXIS_DOMAIN_DIRECTIVE: &str = "\
 ### 축 지시: `--axis domain`\n\
 사용자가 **도메인 중심**을 지정했습니다. 관찰 결과에서 비즈니스 도메인을 추출해 도메인 이름(users, billing, inventory, ...)으로 팀을 구성하세요. 관찰에서 도메인이 뚜렷하지 않으면 가장 그럴듯한 도메인 분할을 제안하고 rationale에 \"현재 도메인 경계가 덜 명확하니 이후 재검토 권장\"을 명시하세요.";
+
+/// Execute the `ax init --reconfigure` flow: require an existing
+/// config.yaml, extract its axis, and hand it to the setup agent
+/// with a preserve-axis prompt. On success the config is rewritten
+/// in place; git diff gives the operator undo.
+fn run_reconfigure(opts: &InitOptions, dir: &Path, path: &Path) -> Result<String, InitError> {
+    if opts.global {
+        return Err(InitError::ReconfigureGlobalUnsupported);
+    }
+    if !matches!(opts.axis, Axis::Auto) {
+        return Err(InitError::ReconfigureAxisSwitchUnsupported);
+    }
+    if !path.exists() {
+        return Err(InitError::ReconfigureMissingConfig(path.to_path_buf()));
+    }
+    let current_yaml = std::fs::read_to_string(path).map_err(InitError::Io)?;
+    let current_axis = extract_axis_comment(&current_yaml);
+
+    let mut out = String::new();
+    let axis_banner = match current_axis.as_deref() {
+        Some(a) => format!("Detected axis from existing config: `{a}` — preserving.\n"),
+        None => "No `# axis:` comment in existing config — treating as unlabelled; \
+                 the reconfigure agent will infer from workspace names and record \
+                 the inferred axis on rewrite.\n"
+            .to_owned(),
+    };
+    out.push_str(&axis_banner);
+
+    if opts.no_setup {
+        out.push_str("--no-setup set; aborting before launching the reconfigure agent.\n");
+        return Ok(out);
+    }
+
+    let _ = writeln!(out, "\nLaunching reconfigure agent ({})...", opts.runtime);
+    out.push_str("The agent will read the current config, compare it to the repo, and rewrite workspaces in place.\n\n");
+    print!("{out}");
+    std::io::Write::flush(&mut std::io::stdout()).ok();
+
+    let system_prompt = build_reconfigure_system_prompt(
+        path,
+        &opts.runtime,
+        current_axis.as_deref(),
+        &current_yaml,
+    );
+    let user_prompt = "현재 config.yaml과 저장소 상태를 비교해 팀 구성을 재조정하세요. 축은 보존하고, 편집이 끝나면 어떤 워크스페이스가 추가/제거/이름변경/분리/통합됐는지와 그 근거를 요약해주세요.";
+    invoke_setup_agent(dir, path, &opts.runtime, &system_prompt, user_prompt)?;
+    Ok(String::new())
+}
+
+/// Read the top of `yaml` and return the first `# axis: VALUE` hit.
+/// Bounded to the first 10 lines because the convention is for the
+/// axis/rationale comments to live at the head of the file.
+fn extract_axis_comment(yaml: &str) -> Option<String> {
+    for line in yaml.lines().take(10) {
+        let body = line.strip_prefix('#')?.trim();
+        // We only want axis-labelled comments. Other leading comments
+        // just skip onward.
+        if let Some(rest) = body.to_ascii_lowercase().strip_prefix("axis:") {
+            let value = rest.split_whitespace().next()?.to_owned();
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+fn build_reconfigure_system_prompt(
+    config_path: &Path,
+    runtime: &str,
+    current_axis: Option<&str>,
+    current_yaml: &str,
+) -> String {
+    let cp = config_path.display();
+    let axis_line = match current_axis {
+        Some(a) => format!("현재 축: `{a}` — **보존해야 합니다**. 축을 바꾸지 마세요."),
+        None => "현재 `# axis:` 주석이 없습니다. 기존 워크스페이스 이름을 보고 역할/도메인 중 어느 쪽인지 추론한 뒤, 추론한 축을 보존해야 합니다."
+            .to_owned(),
+    };
+    format!(
+        "당신은 ax 프로젝트 **재구성(reconfigure)** 에이전트입니다. 사용자가 `ax init --reconfigure`를 실행했고, 당신의 일은 기존 {cp}를 유지·편집해 현재 저장소 상태와 맞추는 것입니다.\n\n\
+## 대원칙 — 축 보존\n\
+이 프로젝트는 과거에 축(axis)을 한 번 결정했습니다. 그 축은 지금도 유효합니다. 재구성은 **같은 축 안에서의 split/merge/rename/add/remove**만 허용됩니다. 축 전환(role → domain 또는 그 반대)은 이 흐름의 범위 밖이며, 사용자가 축 전환을 원한다면 수동으로 config.yaml을 재작성해야 합니다.\n\n\
+{axis_line}\n\n\
+## 현재 config.yaml 내용\n\
+```yaml\n\
+{current_yaml}```\n\n\
+## 절차\n\
+1. **관찰**: 현재 저장소 구조를 읽으세요 (Glob/Read로 디렉토리 구조, README, 주요 manifest 파일). 기존 workspaces 목록과 비교해서 어떤 영역이 커지고·사라지고·새로 생겼는지 파악하세요.\n\
+2. **드리프트 식별**: 다음 다섯 가지 중 해당되는 것만 제안하세요.\n   \
+- **split**: 한 워크스페이스가 너무 넓어져서 두 에이전트가 항상 충돌하는 경우.\n   \
+- **merge**: 두 워크스페이스가 실질적으로 같은 경계를 다루고 있을 때.\n   \
+- **rename**: 이름이 실제 역할과 어긋날 때 (description도 함께 재작성).\n   \
+- **add**: 저장소에 새 영역이 생겼는데 담당 워크스페이스가 없을 때.\n   \
+- **remove**: 워크스페이스 디렉토리가 비어있거나 폐기된 경우.\n   \
+변경이 필요 없으면 config를 그대로 두고 그 판단을 요약에 적으세요.\n\
+3. **편집**: {cp}을 직접 수정하세요. 최상단의 `# axis:` 주석은 그대로 두고, 바로 아래에 `# reconfigured: <YYYY-MM-DD>` 한 줄을 **추가**하세요 (기존 reconfigured 줄은 최신 날짜로 갱신). workspaces 섹션을 재작성.\n\
+4. **확인 요청 금지**: 사용자에게 묻지 말고 바로 편집하세요. 편집 후 변경 내역을 요약해서 보여주면 됩니다.\n\n\
+## 편집 규칙\n\
+- 축을 절대 바꾸지 마세요. 이름을 새 축 스타일로 뒤집거나, 도메인 + 역할을 섞지 마세요.\n\
+- description은 **왜** 이 워크스페이스가 존재하는지 한 문장으로. 재구성 시 기존 description이 현실과 안 맞으면 재작성.\n\
+- instructions의 경계 조항(어떤 파일을 건드리지 말 것)은 rename/split 시 업데이트 필요.\n\
+- 런타임은 기존 값을 유지하는 걸 기본으로, 필요할 때만 {runtime}로 변경.\n\
+- 변경이 없다고 판단하면 `# reconfigured:` 라인만 갱신하고 workspaces는 그대로 두세요.\n\n\
+## 산출 형식\n\
+편집이 끝나면 다음을 보고하세요.\n\
+- 보존된 축과 rationale (기존 comment 유지 여부).\n\
+- 변경 목록: split/merge/rename/add/remove 각각 몇 건, 어떤 워크스페이스가 영향받았는지.\n\
+- 변경하지 않은 이유 (변경이 없을 경우)."
+    )
+}
 
 fn register_as_child(
     child_dir: &Path,
@@ -624,6 +752,9 @@ pub(crate) enum InitError {
     SpawnAgent(std::io::Error),
     AgentExit { runtime: String, code: Option<i32> },
     LegacyConfigConflict(PathBuf),
+    ReconfigureMissingConfig(PathBuf),
+    ReconfigureAxisSwitchUnsupported,
+    ReconfigureGlobalUnsupported,
 }
 
 impl std::fmt::Display for InitError {
@@ -641,6 +772,19 @@ impl std::fmt::Display for InitError {
             ),
             Self::LegacyConfigConflict(p) => {
                 write!(f, "legacy config already exists at {}", p.display())
+            }
+            Self::ReconfigureMissingConfig(p) => write!(
+                f,
+                "no config at {} — run `ax init` first before `--reconfigure`",
+                p.display()
+            ),
+            Self::ReconfigureAxisSwitchUnsupported => f.write_str(
+                "--axis together with --reconfigure is not supported yet; \
+                 axis switching changes workspace names + directories and needs \
+                 a manual plan. Edit config.yaml directly if you want to switch axes.",
+            ),
+            Self::ReconfigureGlobalUnsupported => {
+                f.write_str("--reconfigure does not apply to --global configs")
             }
         }
     }
@@ -685,6 +829,59 @@ mod tests {
         let p = build_setup_system_prompt(Path::new("/tmp/.ax/config.yaml"), "codex", Axis::Domain);
         assert!(p.contains("--axis domain"));
         assert!(p.contains("도메인 이름"));
+    }
+
+    #[test]
+    fn extract_axis_comment_reads_head_comment() {
+        let body = "# axis: domain\n# rationale: bounded contexts\nproject: shop\n";
+        assert_eq!(extract_axis_comment(body).as_deref(), Some("domain"));
+    }
+
+    #[test]
+    fn extract_axis_comment_case_insensitive_and_tolerates_spaces() {
+        let body = "#   Axis:   hybrid   \nproject: x\n";
+        assert_eq!(extract_axis_comment(body).as_deref(), Some("hybrid"));
+    }
+
+    #[test]
+    fn extract_axis_comment_returns_none_without_marker() {
+        let body = "project: plain\nworkspaces: {}\n";
+        assert!(extract_axis_comment(body).is_none());
+    }
+
+    #[test]
+    fn extract_axis_comment_skips_over_unrelated_leading_comments() {
+        let body = "# generated by ax\n# axis: role\nproject: x\n";
+        assert_eq!(extract_axis_comment(body).as_deref(), Some("role"));
+    }
+
+    #[test]
+    fn reconfigure_prompt_embeds_existing_yaml_and_preserves_axis() {
+        let yaml = "# axis: role\nproject: demo\nworkspaces:\n  api: {dir: ./api, runtime: codex}\n";
+        let p = build_reconfigure_system_prompt(
+            Path::new("/tmp/.ax/config.yaml"),
+            "codex",
+            Some("role"),
+            yaml,
+        );
+        assert!(p.contains("재구성(reconfigure)"));
+        assert!(p.contains("현재 축: `role`"));
+        assert!(p.contains("축을 절대 바꾸지 마세요"));
+        assert!(p.contains("# reconfigured:"));
+        assert!(p.contains(yaml), "embeds current yaml verbatim");
+    }
+
+    #[test]
+    fn reconfigure_prompt_handles_missing_axis_comment_gracefully() {
+        let yaml = "project: legacy\nworkspaces:\n  worker: {dir: .}\n";
+        let p = build_reconfigure_system_prompt(
+            Path::new("/tmp/.ax/config.yaml"),
+            "codex",
+            None,
+            yaml,
+        );
+        assert!(p.contains("현재 `# axis:` 주석이 없습니다"));
+        assert!(p.contains("추론한 축을 보존"));
     }
 
     #[test]

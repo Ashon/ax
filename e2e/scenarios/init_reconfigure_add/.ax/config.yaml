@@ -1,0 +1,22 @@
+# axis: role
+# rationale: single-team monorepo, split by implementation layer for parallel ownership.
+project: shop-reconfigure
+orchestrator_runtime: codex
+idle_timeout_minutes: 1
+
+workspaces:
+  frontend:
+    dir: ./frontend
+    description: "Owns the frontend/ UI layer — React client, state, styles."
+    runtime: codex
+    instructions: |
+      You own only the frontend/ directory.
+      Do not edit backend/ or infra/.
+
+  backend:
+    dir: ./backend
+    description: "Owns the backend/ HTTP service — request handlers, business logic."
+    runtime: codex
+    instructions: |
+      You own only the backend/ directory.
+      Do not edit frontend/ or infra/.

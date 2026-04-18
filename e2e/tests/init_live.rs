@@ -42,6 +42,18 @@ fn drive_init_scenario(name: &str, axis: &str) -> Result<(), HarnessError> {
     run_validate_script(&sandbox, "validate.sh")
 }
 
+fn drive_reconfigure_scenario(name: &str) -> Result<(), HarnessError> {
+    let mut sandbox = Sandbox::new()?;
+    let ax = sandbox.build_ax()?;
+    sandbox.copy_scenario(&scenario_dir(name))?;
+    run_ax_init(
+        &sandbox,
+        &ax,
+        &["--reconfigure", "--no-refresh", "--codex"],
+    )?;
+    run_validate_script(&sandbox, "validate.sh")
+}
+
 #[test]
 fn init_role_auto_picks_role_axis_on_role_shaped_project() {
     if !live_enabled() {
@@ -72,5 +84,16 @@ fn init_domain_force_role_overrides_observed_shape() {
     }
     if let Err(e) = drive_init_scenario("init_domain_force_role", "role") {
         panic!("init_domain_force_role failed: {e}");
+    }
+}
+
+#[test]
+fn init_reconfigure_adds_workspace_for_new_directory() {
+    if !live_enabled() {
+        eprintln!("skipping: set AX_E2E_LIVE=1 to run live init scenarios");
+        return;
+    }
+    if let Err(e) = drive_reconfigure_scenario("init_reconfigure_add") {
+        panic!("init_reconfigure_add failed: {e}");
     }
 }

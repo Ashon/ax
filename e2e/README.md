@@ -50,6 +50,11 @@ Conway's-Law axis-selection prompt from `ax init`:
 - `init_domain_force_role` — domain-shaped project with `--axis role`
   forced; expects the agent to override the observed shape and
   produce a role-axis config.
+- `init_reconfigure_add` — pre-seeded role-axis config with
+  frontend + backend; a new `infra/` directory is present. Runs
+  `ax init --reconfigure` and expects the axis to be preserved, a
+  `# reconfigured:` trail comment added, and a new workspace for
+  infra to appear.
 
 Add a new scenario by dropping a directory under `scenarios/` and
 registering a test function in `tests/orchestration_live.rs` that

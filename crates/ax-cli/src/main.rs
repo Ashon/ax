@@ -59,6 +59,7 @@ Usage:
   ax tasks retry <id> [--note STR] [--expected-version N] [--socket PATH]
   ax tasks activity [task-id] [--assignee N] [--created-by N] [--status S] [--stale] [--limit N] [--socket PATH]
   ax init [--global] [--no-setup] [--no-refresh] [--axis auto|role|domain] [--codex|--claude] [--socket PATH]
+  ax init --reconfigure [--no-refresh] [--codex|--claude] [--socket PATH]
   ax watch [--socket PATH]
   ax workspace create <name> [--dir PATH] [--socket PATH] [--config PATH] [--ax-bin PATH]
   ax workspace destroy <name> [--socket PATH] [--config PATH] [--ax-bin PATH]
@@ -1464,6 +1465,7 @@ fn parse_init_args(argv: &[OsString]) -> Result<ParsedCommand, CliError> {
     let mut want_codex = false;
     let mut want_claude = false;
     let mut axis = init::Axis::Auto;
+    let mut reconfigure = false;
 
     let mut i = 1;
     while i < argv.len() {
@@ -1473,6 +1475,7 @@ fn parse_init_args(argv: &[OsString]) -> Result<ParsedCommand, CliError> {
             "-g" | "--global" => global = true,
             "--no-setup" => no_setup = true,
             "--no-refresh" => no_refresh = true,
+            "--reconfigure" => reconfigure = true,
             "--codex" => want_codex = true,
             "--claude" => want_claude = true,
             "--socket" => {
@@ -1515,6 +1518,7 @@ fn parse_init_args(argv: &[OsString]) -> Result<ParsedCommand, CliError> {
             socket_path,
             daemon_running,
             axis,
+            reconfigure,
         },
     })
 }
