@@ -45,6 +45,10 @@ pub(crate) fn handle_key(app: &mut App, event: KeyEvent) {
         KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
         KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
         KeyCode::Tab | KeyCode::Char('s') => app.cycle_stream(),
+        KeyCode::Char(c @ ('1' | '2' | '3' | '4')) => {
+            let idx = (c as u8 - b'1') as usize;
+            app.select_stream(idx);
+        }
         KeyCode::Char('[' | 'H') => app.move_task_selection(-1),
         KeyCode::Char(']' | 'L') => app.move_task_selection(1),
         KeyCode::Char('f') => app.cycle_task_filter(),

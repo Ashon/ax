@@ -96,6 +96,15 @@ impl App {
         self.stream = self.stream.next();
     }
 
+    /// Jump directly to tab index `idx` from the bottom tab bar.
+    /// Out-of-range indices are ignored so stray key presses don't
+    /// flicker the pane.
+    pub(crate) fn select_stream(&mut self, idx: usize) {
+        if let Some(view) = StreamView::ALL.get(idx) {
+            self.stream = *view;
+        }
+    }
+
     /// Filtered view of `self.tasks` using the current filter
     /// setting. The sidebar / detail pane both derive their state
     /// from this so cursor + render stay consistent.

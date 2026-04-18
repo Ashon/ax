@@ -194,17 +194,53 @@ fn sidebar_item<'a>(idx: usize, entry: &'a SidebarEntry, app: &'a App) -> ListIt
 }
 
 fn draw_body(f: &mut Frame, area: Rect, app: &App) {
-    // Streaming mode wins over the regular stream views.
+    // Streaming mode wins over the regular stream views — no tab
+    // bar, the whole pane is the live tmux mirror.
     if let Some(workspace) = app.streamed_workspace.clone() {
         draw_stream_single(f, area, app, &workspace);
         return;
     }
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(area);
+    let content = chunks[0];
     match app.stream {
-        StreamView::Messages => draw_messages(f, area, app),
-        StreamView::Tasks => draw_tasks(f, area, app),
-        StreamView::Tokens => draw_tokens(f, area, app),
-        StreamView::Hidden => draw_selection_summary(f, area, app),
+        StreamView::Messages => draw_messages(f, content, app),
+        StreamView::Tasks => draw_tasks(f, content, app),
+        StreamView::Tokens => draw_tokens(f, content, app),
+        StreamView::Hidden => draw_selection_summary(f, content, app),
     }
+    draw_stream_tabs(f, chunks[1], app);
+}
+
+/// Tab strip at the foot of the body pane so the rotating stream
+/// views (messages/tasks/tokens/grid) are visible at a glance. Tab/s
+/// and the number keys 1–4 still drive the switch.
+fn draw_stream_tabs(f: &mut Frame, area: Rect, app: &App) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let mut spans: Vec<Span> = Vec::with_capacity(StreamView::ALL.len() * 2);
+    for (idx, view) in StreamView::ALL.iter().enumerate() {
+        if idx > 0 {
+            spans.push(Span::styled(
+                " │ ",
+                Style::default().add_modifier(Modifier::DIM),
+            ));
+        }
+        let label = format!(" {}·{} ", idx + 1, view.tab_label());
+        let style = if *view == app.stream {
+            Style::default()
+                .add_modifier(Modifier::REVERSED)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().add_modifier(Modifier::DIM)
+        };
+        spans.push(Span::styled(label, style));
+    }
+    let para = Paragraph::new(Line::from(spans));
+    f.render_widget(para, area);
 }
 
 fn draw_stream_single(f: &mut Frame, area: Rect, app: &App, workspace: &str) {
@@ -839,7 +875,8 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         )
     } else {
         (
-            "j/k sidebar · [/] tasks · f filter · Tab/s view · enter actions · q quit".to_owned(),
+            "j/k sidebar · 1-4/Tab view · [/] tasks · f filter · enter actions · q quit"
+                .to_owned(),
             Style::default().add_modifier(Modifier::DIM),
         )
     };

@@ -32,20 +32,27 @@ impl StreamView {
             Self::Messages => " messages ",
             Self::Tasks => " tasks ",
             Self::Tokens => " tokens ",
-            Self::Hidden => " body ",
+            Self::Hidden => " grid ",
         }
     }
 
-    /// Tab / s cycle order: messages → tasks → tokens → messages.
-    /// `Hidden` stays sticky when the sidebar is the only pane we
-    /// want to show (via CLI `--agents`).
-    pub(crate) fn next(self) -> Self {
+    /// Tab-bar label — no surrounding whitespace, matches the button
+    /// text rendered in the bottom strip.
+    pub(crate) fn tab_label(self) -> &'static str {
         match self {
-            Self::Messages => Self::Tasks,
-            Self::Tasks => Self::Tokens,
-            Self::Tokens => Self::Messages,
-            Self::Hidden => Self::Hidden,
+            Self::Messages => "messages",
+            Self::Tasks => "tasks",
+            Self::Tokens => "tokens",
+            Self::Hidden => "grid",
         }
+    }
+
+    /// Tab cycle order used by Tab/s and the tab-bar renderer.
+    pub(crate) const ALL: [Self; 4] = [Self::Messages, Self::Tasks, Self::Tokens, Self::Hidden];
+
+    pub(crate) fn next(self) -> Self {
+        let idx = Self::ALL.iter().position(|v| *v == self).unwrap_or(0);
+        Self::ALL[(idx + 1) % Self::ALL.len()]
     }
 }
 
@@ -188,11 +195,10 @@ mod tests {
     }
 
     #[test]
-    fn stream_view_next_cycles_messages_tasks_tokens() {
+    fn stream_view_next_cycles_all_four_tabs() {
         assert_eq!(StreamView::Messages.next(), StreamView::Tasks);
         assert_eq!(StreamView::Tasks.next(), StreamView::Tokens);
-        assert_eq!(StreamView::Tokens.next(), StreamView::Messages);
-        // Hidden is sticky.
-        assert_eq!(StreamView::Hidden.next(), StreamView::Hidden);
+        assert_eq!(StreamView::Tokens.next(), StreamView::Hidden);
+        assert_eq!(StreamView::Hidden.next(), StreamView::Messages);
     }
 }
