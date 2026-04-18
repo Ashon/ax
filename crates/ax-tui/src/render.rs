@@ -16,7 +16,7 @@ use ax_proto::types::AgentStatus;
 
 use crate::actions::QuickActionId;
 use crate::agents::AgentEntry;
-use crate::state::App;
+use crate::state::{App, Focus};
 use crate::stream::{format_message_line, StreamView};
 
 pub(crate) fn draw(f: &mut Frame, app: &mut App) {
@@ -190,7 +190,10 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_agents(f: &mut Frame, area: Rect, app: &App) {
-    let block = Block::default().borders(Borders::ALL).title(" agents ");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(focus_border_style(app, Focus::Agents))
+        .title(" agents ");
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -444,6 +447,7 @@ fn draw_stream_tabs(f: &mut Frame, area: Rect, app: &App) {
     if area.height == 0 || area.width == 0 {
         return;
     }
+    let focused = app.focus == Focus::Tabs;
     let titles: Vec<Line> = StreamView::ALL
         .iter()
         .enumerate()
@@ -453,15 +457,25 @@ fn draw_stream_tabs(f: &mut Frame, area: Rect, app: &App) {
         .iter()
         .position(|view| *view == app.stream)
         .unwrap_or(0);
+    // When the strip itself owns focus we brighten the whole row so
+    // the tab cursor is obviously "live" even before the operator
+    // presses an arrow.
+    let base_style = if focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().add_modifier(Modifier::DIM)
+    };
+    let mut highlight = Style::default()
+        .add_modifier(Modifier::REVERSED)
+        .add_modifier(Modifier::BOLD);
+    if focused {
+        highlight = highlight.fg(Color::Cyan);
+    }
     let tabs = Tabs::new(titles)
         .select(selected)
         .divider("│")
-        .style(Style::default().add_modifier(Modifier::DIM))
-        .highlight_style(
-            Style::default()
-                .add_modifier(Modifier::REVERSED)
-                .add_modifier(Modifier::BOLD),
-        );
+        .style(base_style)
+        .highlight_style(highlight);
     f.render_widget(tabs, area);
 }
 
@@ -532,11 +546,23 @@ fn centered_loading_area(area: Rect) -> Rect {
     Rect::new(x, y, width, 1)
 }
 
+/// Border style used by every panel block so the focused panel has
+/// an obvious cyan edge and the rest fade to the default border
+/// colour.
+fn focus_border_style(app: &App, panel: Focus) -> Style {
+    if app.focus == panel {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default()
+    }
+}
+
 fn draw_messages(f: &mut Frame, area: Rect, app: &App) {
     let inner_width = area.width.saturating_sub(2) as usize;
     let inner_height = area.height.saturating_sub(2) as usize;
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_style(focus_border_style(app, Focus::Body))
         .title(StreamView::Messages.title());
 
     if app.messages.is_empty() {
@@ -560,6 +586,7 @@ fn draw_messages(f: &mut Frame, area: Rect, app: &App) {
 fn draw_tokens(f: &mut Frame, area: Rect, app: &App) {
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_style(focus_border_style(app, Focus::Body))
         .title(StreamView::Tokens.title());
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -760,6 +787,7 @@ fn draw_tasks(f: &mut Frame, area: Rect, app: &App) {
     if app.tasks.is_empty() {
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_style(focus_border_style(app, Focus::Body))
             .title(StreamView::Tasks.title());
         let para = Paragraph::new("  (no tasks yet)")
             .style(Style::default().add_modifier(Modifier::DIM))
@@ -784,12 +812,15 @@ fn draw_tasks(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_tasks_list(f: &mut Frame, area: Rect, app: &App, filtered: &[ax_proto::types::Task]) {
-    let block = Block::default().borders(Borders::ALL).title(format!(
-        " tasks {} {}/{} ",
-        app.task_filter.label(),
-        filtered.len().min(app.task_selected.saturating_add(1)),
-        filtered.len(),
-    ));
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(focus_border_style(app, Focus::Body))
+        .title(format!(
+            " tasks {} {}/{} ",
+            app.task_filter.label(),
+            filtered.len().min(app.task_selected.saturating_add(1)),
+            filtered.len(),
+        ));
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -859,7 +890,10 @@ fn draw_tasks_list(f: &mut Frame, area: Rect, app: &App, filtered: &[ax_proto::t
 fn draw_task_detail(f: &mut Frame, area: Rect, app: &App, filtered: &[ax_proto::types::Task]) {
     let inner_width = area.width.saturating_sub(2) as usize;
     let inner_height = area.height.saturating_sub(2) as usize;
-    let block = Block::default().borders(Borders::ALL).title(" detail ");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(focus_border_style(app, Focus::Body))
+        .title(" detail ");
 
     let Some(task) = filtered.get(app.task_selected) else {
         let para = Paragraph::new("  (no task selected)")
@@ -1181,13 +1215,25 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
             Style::default().add_modifier(Modifier::DIM),
         )
     } else {
-        (
-            "j/k agents · 1-3/Tab view · [/] tasks · f filter · enter actions · q quit".to_owned(),
-            Style::default().add_modifier(Modifier::DIM),
-        )
+        (focus_footer_hint(app), Style::default().add_modifier(Modifier::DIM))
     };
     let footer = Paragraph::new(text).style(style);
     f.render_widget(footer, area);
+}
+
+/// Pick a context-aware hint line based on the focused panel so the
+/// footer shows the keys that actually do something right now.
+fn focus_footer_hint(app: &App) -> String {
+    let base = "[/] panel · 1-3 tab · f filter · q quit";
+    let scoped = match app.focus {
+        Focus::Agents => "↑↓/jk agent · enter actions",
+        Focus::Tabs => "Tab/←→ tab · ↓ body · ↑ agents",
+        Focus::Body => match app.stream {
+            StreamView::Tasks => "↑↓/jk task · ←→ tab · esc tabs",
+            _ => "←→ tab · esc tabs",
+        },
+    };
+    format!("[{focus}] {scoped} · {base}", focus = app.focus.label())
 }
 
 fn agent_status_str(status: &AgentStatus) -> &'static str {

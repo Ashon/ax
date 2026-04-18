@@ -37,11 +37,6 @@ impl StreamView {
     }
 
     pub(crate) const ALL: [Self; 3] = [Self::Messages, Self::Tasks, Self::Tokens];
-
-    pub(crate) fn next(self) -> Self {
-        let idx = Self::ALL.iter().position(|v| *v == self).unwrap_or(0);
-        Self::ALL[(idx + 1) % Self::ALL.len()]
-    }
 }
 
 /// Resolve the absolute path to the daemon's history file given
@@ -183,9 +178,14 @@ mod tests {
     }
 
     #[test]
-    fn stream_view_next_cycles_messages_tasks_tokens() {
-        assert_eq!(StreamView::Messages.next(), StreamView::Tasks);
-        assert_eq!(StreamView::Tasks.next(), StreamView::Tokens);
-        assert_eq!(StreamView::Tokens.next(), StreamView::Messages);
+    fn stream_view_all_preserves_messages_tasks_tokens_order() {
+        assert_eq!(
+            StreamView::ALL,
+            [
+                StreamView::Messages,
+                StreamView::Tasks,
+                StreamView::Tokens
+            ]
+        );
     }
 }

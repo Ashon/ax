@@ -33,6 +33,37 @@ pub(crate) enum ViewMode {
     Stream,
 }
 
+/// Which panel the keyboard is scoped to. `[`/`]` cycles through
+/// them; arrows + Enter dispatch into whichever is focused so
+/// operators can reach every interaction from the same keys
+/// regardless of which panel they're thinking about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Focus {
+    /// Top workspace list. Arrows move the selection cursor, Enter
+    /// opens the quick-action overlay for the current agent.
+    Agents,
+    /// Thin tab strip between the agents panel and the body. Arrows
+    /// step between messages / tasks / tokens tabs.
+    Tabs,
+    /// Bottom pane. Arrow behaviour depends on the active tab — e.g.
+    /// tasks focus moves the task-detail cursor; messages/tokens
+    /// ignore nav keys today.
+    Body,
+}
+
+impl Focus {
+    pub(crate) const ORDER: [Focus; 3] = [Focus::Agents, Focus::Tabs, Focus::Body];
+
+    #[must_use]
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Focus::Agents => "agents",
+            Focus::Tabs => "tabs",
+            Focus::Body => "body",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct App {
     #[allow(dead_code)]
@@ -44,6 +75,8 @@ pub(crate) struct App {
     pub(crate) desired: BTreeMap<String, bool>,
     pub(crate) agent_entries: Vec<AgentEntry>,
     pub(crate) selected_entry: usize,
+    /// Which panel currently owns the keyboard.
+    pub(crate) focus: Focus,
     pub(crate) stream: StreamView,
     pub(crate) messages: Vec<HistoryEntry>,
     pub(crate) tasks: Vec<Task>,
@@ -90,6 +123,7 @@ impl App {
             desired: BTreeMap::new(),
             agent_entries: Vec::new(),
             selected_entry: 0,
+            focus: Focus::Agents,
             stream: StreamView::Messages,
             messages: Vec::new(),
             tasks: Vec::new(),
@@ -111,8 +145,33 @@ impl App {
         }
     }
 
-    pub(crate) fn cycle_stream(&mut self) {
-        self.stream = self.stream.next();
+    /// Step the stream tab forward (+1) or backward (-1). Used by the
+    /// Tabs focus arrow-key handling so `[ / ]` stay reserved for
+    /// inter-panel navigation.
+    pub(crate) fn step_stream(&mut self, delta: i32) {
+        let views = StreamView::ALL;
+        if views.is_empty() {
+            return;
+        }
+        let current = views.iter().position(|v| *v == self.stream).unwrap_or(0);
+        let n = views.len() as i32;
+        let next = ((current as i32 + delta).rem_euclid(n)) as usize;
+        self.stream = views[next];
+        self.clamp_task_selection();
+    }
+
+    /// Advance the keyboard focus one panel forward (+1) or backward
+    /// (-1). `[` and `]` are the only keys that touch this; the rest
+    /// of the handler dispatches against `self.focus`.
+    pub(crate) fn cycle_focus(&mut self, delta: i32) {
+        let order = Focus::ORDER;
+        let current = order
+            .iter()
+            .position(|f| *f == self.focus)
+            .unwrap_or(0) as i32;
+        let n = order.len() as i32;
+        let next = current.wrapping_add(delta).rem_euclid(n) as usize;
+        self.focus = order[next];
     }
 
     /// Jump directly to tab index `idx` from the bottom tab bar.
