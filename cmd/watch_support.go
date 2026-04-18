@@ -1,10 +1,41 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"syscall"
+	"time"
 
 	"github.com/ashon/ax/internal/mcpserver"
 )
+
+// isDaemonRunning checks for a live daemon via its pid file. Used by
+// the watch TUI to decide whether to render live state. The Rust
+// ax-cli owns the canonical daemon lifecycle now; this helper stays
+// read-only and runtime-cheap.
+func isDaemonRunning(socketPath string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	_ = ctx
+
+	if _, err := os.Stat(socketPath); err != nil {
+		return false
+	}
+	pidPath := filepath.Join(filepath.Dir(socketPath), "daemon.pid")
+	data, err := os.ReadFile(pidPath)
+	if err != nil {
+		return false
+	}
+	var pid int
+	fmt.Sscanf(string(data), "%d", &pid)
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return proc.Signal(syscall.Signal(0)) == nil
+}
 
 // newCLIClient returns a shared ax daemon client used by the
 // remaining Go surfaces (currently just the watch TUI). The task
