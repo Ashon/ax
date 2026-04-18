@@ -61,12 +61,12 @@ pub(crate) fn draw(f: &mut Frame, app: &App) {
     draw_footer(f, chunks[2], app);
 }
 
-/// Clamp the agents pane so it shows every live row when possible
-/// but never starves the tab+content pane below it. Leaves at least
-/// four content rows (tab strip + 3 body rows) on tiny terminals.
+/// Clamp the agents pane so it shows every row when possible but
+/// never starves the tab+content pane below it. Overflow rows scroll
+/// within the pane; `+3` accounts for the border (2) and header (1).
 fn compute_agents_height(app: &App, middle_h: u16, streaming: bool) -> u16 {
     let reserved = if streaming { 3 } else { 4 };
-    let desired = (app.sidebar_entries.len() as u16).saturating_add(2).max(5);
+    let desired = (app.sidebar_entries.len() as u16).saturating_add(3).max(5);
     let cap = middle_h.saturating_sub(reserved).max(3);
     desired.min(cap)
 }
@@ -174,13 +174,48 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &App) {
         inner.width,
         inner.height.saturating_sub(1),
     );
-    let items: Vec<ListItem> = app
-        .sidebar_entries
+    // Slice the entry list so the selection stays inside the visible
+    // rows; overflow above/below scrolls as the cursor moves.
+    let (start, end) = viewport_range(
+        app.sidebar_entries.len(),
+        app.selected_entry,
+        list_area.height as usize,
+    );
+    let items: Vec<ListItem> = app.sidebar_entries[start..end]
         .iter()
         .enumerate()
-        .map(|(idx, entry)| sidebar_row(idx, entry, app, &cols))
+        .map(|(rel, entry)| sidebar_row(start + rel, entry, app, &cols))
         .collect();
     f.render_widget(List::new(items), list_area);
+
+    draw_sidebar_scroll_hints(f, list_area, start, end, app.sidebar_entries.len());
+}
+
+/// Overlay "↑N more" / "↓N more" markers at the right edge of the
+/// list when entries scroll off-screen so operators see there's
+/// more to reach.
+fn draw_sidebar_scroll_hints(f: &mut Frame, list_area: Rect, start: usize, end: usize, total: usize) {
+    if list_area.height == 0 || list_area.width < 10 {
+        return;
+    }
+    if start > 0 {
+        let hint = format!("↑{start}");
+        let width = hint.chars().count() as u16;
+        let x = list_area.right().saturating_sub(width);
+        let rect = Rect::new(x, list_area.y, width, 1);
+        let para = Paragraph::new(hint).style(Style::default().add_modifier(Modifier::DIM));
+        f.render_widget(para, rect);
+    }
+    let remaining = total.saturating_sub(end);
+    if remaining > 0 {
+        let hint = format!("↓{remaining}");
+        let width = hint.chars().count() as u16;
+        let x = list_area.right().saturating_sub(width);
+        let y = list_area.y + list_area.height.saturating_sub(1);
+        let rect = Rect::new(x, y, width, 1);
+        let para = Paragraph::new(hint).style(Style::default().add_modifier(Modifier::DIM));
+        f.render_widget(para, rect);
+    }
 }
 
 /// Column widths for the agents table. `name` flexes to fill the
