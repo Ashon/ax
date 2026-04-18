@@ -11,6 +11,7 @@ members = [
     "crates/ax-tui",
     "crates/ax-usage",
     "crates/ax-workspace",
+    "e2e",
 ]
 
 [workspace.package]

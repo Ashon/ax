@@ -62,22 +62,37 @@ ax down
 ### 설치 방법
 
 ```bash
-# release binary
-curl -Lo ax.tar.gz https://github.com/Ashon/ax/releases/latest/download/ax_Darwin_arm64.tar.gz
+# release binary (macOS arm64 예시)
+curl -Lo ax.tar.gz https://github.com/Ashon/ax/releases/latest/download/ax-aarch64-darwin.tar.gz
 tar xzf ax.tar.gz
 sudo mv ax /usr/local/bin/
 ```
 
 ```bash
-# go install
-go install github.com/ashon/ax@latest
-```
-
-```bash
-# from source
+# from source (Rust 1.88+ 필요)
 git clone https://github.com/Ashon/ax.git
 cd ax
 make install
+```
+
+## 저장소 구조
+
+```
+ax/
+├── crates/                 Cargo workspace members
+│   ├── ax-cli              binary entry (ax)
+│   ├── ax-tui              ratatui watch TUI
+│   ├── ax-daemon           Unix socket daemon
+│   ├── ax-mcp-server       MCP stdio server (33 tools)
+│   ├── ax-workspace        lifecycle + reconcile + artifacts
+│   ├── ax-config           .ax/config.yaml schema + tree
+│   ├── ax-agent            runtime + launch helpers
+│   ├── ax-tmux             tmux session wrappers
+│   ├── ax-proto            wire types
+│   └── ax-usage            token + trend aggregators
+├── e2e/                    cross-crate smoke + live tests
+├── docs/                   사용자/개발자 문서
+└── Makefile                cargo wrapper (build / install / test)
 ```
 
 ## 문서

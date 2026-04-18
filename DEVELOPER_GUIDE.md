@@ -34,7 +34,7 @@ tmux 기반 멀티 에이전트 LLM 워크스페이스 매니저
 - task 생성/진행/완료 상태 추적과 stale 신호 계산
 - MCP 표준 도구 인터페이스로 에이전트 간 통신
 - 계층적 프로젝트 트리와 서브 오케스트레이터 지원
-- BubbleTea 기반 모니터링 TUI (top, legacy alias: watch)
+- ratatui 기반 모니터링 TUI (`ax watch` / `ax top`)
 
 ---
 
@@ -85,67 +85,41 @@ tmux 기반 멀티 에이전트 LLM 워크스페이스 매니저
 
 ```
 ax/
-├── main.go                          # 엔트리포인트 → cmd.Execute()
-├── go.mod                           # Go 1.26.2, 의존성 정의
-├── Makefile                         # 빌드/테스트/릴리스 타겟
-├── .goreleaser.yaml                 # 멀티 플랫폼 바이너리 빌드 설정
-├── .github/workflows/release.yaml   # GitHub Actions 릴리스 파이프라인
+├── Cargo.toml                        # 워크스페이스 매니페스트
+├── Cargo.lock
+├── rust-toolchain.toml               # rustc 1.88
+├── rustfmt.toml
+├── Makefile                          # cargo 래퍼 (build / install / test)
+├── .github/workflows/                # CI + release (모두 Rust)
 │
-├── cmd/                             # CLI 명령어 (cobra)
-│   ├── root.go                      #   루트 커맨드, 글로벌 플래그
-│   ├── init_cmd.go                  #   프로젝트 초기화 (인터랙티브)
-│   ├── up.go                        #   데몬 + 워크스페이스 기동
-│   ├── down.go                      #   워크스페이스 + 데몬 종료
-│   ├── daemon.go                    #   데몬 start/stop/status
-│   ├── workspace.go                 #   워크스페이스 create/destroy/list/attach
-│   ├── shell.go, shell_tui.go       #   오케스트레이터 대화 TUI
-│   ├── watch.go                     #   top/watch 워크스페이스 모니터링 TUI
-│   ├── status.go                    #   프로젝트 상태 표시
-│   ├── send.go                      #   메시지 전송 + 에이전트 웨이크
-│   ├── orchestrators.go             #   오케스트레이터 세션 보장
-│   ├── messages.go                  #   메시지 관리 헬퍼
-│   ├── run_agent.go                 #   에이전트 실행 (tmux 내부에서 호출)
-│   └── mcpserver.go                 #   MCP 서버 래퍼
+├── crates/                           # Cargo workspace members
+│   ├── ax-cli/                       #   바이너리 엔트리 (name = "ax")
+│   │   └── src/main.rs               #     clap-free argv 파서 + 서브커맨드
+│   ├── ax-tui/                       #   ratatui 기반 watch/top TUI
+│   │   └── src/                      #     app/sidebar/stream/tasks/tokens/actions/captures
+│   ├── ax-daemon/                    #   Unix 소켓 데몬
+│   │   └── src/                      #     registry, queue, history, taskstore,
+│   │                                 #     wake_scheduler, team_controller, handlers
+│   ├── ax-mcp-server/                #   MCP stdio 서버 (33 tools)
+│   │   └── src/                      #     server (rmcp), daemon_client, memory_scope
+│   ├── ax-workspace/                 #   워크스페이스 생명주기 + 아티팩트
+│   │   └── src/                      #     manager, reconcile, dispatch, lifecycle,
+│   │                                 #     orchestrator{,_prompt}, mcp_config, instructions
+│   ├── ax-config/                    #   .ax/config.yaml 스키마 + 트리 + overlay
+│   │   └── src/                      #     schema, tree, paths, validate, overlay
+│   ├── ax-agent/                     #   런타임 정규화 + launch 헬퍼
+│   │   └── src/                      #     runtime(Claude/Codex), launch, claude, codex
+│   ├── ax-tmux/                      #   tmux 세션 래퍼
+│   │   └── src/                      #     commands, sessions, key tokens
+│   ├── ax-proto/                     #   wire types (envelope, payloads, responses)
+│   │   └── src/                      #     envelope, payloads, responses, types, usage
+│   └── ax-usage/                     #   token 파서 + trend 집계
+│       └── src/
 │
-└── internal/                        # 핵심 패키지
-    ├── config/                      #   YAML 설정 로딩/병합
-    │   ├── config.go                #     Config 구조체, 재귀적 자식 병합
-    │   ├── tree.go                  #     ProjectNode 계층 트리
-    │   └── config_test.go           #     중첩 로딩/순환 참조 테스트
-    │
-    ├── daemon/                      #   메시지 브로커
-    │   ├── daemon.go                #     Unix 소켓 리스너, 연결 핸들러
-    │   ├── protocol.go              #     메시지 엔벨로프 타입 정의
-    │   ├── registry.go              #     워크스페이스 등록 관리
-    │   ├── msgqueue.go              #     워크스페이스별 메시지 큐
-    │   ├── history.go               #     JSONL 메시지 히스토리
-    │   ├── taskstore.go             #     task 저장/검증/persist
-    │   ├── wakescheduler.go         #     wake 재시도/backoff 스케줄러
-    │   └── daemon_test.go           #     프로토콜/레지스트리/큐 테스트
-    │
-    ├── mcpserver/                   #   MCP 프로토콜 서버
-    │   ├── server.go                #     MCP 서버 설정 및 도구 등록
-    │   ├── tools.go                 #     17개 MCP 도구 구현
-    │   └── client.go                #     데몬 연결 클라이언트
-    │
-    ├── agent/                       #   에이전트 런타임 추상화
-    │   ├── runtime.go               #     Runtime 인터페이스, 디스패처
-    │   ├── claude.go                #     Claude CLI 통합
-    │   ├── codex.go                 #     Codex 에이전트 통합
-    │   ├── codex_home.go            #     Codex 환경 설정
-    │   └── shell.go                 #     셸 유틸리티
-    │
-    ├── workspace/                   #   워크스페이스 관리
-    │   ├── workspace.go             #     Manager: Create/Destroy/CreateAll
-    │   ├── mcpconfig.go             #     .mcp.json 생성/삭제
-    │   ├── orchestrator.go          #     오케스트레이터 프롬프트 생성
-    │   └── instructions.go          #     에이전트 지시 파일 관리
-    │
-    ├── tmux/                        #   tmux 세션 관리
-    │   └── tmux.go                  #     세션 생성/삭제/attach/list/키 전송
-    │
-    └── types/                       #   공유 데이터 타입
-        └── types.go                 #     AgentStatus, WorkspaceInfo, Message
+└── e2e/                              # 크로스 크레이트 smoke + live 테스트
+    ├── Cargo.toml
+    └── tests/
+        └── daemon_roundtrip.rs       #   register → send → read 엔드투엔드
 ```
 
 ---

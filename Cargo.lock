@@ -113,6 +113,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ax-e2e"
+version = "0.0.0"
+dependencies = [
+ "ax-config",
+ "ax-daemon",
+ "ax-proto",
+ "ax-tmux",
+ "ax-workspace",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "ax-mcp-server"
 version = "0.1.0"
 dependencies = [
