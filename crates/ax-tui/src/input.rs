@@ -41,7 +41,7 @@ pub(crate) fn handle_key(app: &mut App, event: KeyEvent) {
     }
 
     match event.code {
-        KeyCode::Esc => open_overlay(app),
+        KeyCode::Enter => open_overlay(app),
         KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
         KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
         KeyCode::Tab | KeyCode::Char('s') => app.cycle_stream(),
@@ -121,10 +121,10 @@ mod tests {
     }
 
     #[test]
-    fn esc_opens_overlay_when_workspace_selected() {
+    fn enter_opens_overlay_when_workspace_selected() {
         let mut app = App::new();
-        // No sidebar = no workspace → esc is a no-op.
-        handle_key(&mut app, press(KeyCode::Esc));
+        // No sidebar = no workspace → enter is a no-op.
+        handle_key(&mut app, press(KeyCode::Enter));
         assert!(!app.quick_actions.open);
 
         app.sidebar_entries = vec![crate::sidebar::SidebarEntry {
@@ -136,7 +136,7 @@ mod tests {
             reconcile: String::new(),
         }];
         app.selected_entry = 0;
-        handle_key(&mut app, press(KeyCode::Esc));
+        handle_key(&mut app, press(KeyCode::Enter));
         assert!(app.quick_actions.open);
         assert!(!app.quick_actions.actions.is_empty());
     }
@@ -153,7 +153,7 @@ mod tests {
             reconcile: String::new(),
         }];
         app.selected_entry = 0;
-        handle_key(&mut app, press(KeyCode::Esc));
+        handle_key(&mut app, press(KeyCode::Enter));
         // jump selection to Restart.
         let restart_idx = app
             .quick_actions

@@ -39,20 +39,28 @@ pub(crate) fn draw(f: &mut Frame, app: &App) {
     draw_body(f, body_chunks[1], app);
 
     if app.quick_actions.open {
-        draw_quick_actions(f, body_chunks[1], app);
+        draw_quick_actions(f, area, body_chunks[0], app);
     }
 
     draw_footer(f, chunks[2], app);
 }
 
-fn draw_quick_actions(f: &mut Frame, body: Rect, app: &App) {
+/// Context-menu style overlay: anchored just to the right of the
+/// selected sidebar row so it reads as a popup on that agent. Clamps
+/// into the frame so it never runs off the edge on small terminals.
+fn draw_quick_actions(f: &mut Frame, frame: Rect, sidebar: Rect, app: &App) {
     let workspace = app.selected_workspace().unwrap_or("");
     let action_count = app.quick_actions.actions.len() as u16;
-    let height = (action_count + 4).min(body.height.saturating_sub(2)).max(4);
+    let height = (action_count + 4).min(frame.height.saturating_sub(2)).max(4);
     let width: u16 = 42;
-    let width = width.min(body.width.saturating_sub(2));
-    let x = body.x + body.width.saturating_sub(width) / 2;
-    let y = body.y + body.height.saturating_sub(height) / 2;
+    let width = width.min(frame.width.saturating_sub(2));
+
+    let anchor_x = sidebar.x + sidebar.width;
+    let anchor_y = sidebar.y + 1 + app.selected_entry as u16;
+    let max_x = frame.right().saturating_sub(width);
+    let max_y = frame.bottom().saturating_sub(height);
+    let x = anchor_x.min(max_x).max(frame.x);
+    let y = anchor_y.min(max_y).max(frame.y);
     let area = Rect::new(x, y, width, height);
     f.render_widget(ratatui::widgets::Clear, area);
 
@@ -831,7 +839,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         )
     } else {
         (
-            "j/k sidebar · [/] tasks · f filter · Tab/s view · esc actions · q quit".to_owned(),
+            "j/k sidebar · [/] tasks · f filter · Tab/s view · enter actions · q quit".to_owned(),
             Style::default().add_modifier(Modifier::DIM),
         )
     };
