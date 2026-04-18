@@ -183,19 +183,40 @@ fn draw_stub_view(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_tasks(f: &mut Frame, area: Rect, app: &App) {
-    let inner_width = area.width.saturating_sub(2) as usize;
-    let inner_height = area.height.saturating_sub(2) as usize;
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(StreamView::Tasks.title());
-
     if app.tasks.is_empty() {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(StreamView::Tasks.title());
         let para = Paragraph::new("  (no tasks yet)")
             .style(Style::default().add_modifier(Modifier::DIM))
             .block(block);
         f.render_widget(para, area);
         return;
     }
+
+    // Split horizontally: list ~45% / detail ~55%, clamped so neither
+    // pane gets uselessly narrow on tiny terminals.
+    let list_width = area
+        .width
+        .saturating_mul(45)
+        .saturating_div(100)
+        .clamp(36, area.width.saturating_sub(28));
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(list_width), Constraint::Min(24)])
+        .split(area);
+    draw_tasks_list(f, chunks[0], app);
+    draw_task_detail(f, chunks[1], app);
+}
+
+fn draw_tasks_list(f: &mut Frame, area: Rect, app: &App) {
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let inner_height = area.height.saturating_sub(2) as usize;
+    let block = Block::default().borders(Borders::ALL).title(format!(
+        " tasks {}/{} ",
+        app.task_selected.saturating_add(1),
+        app.tasks.len()
+    ));
 
     let summary = crate::tasks::summarize_tasks(&app.tasks);
     let mut lines: Vec<Line> = Vec::with_capacity(inner_height);
@@ -206,8 +227,6 @@ fn draw_tasks(f: &mut Frame, area: Rect, app: &App) {
         ),
         Style::default().add_modifier(Modifier::BOLD),
     )));
-    // Column header matches ax-rs tasks list so terminal scrapers read the
-    // same layout in both surfaces.
     lines.push(Line::from(Span::styled(
         crate::tasks::truncate(
             "ID       PRI      STATUS          AGE    ASSIGNEE        TITLE",
@@ -217,11 +236,57 @@ fn draw_tasks(f: &mut Frame, area: Rect, app: &App) {
     )));
 
     let body_budget = inner_height.saturating_sub(lines.len());
-    for task in app.tasks.iter().take(body_budget) {
-        lines.push(Line::from(Span::raw(format_task_row(task, inner_width))));
+    let (start, end) = viewport_range(app.tasks.len(), app.task_selected, body_budget);
+    for (idx, task) in app.tasks[start..end].iter().enumerate() {
+        let absolute = start + idx;
+        let style = if absolute == app.task_selected {
+            Style::default().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(Span::styled(
+            format_task_row(task, inner_width),
+            style,
+        )));
     }
     let para = Paragraph::new(lines).block(block);
     f.render_widget(para, area);
+}
+
+fn draw_task_detail(f: &mut Frame, area: Rect, app: &App) {
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let inner_height = area.height.saturating_sub(2) as usize;
+    let block = Block::default().borders(Borders::ALL).title(" detail ");
+
+    let Some(task) = app.tasks.get(app.task_selected) else {
+        let para = Paragraph::new("  (no task selected)")
+            .style(Style::default().add_modifier(Modifier::DIM))
+            .block(block);
+        f.render_widget(para, area);
+        return;
+    };
+
+    let lines = build_detail_lines(task, inner_width, inner_height);
+    let para = Paragraph::new(lines).block(block);
+    f.render_widget(para, area);
+}
+
+/// Walk `tasks[..]` around `selected` so the cursor stays visible
+/// once the list outgrows the pane. Mirrors Go's
+/// `computeTaskListViewport` at height=1 row per task.
+fn viewport_range(total: usize, selected: usize, budget: usize) -> (usize, usize) {
+    if total == 0 || budget == 0 {
+        return (0, 0);
+    }
+    let visible = budget.min(total);
+    let start = if selected >= visible {
+        selected + 1 - visible
+    } else {
+        0
+    };
+    let max_start = total - visible;
+    let start = start.min(max_start);
+    (start, start + visible)
 }
 
 fn format_task_row(task: &ax_proto::types::Task, width: usize) -> String {
@@ -235,6 +300,136 @@ fn format_task_row(task: &ax_proto::types::Task, width: usize) -> String {
         task.title,
     );
     crate::tasks::truncate(&row, width.max(1))
+}
+
+/// Render the right-hand detail pane. Line count caps to `height`
+/// so the paragraph widget never clips mid-line.
+fn build_detail_lines<'a>(
+    task: &'a ax_proto::types::Task,
+    width: usize,
+    height: usize,
+) -> Vec<Line<'a>> {
+    use crate::tasks::{
+        format_task_age, task_is_stale, task_priority_label, task_status_label, truncate,
+    };
+
+    let stale_flag = if task_is_stale(task) { "yes" } else { "no" };
+    let mut out: Vec<Line<'a>> = Vec::new();
+    let push = |v: &mut Vec<Line<'a>>, text: String, dim: bool| {
+        let line_style = if dim {
+            Style::default().add_modifier(Modifier::DIM)
+        } else {
+            Style::default()
+        };
+        v.push(Line::from(Span::styled(
+            truncate(&text, width.max(1)),
+            line_style,
+        )));
+    };
+
+    push(&mut out, task.title.clone(), false);
+    push(
+        &mut out,
+        format!("status: {}", task_status_label(task)),
+        true,
+    );
+    push(&mut out, format!("version: {}", task.version), true);
+    push(&mut out, format!("assignee: {}", task.assignee), true);
+    push(&mut out, format!("created_by: {}", task.created_by), true);
+    push(
+        &mut out,
+        format!("priority: {}", task_priority_label(task.priority.as_ref())),
+        true,
+    );
+    push(
+        &mut out,
+        format!("updated: {} ago", format_task_age(task)),
+        true,
+    );
+    push(&mut out, format!("stale: {stale_flag}"), true);
+    if task.stale_after_seconds > 0 {
+        push(
+            &mut out,
+            format!("stale_after: {}s", task.stale_after_seconds),
+            true,
+        );
+    }
+    if let Some(ts) = task.removed_at {
+        push(
+            &mut out,
+            format!("removed: {}", ts.format("%Y-%m-%d %H:%M:%S")),
+            true,
+        );
+        if !task.removed_by.is_empty() {
+            push(&mut out, format!("removed_by: {}", task.removed_by), true);
+        }
+    }
+    if !task.description.is_empty() {
+        out.push(Line::from(""));
+        push(&mut out, format!("desc: {}", task.description), false);
+    }
+    if !task.result.is_empty() {
+        out.push(Line::from(""));
+        push(&mut out, format!("result: {}", task.result), false);
+    }
+    if let Some(info) = &task.stale_info {
+        out.push(Line::from(""));
+        push(&mut out, "stale_info:".to_owned(), false);
+        if !info.reason.is_empty() {
+            push(&mut out, format!("  reason: {}", info.reason), true);
+        }
+        if !info.recommended_action.is_empty() {
+            push(
+                &mut out,
+                format!("  action: {}", info.recommended_action),
+                true,
+            );
+        }
+        if info.pending_messages > 0 {
+            push(
+                &mut out,
+                format!("  pending_messages: {}", info.pending_messages),
+                true,
+            );
+        }
+        if info.wake_pending {
+            push(
+                &mut out,
+                format!("  wake_attempts: {}", info.wake_attempts),
+                true,
+            );
+        }
+        if info.state_divergence {
+            push(
+                &mut out,
+                format!("  divergence: {}", info.state_divergence_note),
+                true,
+            );
+        }
+    }
+
+    let logs: Vec<_> = task.logs.iter().rev().take(3).collect();
+    if !logs.is_empty() {
+        out.push(Line::from(""));
+        push(&mut out, "recent logs:".to_owned(), false);
+        for log in logs.into_iter().rev() {
+            push(
+                &mut out,
+                format!(
+                    "  {} {}: {}",
+                    log.timestamp.format("%H:%M:%S"),
+                    log.workspace,
+                    log.message
+                ),
+                true,
+            );
+        }
+    }
+
+    if out.len() > height {
+        out.truncate(height);
+    }
+    out
 }
 
 fn draw_selection_summary(f: &mut Frame, area: Rect, app: &App) {
@@ -282,7 +477,7 @@ fn workspace_info_summary(info: &ax_proto::types::WorkspaceInfo) -> String {
 fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     let text = match &app.notice {
         Some(msg) => msg.clone(),
-        None => "j/k: move · Tab/s: cycle view · q: quit".to_owned(),
+        None => "j/k: sidebar · [/]: tasks · Tab/s: cycle view · q: quit".to_owned(),
     };
     let footer = Paragraph::new(text).style(Style::default().add_modifier(Modifier::DIM));
     f.render_widget(footer, area);
@@ -293,5 +488,24 @@ fn agent_status_str(status: &AgentStatus) -> &'static str {
         AgentStatus::Online => "online",
         AgentStatus::Offline => "offline",
         AgentStatus::Disconnected => "disconnected",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn viewport_range_handles_empty_and_small_windows() {
+        assert_eq!(viewport_range(0, 0, 5), (0, 0));
+        assert_eq!(viewport_range(10, 3, 0), (0, 0));
+    }
+
+    #[test]
+    fn viewport_range_scrolls_so_selected_stays_in_view() {
+        assert_eq!(viewport_range(20, 0, 5), (0, 5));
+        assert_eq!(viewport_range(20, 4, 5), (0, 5));
+        assert_eq!(viewport_range(20, 5, 5), (1, 6));
+        assert_eq!(viewport_range(20, 19, 5), (15, 20));
     }
 }

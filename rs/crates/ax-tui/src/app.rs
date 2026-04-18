@@ -109,6 +109,7 @@ fn refresh_messages(app: &mut App, opts: &RunOptions) {
 fn refresh_tasks(app: &mut App, opts: &RunOptions) {
     let path = crate::tasks::tasks_file_path(&opts.socket_path);
     app.tasks = crate::tasks::read_tasks(&path);
+    app.clamp_task_selection();
 }
 
 fn refresh_tree(app: &mut App) {

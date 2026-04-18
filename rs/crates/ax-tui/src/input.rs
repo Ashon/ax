@@ -17,6 +17,8 @@ pub(crate) fn handle_key(app: &mut App, event: KeyEvent) {
         KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
         KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
         KeyCode::Tab | KeyCode::Char('s') => app.cycle_stream(),
+        KeyCode::Char('[' | 'H') => app.move_task_selection(-1),
+        KeyCode::Char(']' | 'L') => app.move_task_selection(1),
         _ => {}
     }
 }
