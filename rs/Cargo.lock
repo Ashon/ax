@@ -159,6 +159,7 @@ dependencies = [
  "ax-daemon",
  "ax-proto",
  "ax-tmux",
+ "ax-workspace",
  "chrono",
  "crossterm",
  "ratatui",

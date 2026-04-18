@@ -56,6 +56,9 @@ pub fn run(opts: &RunOptions) -> Result<(), RunError> {
             break;
         }
 
+        drain_pending_lifecycle(&mut app, opts);
+        app.expire_notice();
+
         let due = app
             .last_refresh
             .is_none_or(|t| t.elapsed() >= REFRESH_INTERVAL);
@@ -64,6 +67,35 @@ pub fn run(opts: &RunOptions) -> Result<(), RunError> {
         }
     }
     Ok(())
+}
+
+fn drain_pending_lifecycle(app: &mut App, opts: &RunOptions) {
+    let Some(pending) = app.pending_lifecycle.take() else {
+        return;
+    };
+    let Ok(cwd) = std::env::current_dir() else {
+        app.quick_notice = Some(crate::actions::Notice::new(
+            "resolve cwd failed".into(),
+            true,
+        ));
+        return;
+    };
+    let Some(cfg_path) = ax_config::find_config_file(cwd) else {
+        app.quick_notice = Some(crate::actions::Notice::new(
+            "no .ax/config.yaml found".into(),
+            true,
+        ));
+        return;
+    };
+    let ax_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ax-rs"));
+    let outcomes = crate::actions::apply_lifecycle(
+        pending.action,
+        &pending.workspace,
+        &opts.socket_path,
+        &cfg_path,
+        &ax_bin,
+    );
+    crate::actions::apply_outcomes(app, outcomes);
 }
 
 fn refresh(app: &mut App, opts: &RunOptions) {

@@ -15,6 +15,7 @@ ax-config = { path = "../ax-config" }
 ax-daemon = { path = "../ax-daemon" }
 ax-proto = { path = "../ax-proto" }
 ax-tmux = { path = "../ax-tmux" }
+ax-workspace = { path = "../ax-workspace" }
 chrono = { workspace = true }
 crossterm = "0.28"
 ratatui = "0.29"

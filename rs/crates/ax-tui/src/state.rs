@@ -10,6 +10,13 @@ use ax_daemon::HistoryEntry;
 use ax_proto::types::{Task, WorkspaceInfo};
 use ax_tmux::SessionInfo;
 
+use crate::actions::{Notice, QuickActionId, QuickActionState};
+
+#[derive(Debug, Clone)]
+pub(crate) struct PendingLifecycle {
+    pub action: QuickActionId,
+    pub workspace: String,
+}
 use crate::sidebar::SidebarEntry;
 use crate::stream::StreamView;
 
@@ -37,6 +44,11 @@ pub(crate) struct App {
     pub(crate) messages: Vec<HistoryEntry>,
     pub(crate) tasks: Vec<Task>,
     pub(crate) task_selected: usize,
+    pub(crate) quick_actions: QuickActionState,
+    pub(crate) quick_notice: Option<Notice>,
+    /// Lifecycle action queued by the input handler; executed by the
+    /// app loop (where paths are available) and cleared.
+    pub(crate) pending_lifecycle: Option<PendingLifecycle>,
     pub(crate) last_refresh: Option<Instant>,
     pub(crate) daemon_running: bool,
     pub(crate) notice: Option<String>,
@@ -58,6 +70,9 @@ impl App {
             messages: Vec::new(),
             tasks: Vec::new(),
             task_selected: 0,
+            quick_actions: QuickActionState::default(),
+            quick_notice: None,
+            pending_lifecycle: None,
             last_refresh: None,
             daemon_running: false,
             notice: None,
@@ -131,6 +146,25 @@ impl App {
 
     pub(crate) fn set_notice(&mut self, text: impl Into<String>) {
         self.notice = Some(text.into());
+    }
+
+    /// Workspace name under the sidebar cursor, if any. Returns
+    /// `None` for group rows or empty sidebars.
+    pub(crate) fn selected_workspace(&self) -> Option<&str> {
+        self.sidebar_entries
+            .get(self.selected_entry)
+            .filter(|e| !e.group)
+            .map(|e| e.workspace.as_str())
+    }
+
+    /// Drop the quick-action notice once its TTL has elapsed so the
+    /// footer doesn't linger on a stale status message.
+    pub(crate) fn expire_notice(&mut self) {
+        if let Some(notice) = &self.quick_notice {
+            if std::time::Instant::now() >= notice.expires_at {
+                self.quick_notice = None;
+            }
+        }
     }
 }
 

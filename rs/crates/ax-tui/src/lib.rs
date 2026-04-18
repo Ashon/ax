@@ -7,6 +7,7 @@
 
 #![forbid(unsafe_code)]
 
+mod actions;
 mod app;
 mod daemon;
 mod input;

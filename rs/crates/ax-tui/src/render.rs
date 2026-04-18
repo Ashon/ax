@@ -11,6 +11,7 @@ use ratatui::Frame;
 
 use ax_proto::types::AgentStatus;
 
+use crate::actions::QuickActionId;
 use crate::sidebar::SidebarEntry;
 use crate::state::App;
 use crate::stream::{format_message_line, StreamView};
@@ -37,7 +38,63 @@ pub(crate) fn draw(f: &mut Frame, app: &App) {
     draw_sidebar(f, body_chunks[0], app);
     draw_body(f, body_chunks[1], app);
 
+    if app.quick_actions.open {
+        draw_quick_actions(f, body_chunks[1], app);
+    }
+
     draw_footer(f, chunks[2], app);
+}
+
+fn draw_quick_actions(f: &mut Frame, body: Rect, app: &App) {
+    let workspace = app.selected_workspace().unwrap_or("");
+    let action_count = app.quick_actions.actions.len() as u16;
+    let height = (action_count + 4).min(body.height.saturating_sub(2)).max(4);
+    let width: u16 = 42;
+    let width = width.min(body.width.saturating_sub(2));
+    let x = body.x + body.width.saturating_sub(width) / 2;
+    let y = body.y + body.height.saturating_sub(height) / 2;
+    let area = Rect::new(x, y, width, height);
+    f.render_widget(ratatui::widgets::Clear, area);
+
+    let title = format!(" {workspace} actions ");
+    let block = Block::default().borders(Borders::ALL).title(title);
+
+    let mut lines: Vec<Line> = Vec::with_capacity(app.quick_actions.actions.len() + 2);
+    if app.quick_actions.confirm {
+        let action = app.quick_actions.current().map(|a| a.id);
+        let prompt = action.map_or("", QuickActionId::confirm_prompt);
+        lines.push(Line::from(Span::styled(
+            prompt,
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(Span::styled(
+            "enter to confirm · esc to cancel",
+            Style::default().add_modifier(Modifier::DIM),
+        )));
+    } else {
+        for (idx, action) in app.quick_actions.actions.iter().enumerate() {
+            let cursor = if idx == app.quick_actions.selected {
+                "▸ "
+            } else {
+                "  "
+            };
+            let style = if idx == app.quick_actions.selected {
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            };
+            lines.push(Line::from(Span::styled(
+                format!("{cursor}{}", action.id.label()),
+                style,
+            )));
+        }
+        lines.push(Line::from(Span::styled(
+            "enter to run · esc to close",
+            Style::default().add_modifier(Modifier::DIM),
+        )));
+    }
+    let para = Paragraph::new(lines).block(block);
+    f.render_widget(para, area);
 }
 
 fn draw_header(f: &mut Frame, area: Rect, app: &App) {
@@ -475,11 +532,27 @@ fn workspace_info_summary(info: &ax_proto::types::WorkspaceInfo) -> String {
 }
 
 fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
-    let text = match &app.notice {
-        Some(msg) => msg.clone(),
-        None => "j/k: sidebar · [/]: tasks · Tab/s: cycle view · q: quit".to_owned(),
+    let (text, style) = if let Some(notice) = &app.quick_notice {
+        let s = if notice.error {
+            Style::default().fg(Color::Red)
+        } else {
+            Style::default().fg(Color::Green)
+        };
+        (notice.text.clone(), s)
+    } else if let Some(msg) = &app.notice {
+        (msg.clone(), Style::default().add_modifier(Modifier::DIM))
+    } else if app.quick_actions.open {
+        (
+            "↑↓ action · enter run · esc close · q quit".to_owned(),
+            Style::default().add_modifier(Modifier::DIM),
+        )
+    } else {
+        (
+            "j/k sidebar · [/] tasks · Tab/s view · esc actions · q quit".to_owned(),
+            Style::default().add_modifier(Modifier::DIM),
+        )
     };
-    let footer = Paragraph::new(text).style(Style::default().add_modifier(Modifier::DIM));
+    let footer = Paragraph::new(text).style(style);
     f.render_widget(footer, area);
 }
 
