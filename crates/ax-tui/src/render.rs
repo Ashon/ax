@@ -4,6 +4,7 @@
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::symbols;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
@@ -448,34 +449,51 @@ fn draw_stream_tabs(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
     let focused = app.focus == Focus::Tabs;
+    // A leading batch glyph on the selected tab reads as "you're
+    // here" regardless of terminal-level colour support; pairing it
+    // with bold + color still works on monochrome ptys.
     let titles: Vec<Line> = StreamView::ALL
         .iter()
         .enumerate()
-        .map(|(idx, view)| Line::from(format!("{}·{}", idx + 1, view.tab_label())))
+        .map(|(idx, view)| {
+            let label = format!("{}·{}", idx + 1, view.tab_label());
+            Line::from(label)
+        })
         .collect();
     let selected = StreamView::ALL
         .iter()
         .position(|view| *view == app.stream)
         .unwrap_or(0);
-    // When the strip itself owns focus we brighten the whole row so
-    // the tab cursor is obviously "live" even before the operator
-    // presses an arrow.
-    let base_style = if focused {
-        Style::default().fg(Color::Cyan)
+
+    let (base_style, highlight_style) = if focused {
+        // Focused strip: unselected tabs dim, selected tab bright
+        // cyan bold so the active tab jumps out of the row.
+        (
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
     } else {
-        Style::default().add_modifier(Modifier::DIM)
+        // Unfocused strip: everything reads as secondary chrome, but
+        // the selected tab still carries bold + its own colour so
+        // users can see which view the body is showing.
+        (
+            Style::default().add_modifier(Modifier::DIM),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )
     };
-    let mut highlight = Style::default()
-        .add_modifier(Modifier::REVERSED)
-        .add_modifier(Modifier::BOLD);
-    if focused {
-        highlight = highlight.fg(Color::Cyan);
-    }
+
     let tabs = Tabs::new(titles)
         .select(selected)
-        .divider("│")
+        .divider(symbols::DOT)
+        .padding(" ", " ")
         .style(base_style)
-        .highlight_style(highlight);
+        .highlight_style(highlight_style);
     f.render_widget(tabs, area);
 }
 
