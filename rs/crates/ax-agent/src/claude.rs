@@ -35,7 +35,7 @@ fn normalize_path(path: &Path) -> String {
     let mut parts: Vec<&str> = Vec::new();
     for segment in trimmed.split('/') {
         match segment {
-            "" | "." => continue,
+            "" | "." => {}
             ".." => {
                 if parts.pop().is_none() && !absolute {
                     parts.push("..");

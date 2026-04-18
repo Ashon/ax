@@ -272,7 +272,7 @@ fn estimate_proxy_tokens(text: &str) -> i64 {
     if n == 0 {
         0
     } else {
-        ((n + 3) / 4) as i64
+        n.div_ceil(4) as i64
     }
 }
 

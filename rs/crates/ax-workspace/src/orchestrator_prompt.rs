@@ -3,6 +3,12 @@
 //! Mirrors the prompt-building portion of
 //! `internal/workspace/orchestrator.go`.
 
+// This module is essentially a template renderer that grows a String
+// by appending formatted pieces; rewriting every `push_str(&format!(...))`
+// as a `write!(out, ...).unwrap()` would bloat the code without any
+// measurable win, so we let the local clippy pedantic lint off.
+#![allow(clippy::format_push_string)]
+
 use std::cmp::Ordering;
 use std::fs;
 use std::io;

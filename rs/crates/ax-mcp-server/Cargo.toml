@@ -13,10 +13,12 @@ workspace = true
 ax-daemon = { path = "../ax-daemon" }
 ax-proto = { path = "../ax-proto" }
 chrono = { workspace = true }
+rmcp = { version = "1", default-features = false, features = ["server", "macros", "schemars", "transport-io"] }
+schemars = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "io-std", "sync", "time", "fs"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 

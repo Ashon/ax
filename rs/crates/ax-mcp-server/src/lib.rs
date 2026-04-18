@@ -7,7 +7,9 @@
 #![forbid(unsafe_code)]
 
 mod daemon_client;
+mod server;
 
 pub use daemon_client::{
     DaemonClient, DaemonClientBuilder, DaemonClientError, DEFAULT_REQUEST_TIMEOUT,
 };
+pub use server::{run_stdio, Server};

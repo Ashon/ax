@@ -74,7 +74,7 @@ fn deferred_tools_attachment_only_counts_mcp_prefixed_names() {
     // Two lines survive the filter ("mcp__ax__start_task" and
     // "ListMcpResourcesTool"), joined by newline, then (chars+3)/4 tokens.
     let kept = "mcp__ax__start_task\nListMcpResourcesTool";
-    let expected = (kept.chars().count() + 3) / 4;
+    let expected = kept.chars().count().div_ceil(4);
     assert_eq!(rec.mcp_proxy.total, expected as i64);
     assert_eq!(rec.mcp_proxy.prompt_tokens, expected as i64);
     assert_eq!(rec.mcp_proxy.prompt_signals, 1);

@@ -350,17 +350,29 @@ impl fmt::Display for DaemonCliError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::MissingStateDir { socket_path } => {
-                write!(f, "resolve daemon state dir from socket {socket_path:?}")
+                write!(
+                    f,
+                    "resolve daemon state dir from socket {}",
+                    socket_path.display()
+                )
             }
             Self::BuildRuntime { source } => write!(f, "build tokio runtime: {source}"),
             Self::LoadState { state_dir, source } => {
-                write!(f, "load daemon state from {state_dir:?}: {source}")
+                write!(
+                    f,
+                    "load daemon state from {}: {source}",
+                    state_dir.display()
+                )
             }
             Self::Bind(source) => write!(f, "{source}"),
             Self::SignalSetup { source } => write!(f, "install shutdown signal handler: {source}"),
             Self::SignalWait { source } => write!(f, "wait for shutdown signal: {source}"),
-            Self::WritePid { path, source } => write!(f, "write pid file {path:?}: {source}"),
-            Self::ReadPid { path, source } => write!(f, "read pid file {path:?}: {source}"),
+            Self::WritePid { path, source } => {
+                write!(f, "write pid file {}: {source}", path.display())
+            }
+            Self::ReadPid { path, source } => {
+                write!(f, "read pid file {}: {source}", path.display())
+            }
             Self::MissingPidFile => f.write_str("daemon not running (no pid file)"),
             Self::InvalidPidFile => f.write_str("invalid pid file"),
             Self::SignalCommand { signal, source } => write!(f, "signal {signal}: {source}"),
@@ -1498,7 +1510,7 @@ async fn run_daemon_until_signal(socket_path: PathBuf) -> Result<(), DaemonCliEr
     handle.shutdown().await;
     if let Err(source) = fs::remove_file(&pid_path) {
         if source.kind() != io::ErrorKind::NotFound {
-            eprintln!("remove pid file {pid_path:?}: {source}");
+            eprintln!("remove pid file {}: {source}", pid_path.display());
         }
     }
     wait_result
@@ -1644,6 +1656,8 @@ fn format_messages_output(
     messages: &[Message],
     json_output: bool,
 ) -> Result<String, serde_json::Error> {
+    use std::fmt::Write as _;
+
     if json_output {
         return serde_json::to_string_pretty(messages).map(|text| format!("{text}\n"));
     }
@@ -1653,12 +1667,13 @@ fn format_messages_output(
 
     let mut out = String::new();
     for message in messages {
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "── [{}] from {} ──\n{}\n\n",
             message.created_at.format("%H:%M:%S"),
             message.from,
             message.content
-        ));
+        );
     }
     Ok(out)
 }

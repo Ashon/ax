@@ -39,7 +39,7 @@ impl fmt::Display for DaemonClientError {
                 socket_path,
                 source,
             } => {
-                write!(f, "connect {socket_path:?}: {source}")
+                write!(f, "connect {}: {source}", socket_path.display())
             }
             Self::ResolveCurrentDir(source) => write!(f, "resolve current dir: {source}"),
             Self::EncodeEnvelope(source) => write!(f, "encode envelope: {source}"),
