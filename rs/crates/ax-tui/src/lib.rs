@@ -11,6 +11,7 @@ mod app;
 mod daemon;
 mod input;
 mod render;
+mod sidebar;
 mod state;
 mod terminal;
 

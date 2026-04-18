@@ -87,8 +87,67 @@ fn refresh(app: &mut App, opts: &RunOptions) {
         app.daemon_running = false;
         app.workspace_infos.clear();
     }
-    if app.selected >= app.sessions.len() {
-        app.selected = app.sessions.len().saturating_sub(1);
-    }
+
+    // Re-read the config tree each tick so users editing ax.yaml see
+    // changes take effect without restarting the TUI. Failures are
+    // silent — a missing config just falls back to the name-split
+    // fallback tree.
+    refresh_tree(app);
+    app.rebuild_sidebar();
     app.last_refresh = Some(Instant::now());
+}
+
+fn refresh_tree(app: &mut App) {
+    let Ok(cwd) = std::env::current_dir() else {
+        app.tree = None;
+        app.desired.clear();
+        app.reconfigure_enabled = false;
+        return;
+    };
+    let Some(cfg_path) = ax_config::find_config_file(cwd) else {
+        app.tree = None;
+        app.desired.clear();
+        app.reconfigure_enabled = false;
+        return;
+    };
+    let tree = ax_config::Config::load_tree(&cfg_path).ok();
+    let reconfigure = ax_config::Config::load(&cfg_path)
+        .map(|cfg| cfg.experimental_mcp_team_reconfigure)
+        .unwrap_or(false);
+    app.reconfigure_enabled = reconfigure;
+    if let Some(ref tree) = tree {
+        app.desired = build_desired_set(tree, reconfigure);
+    } else {
+        app.desired.clear();
+    }
+    app.tree = tree;
+}
+
+fn build_desired_set(
+    tree: &ax_config::ProjectNode,
+    reconfigure_enabled: bool,
+) -> std::collections::BTreeMap<String, bool> {
+    let mut out = std::collections::BTreeMap::new();
+    if !reconfigure_enabled {
+        return out;
+    }
+    walk_desired(tree, &mut out);
+    out
+}
+
+fn walk_desired(node: &ax_config::ProjectNode, out: &mut std::collections::BTreeMap<String, bool>) {
+    if !(node.prefix.is_empty() && node.disable_root_orchestrator) {
+        let name = if node.prefix.is_empty() {
+            "orchestrator".to_owned()
+        } else {
+            format!("{}.orchestrator", node.prefix)
+        };
+        out.insert(name, true);
+    }
+    for ws in &node.workspaces {
+        out.insert(ws.merged_name.clone(), true);
+    }
+    for child in &node.children {
+        walk_desired(child, out);
+    }
 }
