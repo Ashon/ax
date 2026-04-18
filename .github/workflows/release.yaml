@@ -9,21 +9,57 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset: ax-x86_64-linux
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            asset: ax-aarch64-linux
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            asset: ax-x86_64-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            asset: ax-aarch64-darwin
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      - uses: actions/setup-go@v5
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          go-version-file: go.mod
+          targets: ${{ matrix.target }}
 
-      - uses: goreleaser/goreleaser-action@v6
+      - uses: Swatinem/rust-cache@v2
         with:
-          version: "~> v2"
-          args: release --clean
+          workspaces: rs
+          key: release-${{ matrix.target }}
+
+      - name: Install cross linker
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          mkdir -p ~/.cargo
+          printf '[target.aarch64-unknown-linux-gnu]\nlinker = "aarch64-linux-gnu-gcc"\n' >> ~/.cargo/config.toml
+
+      - name: Build release binary
+        working-directory: rs
+        run: cargo build --release --bin ax --target ${{ matrix.target }}
+
+      - name: Package
+        run: |
+          tar -C rs/target/${{ matrix.target }}/release -czf ${{ matrix.asset }}.tar.gz ax
+          shasum -a 256 ${{ matrix.asset }}.tar.gz > ${{ matrix.asset }}.tar.gz.sha256
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ matrix.asset }}.tar.gz
+            ${{ matrix.asset }}.tar.gz.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

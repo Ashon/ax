@@ -1,4 +1,4 @@
-//! Rendering + helpers for `ax-rs status`. Mirrors `cmd/status.go`
+//! Rendering + helpers for `ax status`. Mirrors `cmd/status.go`
 //! plus the workspace/task summary helpers it depends on:
 //! `summarizeTasks` / `formatTaskSummary` / `taskAttentionHint` /
 //! `workspaceAgentStatus` / `workspaceStatusPreview` / the config-tree

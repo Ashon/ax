@@ -3,24 +3,23 @@ VERSION ?= dev
 .PHONY: build install clean test release-check snapshot release
 
 build:
-	go build -ldflags "-s -w -X github.com/ashon/ax/cmd.version=$(VERSION)" -o ax .
+	cd rs && cargo build --release --bin ax
+	cp rs/target/release/ax ./ax
 
 install: build
-	cp ax $(shell go env GOPATH)/bin/ax
-	codesign -s - $(shell go env GOPATH)/bin/ax
+	cp ax $(shell printf '%s' "$${CARGO_HOME:-$$HOME/.cargo}/bin")/ax
+	@command -v codesign >/dev/null 2>&1 && codesign -s - $(shell printf '%s' "$${CARGO_HOME:-$$HOME/.cargo}/bin")/ax || true
 
 clean:
 	rm -f ax
+	cd rs && cargo clean
 
 test:
-	go test ./...
+	cd rs && cargo test
 
 release-check:
 	@test -z "$$(git status --porcelain --untracked-files=all)" || (echo "Working tree is not clean. Commit, stash, or remove changes before releasing." >&2; git status --short >&2; exit 1)
 	@$(MAKE) test
-
-snapshot:
-	goreleaser release --snapshot --clean
 
 # Usage: make release {patch|minor|major|dev}
 LATEST_STABLE := $(shell git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$$' | head -1)

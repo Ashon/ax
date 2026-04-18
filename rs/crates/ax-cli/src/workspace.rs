@@ -1,4 +1,4 @@
-//! `ax-rs workspace` — port of cmd/workspace.go. Subcommands:
+//! `ax workspace` — port of cmd/workspace.go. Subcommands:
 //! `create`, `destroy`, `list`, `attach`, `interrupt`. The `list`
 //! view mirrors `buildWorkspaceListRows` + the experimental
 //! reconfigure state annotations so stale terminals still parse.

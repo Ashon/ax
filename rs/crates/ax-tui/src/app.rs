@@ -87,7 +87,7 @@ fn drain_pending_lifecycle(app: &mut App, opts: &RunOptions) {
         ));
         return;
     };
-    let ax_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ax-rs"));
+    let ax_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ax"));
     let outcomes = crate::actions::apply_lifecycle(
         pending.action,
         &pending.workspace,

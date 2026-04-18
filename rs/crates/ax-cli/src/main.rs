@@ -30,46 +30,46 @@ use ax_workspace::{
 use daemon_client::{DaemonClient, DaemonClientError};
 
 const USAGE: &str = "\
-ax-rs - thin Rust entrypoint for migrated workspace control
+ax - thin Rust entrypoint for migrated workspace control
 
 Usage:
-  ax-rs daemon start [--socket PATH]
-  ax-rs daemon stop [--socket PATH]
-  ax-rs daemon status [--socket PATH]
-  ax-rs up [--config PATH] [--socket PATH] [--ax-bin PATH]
-  ax-rs down [--config PATH] [--socket PATH] [--ax-bin PATH]
-  ax-rs claude [claude args...]
-  ax-rs codex [codex args...]
-  ax-rs send [--config PATH] [--socket PATH] <workspace> <message...>
-  ax-rs messages [--from NAME] [--limit N] [--wait] [--timeout SECONDS] [--json] [--socket PATH]
-  ax-rs start <target> [--config PATH] [--socket PATH] [--ax-bin PATH]
-  ax-rs stop <target> [--config PATH] [--socket PATH] [--ax-bin PATH]
-  ax-rs restart <target> [--config PATH] [--socket PATH] [--ax-bin PATH]
-  ax-rs dispatch <target> --sender NAME [--fresh] [--config PATH] [--socket PATH] [--ax-bin PATH]
-  ax-rs run-agent --workspace NAME [--runtime RUNTIME] [--socket PATH] [--config PATH] [--fresh] [-- ...]
-  ax-rs mcp-server --workspace NAME [--socket PATH] [--config PATH]
-  ax-rs status [--socket PATH] [--config PATH]
-  ax-rs refresh [--restart] [--start-missing] [--socket PATH] [--config PATH] [--ax-bin PATH]
-  ax-rs tasks [--assignee N] [--created-by N] [--status S] [--stale] [--socket PATH]
-  ax-rs tasks show <id> [--logs N] [--socket PATH]
-  ax-rs tasks cancel <id> [--reason STR] [--expected-version N] [--socket PATH]
-  ax-rs tasks remove <id> [--reason STR] [--expected-version N] [--socket PATH]
-  ax-rs tasks recover <id> [--socket PATH]
-  ax-rs tasks intervene <id> --action wake|interrupt|retry [--note STR] [--expected-version N] [--socket PATH]
-  ax-rs tasks retry <id> [--note STR] [--expected-version N] [--socket PATH]
-  ax-rs tasks activity [task-id] [--assignee N] [--created-by N] [--status S] [--stale] [--limit N] [--socket PATH]
-  ax-rs init [--global] [--no-setup] [--codex|--claude] [--socket PATH]
-  ax-rs watch [--socket PATH]
-  ax-rs workspace create <name> [--dir PATH] [--socket PATH] [--config PATH] [--ax-bin PATH]
-  ax-rs workspace destroy <name> [--socket PATH] [--config PATH] [--ax-bin PATH]
-  ax-rs workspace list [--internal] [--socket PATH] [--config PATH]
-  ax-rs workspace attach <name>
-  ax-rs workspace interrupt <name>
+  ax daemon start [--socket PATH]
+  ax daemon stop [--socket PATH]
+  ax daemon status [--socket PATH]
+  ax up [--config PATH] [--socket PATH] [--ax-bin PATH]
+  ax down [--config PATH] [--socket PATH] [--ax-bin PATH]
+  ax claude [claude args...]
+  ax codex [codex args...]
+  ax send [--config PATH] [--socket PATH] <workspace> <message...>
+  ax messages [--from NAME] [--limit N] [--wait] [--timeout SECONDS] [--json] [--socket PATH]
+  ax start <target> [--config PATH] [--socket PATH] [--ax-bin PATH]
+  ax stop <target> [--config PATH] [--socket PATH] [--ax-bin PATH]
+  ax restart <target> [--config PATH] [--socket PATH] [--ax-bin PATH]
+  ax dispatch <target> --sender NAME [--fresh] [--config PATH] [--socket PATH] [--ax-bin PATH]
+  ax run-agent --workspace NAME [--runtime RUNTIME] [--socket PATH] [--config PATH] [--fresh] [-- ...]
+  ax mcp-server --workspace NAME [--socket PATH] [--config PATH]
+  ax status [--socket PATH] [--config PATH]
+  ax refresh [--restart] [--start-missing] [--socket PATH] [--config PATH] [--ax-bin PATH]
+  ax tasks [--assignee N] [--created-by N] [--status S] [--stale] [--socket PATH]
+  ax tasks show <id> [--logs N] [--socket PATH]
+  ax tasks cancel <id> [--reason STR] [--expected-version N] [--socket PATH]
+  ax tasks remove <id> [--reason STR] [--expected-version N] [--socket PATH]
+  ax tasks recover <id> [--socket PATH]
+  ax tasks intervene <id> --action wake|interrupt|retry [--note STR] [--expected-version N] [--socket PATH]
+  ax tasks retry <id> [--note STR] [--expected-version N] [--socket PATH]
+  ax tasks activity [task-id] [--assignee N] [--created-by N] [--status S] [--stale] [--limit N] [--socket PATH]
+  ax init [--global] [--no-setup] [--codex|--claude] [--socket PATH]
+  ax watch [--socket PATH]
+  ax workspace create <name> [--dir PATH] [--socket PATH] [--config PATH] [--ax-bin PATH]
+  ax workspace destroy <name> [--socket PATH] [--config PATH] [--ax-bin PATH]
+  ax workspace list [--internal] [--socket PATH] [--config PATH]
+  ax workspace attach <name>
+  ax workspace interrupt <name>
 
 Notes:
   --config defaults to the discovered ax config (.ax/config.yaml or ax.yaml)
   --socket defaults to ~/.local/state/ax/daemon.sock
-  --ax-bin defaults to the current ax-rs executable
+  --ax-bin defaults to the current ax executable
 ";
 
 const ROOT_ORCHESTRATOR_FAILURE_HOLD_SCRIPT: &str = "\"$@\"\nstatus=$?\nif [ \"$status\" -ne 0 ] && [ \"$status\" -ne 130 ] && [ \"$status\" -ne 143 ]; then\n  printf '\\n[ax] Root orchestrator process exited unexpectedly with status %s.\\n' \"$status\"\n  printf '[ax] Common causes: runtime binary not found, auth/config issues, or a CLI crash.\\n'\n  printf '[ax] Press Enter to close this tmux session.\\n'\n  IFS= read -r _\nfi\nexit \"$status\"";
@@ -2728,11 +2728,11 @@ mod tests {
         let _config_path = write_config(&root);
         let cwd = root.path().join("nested");
         fs::create_dir_all(&cwd).expect("create cwd");
-        let current_exe = PathBuf::from("/tmp/ax-rs");
+        let current_exe = PathBuf::from("/tmp/ax");
 
         with_home(home.path(), || {
             let parsed = parse_args(
-                vec!["ax-rs".into(), "start".into(), "worker".into()],
+                vec!["ax".into(), "start".into(), "worker".into()],
                 &cwd,
                 &current_exe,
             )
@@ -2756,11 +2756,11 @@ mod tests {
     #[test]
     fn dispatch_accepts_overrides() {
         let cwd = PathBuf::from("/work/project");
-        let current_exe = PathBuf::from("/tmp/ax-rs");
+        let current_exe = PathBuf::from("/tmp/ax");
 
         let parsed = parse_args(
             vec![
-                "ax-rs".into(),
+                "ax".into(),
                 "dispatch".into(),
                 "worker".into(),
                 "--sender".into(),
@@ -2797,7 +2797,7 @@ mod tests {
     fn run_agent_passthrough_skips_config_resolution() {
         let parsed = parse_args(
             vec![
-                "ax-rs".into(),
+                "ax".into(),
                 "run-agent".into(),
                 "--runtime".into(),
                 "claude".into(),
@@ -2808,7 +2808,7 @@ mod tests {
                 "gpt-5.4".into(),
             ],
             Path::new("/missing"),
-            Path::new("/tmp/ax-rs"),
+            Path::new("/tmp/ax"),
         )
         .expect("parse");
 
@@ -2833,9 +2833,9 @@ mod tests {
 
         with_home(home.path(), || {
             let err = parse_args(
-                vec!["ax-rs".into(), "dispatch".into(), "worker".into()],
+                vec!["ax".into(), "dispatch".into(), "worker".into()],
                 root.path(),
-                Path::new("/tmp/ax-rs"),
+                Path::new("/tmp/ax"),
             )
             .expect_err("missing sender should fail");
             assert_eq!(
@@ -2849,7 +2849,7 @@ mod tests {
     fn run_agent_parses_flags_and_extra_args() {
         let parsed = parse_args(
             vec![
-                "ax-rs".into(),
+                "ax".into(),
                 "run-agent".into(),
                 "--runtime".into(),
                 "codex".into(),
@@ -2865,7 +2865,7 @@ mod tests {
                 "gpt-5.4".into(),
             ],
             Path::new("/repo"),
-            Path::new("/tmp/ax-rs"),
+            Path::new("/tmp/ax"),
         )
         .expect("parse");
 
@@ -2886,14 +2886,14 @@ mod tests {
     fn daemon_parses_socket_override_without_config_resolution() {
         let parsed = parse_args(
             vec![
-                "ax-rs".into(),
+                "ax".into(),
                 "daemon".into(),
                 "status".into(),
                 "--socket".into(),
                 "~/daemon.sock".into(),
             ],
             Path::new("/missing"),
-            Path::new("/tmp/ax-rs"),
+            Path::new("/tmp/ax"),
         )
         .expect("parse");
 
@@ -2913,11 +2913,11 @@ mod tests {
         let _config_path = write_config(&root);
         let cwd = root.path().join("nested");
         fs::create_dir_all(&cwd).expect("create cwd");
-        let current_exe = PathBuf::from("/tmp/ax-rs");
+        let current_exe = PathBuf::from("/tmp/ax");
 
         with_home(home.path(), || {
             let parsed =
-                parse_args(vec!["ax-rs".into(), "up".into()], &cwd, &current_exe).expect("parse");
+                parse_args(vec!["ax".into(), "up".into()], &cwd, &current_exe).expect("parse");
 
             assert_eq!(
                 parsed,
@@ -2939,11 +2939,11 @@ mod tests {
         let _config_path = write_config(&root);
         let cwd = root.path().join("nested");
         fs::create_dir_all(&cwd).expect("create cwd");
-        let current_exe = PathBuf::from("/tmp/ax-rs");
+        let current_exe = PathBuf::from("/tmp/ax");
 
         with_home(home.path(), || {
             let parsed =
-                parse_args(vec!["ax-rs".into(), "down".into()], &cwd, &current_exe).expect("parse");
+                parse_args(vec!["ax".into(), "down".into()], &cwd, &current_exe).expect("parse");
 
             assert_eq!(
                 parsed,
@@ -2965,12 +2965,12 @@ mod tests {
         let _config_path = write_config(&root);
         let cwd = root.path().join("nested");
         fs::create_dir_all(&cwd).expect("create cwd");
-        let current_exe = PathBuf::from("/tmp/ax-rs");
+        let current_exe = PathBuf::from("/tmp/ax");
 
         with_home(home.path(), || {
             let parsed = parse_args(
                 vec![
-                    "ax-rs".into(),
+                    "ax".into(),
                     "claude".into(),
                     "resume".into(),
                     "--model".into(),
@@ -3003,7 +3003,7 @@ mod tests {
     #[test]
     fn wrap_root_orchestrator_ephemeral_argv_preserves_original_command() {
         let argv = vec![
-            "ax-rs".to_owned(),
+            "ax".to_owned(),
             "run-agent".to_owned(),
             "--runtime".to_owned(),
             "codex".to_owned(),
@@ -3036,14 +3036,14 @@ mod tests {
         with_home(home.path(), || {
             let parsed = parse_args(
                 vec![
-                    "ax-rs".into(),
+                    "ax".into(),
                     "send".into(),
                     "worker".into(),
                     "hello".into(),
                     "world".into(),
                 ],
                 &cwd,
-                Path::new("/tmp/ax-rs"),
+                Path::new("/tmp/ax"),
             )
             .expect("parse");
 
@@ -3063,7 +3063,7 @@ mod tests {
     fn messages_parses_filters_and_json_alias() {
         let parsed = parse_args(
             vec![
-                "ax-rs".into(),
+                "ax".into(),
                 "messages-json".into(),
                 "--from".into(),
                 "worker".into(),
@@ -3076,7 +3076,7 @@ mod tests {
                 "~/daemon.sock".into(),
             ],
             Path::new("/missing"),
-            Path::new("/tmp/ax-rs"),
+            Path::new("/tmp/ax"),
         )
         .expect("parse");
 

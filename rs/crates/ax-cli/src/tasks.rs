@@ -1,4 +1,4 @@
-//! `ax-rs tasks` — port of cmd/tasks.go. Implements the list /
+//! `ax tasks` — port of cmd/tasks.go. Implements the list /
 //! show / cancel / remove / recover / intervene / retry / activity
 //! subcommands against the sync [`DaemonClient`]. Shares the task
 //! summary + workspace status helpers with [`crate::status`].

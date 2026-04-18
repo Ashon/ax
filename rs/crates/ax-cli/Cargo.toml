@@ -5,10 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Thin Rust CLI entrypoint for migrated ax workspace lifecycle/dispatch flows"
+description = "ax CLI entrypoint — workspace lifecycle, MCP server, tasks, and the watch TUI"
 
 [[bin]]
-name = "ax-rs"
+name = "ax"
 path = "src/main.rs"
 
 [lints]
