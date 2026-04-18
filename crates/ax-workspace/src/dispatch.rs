@@ -60,6 +60,30 @@ pub enum DispatchError {
         #[source]
         source: ax_tmux::TmuxError,
     },
+    #[error(
+        "max_concurrent_agents cap reached: {count} live ax sessions vs cap {cap}; stop an agent or raise max_concurrent_agents"
+    )]
+    ConcurrentCapReached { count: u32, cap: u32 },
+    #[error("query tmux sessions for capacity check: {0}")]
+    CapacityQuery(#[source] ax_tmux::TmuxError),
+}
+
+/// Returns `Ok(())` when a new spawn would stay under the cap. A cap
+/// of 0 disables the check so power-users can opt out. The query
+/// itself can fail (tmux dead); those propagate as
+/// `DispatchError::CapacityQuery` so callers don't silently spawn.
+pub fn enforce_capacity_cap<B: TmuxBackend>(tmux: &B, cap: u32) -> Result<(), DispatchError> {
+    if cap == 0 {
+        return Ok(());
+    }
+    let count = tmux
+        .list_sessions()
+        .map_err(DispatchError::CapacityQuery)?
+        .len() as u32;
+    if count >= cap {
+        return Err(DispatchError::ConcurrentCapReached { count, cap });
+    }
+    Ok(())
 }
 
 pub trait DispatchBackend: TmuxBackend {
@@ -143,6 +167,11 @@ pub fn ensure_dispatch_target<B: TmuxBackend + Clone>(
     }
 
     let desired = load_dispatch_desired_state(socket_path, config_path)?;
+    // Only creates (not restarts of live sessions) push count up, so
+    // check the cap when the target session isn't already live.
+    if !tmux.session_exists(target) {
+        enforce_capacity_cap(tmux, desired.max_concurrent_agents)?;
+    }
     if let Some(entry) = desired.workspaces.get(target) {
         return ensure_workspace_dispatch_target(
             tmux,

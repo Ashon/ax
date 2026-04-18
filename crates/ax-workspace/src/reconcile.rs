@@ -103,6 +103,8 @@ pub struct DesiredState {
     pub config_path: PathBuf,
     pub workspaces: BTreeMap<String, DesiredWorkspace>,
     pub orchestrators: BTreeMap<String, DesiredOrchestrator>,
+    /// Root-config cap enforced by spawn paths; 0 disables.
+    pub max_concurrent_agents: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -533,6 +535,7 @@ pub fn build_desired_state(
         config_path,
         workspaces,
         orchestrators: BTreeMap::new(),
+        max_concurrent_agents: config.max_concurrent_agents,
     }
 }
 

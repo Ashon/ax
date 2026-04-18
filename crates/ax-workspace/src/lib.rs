@@ -21,8 +21,9 @@ mod orchestrator_prompt;
 mod reconcile;
 
 pub use dispatch::{
-    dispatch_runnable_work, dispatch_runnable_work_with_options, ensure_dispatch_target,
-    load_dispatch_desired_state, DispatchBackend, DispatchError, DispatchOptions,
+    dispatch_runnable_work, dispatch_runnable_work_with_options, enforce_capacity_cap,
+    ensure_dispatch_target, load_dispatch_desired_state, DispatchBackend, DispatchError,
+    DispatchOptions,
 };
 pub use instructions::{remove_instructions, write_instructions, InstructionsError};
 pub use lifecycle::{restart_named_target, start_named_target, stop_named_target, LifecycleError};

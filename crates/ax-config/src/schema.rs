@@ -18,6 +18,11 @@ pub const DEFAULT_MAX_ORCHESTRATOR_DEPTH: u32 = 3;
 /// unbounded.
 pub const DEFAULT_MAX_CHILDREN_PER_NODE: u32 = 6;
 
+/// Cap on the number of ax-managed tmux sessions that may run at
+/// once. Runtime spawn paths refuse new sessions past this cap so
+/// runaway recursion can't fork-bomb the machine. Zero disables.
+pub const DEFAULT_MAX_CONCURRENT_AGENTS: u32 = 8;
+
 pub fn default_idle_timeout_minutes() -> i32 {
     DEFAULT_IDLE_TIMEOUT_MINUTES
 }
@@ -28,6 +33,10 @@ pub(crate) fn default_max_orchestrator_depth() -> u32 {
 
 pub(crate) fn default_max_children_per_node() -> u32 {
     DEFAULT_MAX_CHILDREN_PER_NODE
+}
+
+pub(crate) fn default_max_concurrent_agents() -> u32 {
+    DEFAULT_MAX_CONCURRENT_AGENTS
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -83,6 +92,14 @@ pub struct Config {
         skip_serializing_if = "is_default_children_per_node"
     )]
     pub max_children_per_node: u32,
+    /// Max ax-managed tmux sessions allowed to run at the same time.
+    /// The runtime spawn path consults this cap so a runaway child
+    /// orchestrator can't fork-bomb the machine. Zero disables.
+    #[serde(
+        default = "default_max_concurrent_agents",
+        skip_serializing_if = "is_default_concurrent_agents"
+    )]
+    pub max_concurrent_agents: u32,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub children: BTreeMap<String, Child>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -129,6 +146,7 @@ impl Default for Config {
             idle_timeout_minutes: 0,
             max_orchestrator_depth: DEFAULT_MAX_ORCHESTRATOR_DEPTH,
             max_children_per_node: DEFAULT_MAX_CHILDREN_PER_NODE,
+            max_concurrent_agents: DEFAULT_MAX_CONCURRENT_AGENTS,
             children: BTreeMap::new(),
             workspaces: BTreeMap::new(),
         }
@@ -227,4 +245,9 @@ fn is_default_orchestrator_depth(v: &u32) -> bool {
 #[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_default_children_per_node(v: &u32) -> bool {
     *v == DEFAULT_MAX_CHILDREN_PER_NODE
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_default_concurrent_agents(v: &u32) -> bool {
+    *v == DEFAULT_MAX_CONCURRENT_AGENTS
 }

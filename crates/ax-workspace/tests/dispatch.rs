@@ -22,6 +22,9 @@ struct FakeState {
     created_dir: RefCell<Option<String>>,
     created_args: RefCell<Vec<String>>,
     woke: Cell<bool>,
+    /// Extra phantom ax-managed sessions reported by `list_sessions`.
+    /// Used by the capacity-cap tests to simulate a full host.
+    extra_sessions: Cell<u32>,
 }
 
 #[derive(Clone, Default)]
@@ -58,16 +61,25 @@ impl TmuxBackend for FakeTmux {
     }
 
     fn list_sessions(&self) -> Result<Vec<SessionInfo>, ax_tmux::TmuxError> {
+        let mut out = Vec::new();
         if self.state.session_exists.get() {
-            Ok(vec![SessionInfo {
+            out.push(SessionInfo {
                 name: ax_tmux::session_name("worker"),
                 workspace: "worker".to_owned(),
                 attached: false,
                 windows: 1,
-            }])
-        } else {
-            Ok(Vec::new())
+            });
         }
+        for i in 0..self.state.extra_sessions.get() {
+            let ws = format!("phantom{i}");
+            out.push(SessionInfo {
+                name: ax_tmux::session_name(&ws),
+                workspace: ws,
+                attached: false,
+                windows: 1,
+            });
+        }
+        Ok(out)
     }
 
     fn is_idle(&self, _workspace: &str) -> bool {
@@ -233,6 +245,64 @@ fn ensure_dispatch_target_rejects_missing_root_orchestrator_session() {
         assert!(err
             .to_string()
             .contains("is not running and is not a managed session"));
+    });
+}
+
+#[test]
+fn ensure_dispatch_target_blocks_new_spawn_past_capacity_cap() {
+    let home = tempfile::tempdir().unwrap();
+    with_home(home.path(), || {
+        // Cap at 2 live ax sessions. Pre-populate 2 phantoms so a
+        // new spawn would push the count to 3.
+        let config_path = write_config(
+            home.path(),
+            "project: root\nmax_concurrent_agents: 2\nworkspaces:\n  worker:\n    dir: ./worker\n    runtime: claude\n",
+        );
+        let tmux = FakeTmux::default();
+        tmux.state.extra_sessions.set(2);
+
+        let err = ensure_dispatch_target(
+            &tmux,
+            Path::new("/tmp/ax.sock"),
+            &config_path,
+            Path::new("/tmp/ax"),
+            "worker",
+            false,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("max_concurrent_agents"),
+            "expected cap message, got {msg}"
+        );
+        // Session was not created (no dir recorded).
+        assert!(tmux.created_dir().is_none());
+    });
+}
+
+#[test]
+fn ensure_dispatch_target_skips_cap_check_when_session_already_live() {
+    let home = tempfile::tempdir().unwrap();
+    with_home(home.path(), || {
+        // Cap at 1 but the target is already live; early return
+        // should skip the cap check (no-op idempotent call).
+        let config_path = write_config(
+            home.path(),
+            "project: root\nmax_concurrent_agents: 1\nworkspaces:\n  worker:\n    dir: ./worker\n    runtime: claude\n",
+        );
+        let tmux = FakeTmux::default();
+        tmux.state.session_exists.set(true);
+        tmux.state.extra_sessions.set(5);
+
+        ensure_dispatch_target(
+            &tmux,
+            Path::new("/tmp/ax.sock"),
+            &config_path,
+            Path::new("/tmp/ax"),
+            "worker",
+            false,
+        )
+        .expect("already-live target short-circuits before the cap check");
     });
 }
 

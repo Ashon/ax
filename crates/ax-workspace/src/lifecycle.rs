@@ -189,6 +189,8 @@ fn control_workspace_target<B: TmuxBackend + Clone>(
                     name: target.target.name.clone(),
                 });
             }
+            let desired = crate::load_dispatch_desired_state(socket_path, config_path)?;
+            crate::enforce_capacity_cap(tmux, desired.max_concurrent_agents)?;
             manager.create(&target.target.name, &workspace.workspace)?;
             Ok(())
         }
@@ -226,6 +228,8 @@ fn control_orchestrator_target<B: TmuxBackend + Clone>(
                     name: target.target.name.clone(),
                 });
             }
+            let desired = crate::load_dispatch_desired_state(socket_path, config_path)?;
+            crate::enforce_capacity_cap(tmux, desired.max_concurrent_agents)?;
             ensure_orchestrator(
                 tmux,
                 &orchestrator.node,
