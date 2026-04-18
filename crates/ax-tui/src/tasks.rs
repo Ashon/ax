@@ -1,13 +1,9 @@
-//! Tasks stream view — port of the single-column slice of
-//! `cmd/watch_streams.go::renderTasks`. Reads `tasks.json` from the
-//! daemon state dir and renders a summary header + table in the
-//! body pane.
+//! Tasks stream view — reads `tasks.json` from the daemon state dir
+//! and renders a summary header + table in the body pane.
 //!
-//! The Go watch TUI has a richer split layout (task list + detail
-//! pane) plus a filter-cycle; those land in follow-up slices so this
-//! module stays compact. Helpers here are close relatives of the
-//! ones in `ax-cli::tasks`; a future slice can extract them into a
-//! shared crate once the cross-crate usage stabilises.
+//! Helpers here are close relatives of the ones in `ax-cli::tasks`;
+//! a future slice can extract them into a shared crate once the
+//! cross-crate usage stabilises.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -18,9 +14,7 @@ use chrono::{DateTime, Utc};
 
 const TASKS_FILE_NAME: &str = "tasks.json";
 
-/// Cycle order for the `f` key: active → stale → done → all →
-/// active. Matches `cmd/task_helpers.go::nextTaskFilterMode` so a
-/// muscle-memory user gets the same ordering.
+/// Cycle order for the `f` key: active → stale → done → all → active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TaskFilterMode {
     Active,
@@ -95,10 +89,9 @@ pub(crate) fn read_tasks(path: &Path) -> Vec<Task> {
     tasks
 }
 
-/// Low-cardinality counts the header uses. Mirrors
-/// `cmd/task_helpers.go::taskSummary` minus the
-/// `top_attention_ids` pass (easy to add later if the TUI grows an
-/// attention badge).
+/// Low-cardinality counts the header uses. `top_attention_ids` is
+/// intentionally omitted — easy to add later if the TUI grows an
+/// attention badge.
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct TaskSummary {
     pub total: usize,
@@ -146,6 +139,7 @@ pub(crate) fn summarize_tasks(tasks: &[Task]) -> TaskSummary {
     s
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn format_task_summary(s: &TaskSummary) -> String {
     let mut out = format!(
         "total={}  pending={}  in_progress={}  stale={}  diverged={}  queued_msgs={}",
@@ -273,8 +267,7 @@ pub(crate) fn format_task_age(task: &Task) -> String {
 }
 
 /// One entry in the task-detail activity timeline. Ordering is by
-/// timestamp ascending, then kind (lifecycle < log < message) —
-/// matches `cmd/task_helpers.go::buildTaskActivity`.
+/// timestamp ascending, then kind (lifecycle < log < message).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TaskActivityEntry {
     pub timestamp: DateTime<Utc>,

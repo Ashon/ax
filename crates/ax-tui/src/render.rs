@@ -6,8 +6,12 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    Sparkline, Tabs, Wrap,
+};
 use ratatui::Frame;
+use throbber_widgets_tui::{Throbber, WhichUse, BRAILLE_SIX};
 
 use ax_proto::types::AgentStatus;
 
@@ -16,12 +20,12 @@ use crate::sidebar::SidebarEntry;
 use crate::state::App;
 use crate::stream::{format_message_line, StreamView};
 
-pub(crate) fn draw(f: &mut Frame, app: &App) {
+pub(crate) fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2), // header
+            Constraint::Length(1), // header
             Constraint::Min(1),    // agents + tabs + content
             Constraint::Length(1), // footer
         ])
@@ -77,17 +81,50 @@ fn compute_agents_height(app: &App, middle_h: u16, streaming: bool) -> u16 {
 fn draw_quick_actions(f: &mut Frame, frame: Rect, sidebar: Rect, app: &App) {
     let workspace = app.selected_workspace().unwrap_or("");
     let action_count = app.quick_actions.actions.len() as u16;
-    let height = (action_count + 4).min(frame.height.saturating_sub(2)).max(4);
+    // Content rows: confirm mode is a two-line prompt, normal mode
+    // is one line per action plus a footer hint. Borders contribute
+    // two rows.
+    let content_rows = if app.quick_actions.confirm {
+        2
+    } else {
+        action_count + 1
+    };
+    let height = (content_rows + 2)
+        .min(frame.height.saturating_sub(2))
+        .max(4);
     let width: u16 = 42;
     let width = width.min(frame.width.saturating_sub(2));
 
-    let selected_row = sidebar.y + 1 + app.selected_entry as u16;
+    // Reproduce the sidebar layout so the popup appears *below* the
+    // row under the cursor (even when the list has scrolled off the
+    // top). The sidebar block contributes a 1-row top border plus a
+    // 1-row column header before the list starts.
+    let list_area_height = sidebar.height.saturating_sub(3);
+    let viewport = compute_viewport(
+        app.sidebar_entries.len(),
+        app.selected_entry,
+        list_area_height as usize,
+    );
+    let list_y = sidebar.y.saturating_add(2);
+    let rel = (app.selected_entry.saturating_sub(viewport.start)) as u16;
+    let selected_row = list_y.saturating_add(rel);
+
     let anchor_x = sidebar.x + 2;
-    let anchor_y = selected_row + 1;
+    let below = selected_row.saturating_add(1);
     let max_x = frame.right().saturating_sub(width);
     let max_y = frame.bottom().saturating_sub(height);
+    // Prefer a position directly under the selected row. If there's
+    // not enough space below, flip the popup to sit above the row so
+    // the selection stays visible instead of being hidden by the
+    // overlay clamping back up.
+    let y = if below <= max_y {
+        below.max(frame.y)
+    } else if selected_row > frame.y.saturating_add(height) {
+        selected_row.saturating_sub(height)
+    } else {
+        max_y.max(frame.y)
+    };
     let x = anchor_x.min(max_x).max(frame.x);
-    let y = anchor_y.min(max_y).max(frame.y);
     let area = Rect::new(x, y, width, height);
     f.render_widget(ratatui::widgets::Clear, area);
 
@@ -143,8 +180,14 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
         app.workspace_infos.len(),
         app.sessions.len(),
     );
-    let header = Paragraph::new(text).style(Style::default().add_modifier(Modifier::BOLD));
-    f.render_widget(header, area);
+    if app.daemon_running {
+        let throbber = status_throbber(text, Style::default().add_modifier(Modifier::BOLD));
+        let mut state = app.throbber_state.clone();
+        f.render_stateful_widget(throbber, area, &mut state);
+    } else {
+        let header = Paragraph::new(text).style(Style::default().add_modifier(Modifier::BOLD));
+        f.render_widget(header, area);
+    }
 }
 
 fn draw_sidebar(f: &mut Frame, area: Rect, app: &App) {
@@ -174,48 +217,25 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &App) {
         inner.width,
         inner.height.saturating_sub(1),
     );
+    if list_area.height == 0 {
+        return;
+    }
     // Slice the entry list so the selection stays inside the visible
-    // rows; overflow above/below scrolls as the cursor moves.
-    let (start, end) = viewport_range(
+    // rows. A scrollbar makes off-screen overflow visible instead of
+    // relying on inline hint markers alone.
+    let viewport = compute_viewport(
         app.sidebar_entries.len(),
         app.selected_entry,
         list_area.height as usize,
     );
-    let items: Vec<ListItem> = app.sidebar_entries[start..end]
+    let rows_area = viewport.content_area(list_area);
+    let items: Vec<ListItem> = app.sidebar_entries[viewport.start..viewport.end]
         .iter()
         .enumerate()
-        .map(|(rel, entry)| sidebar_row(start + rel, entry, app, &cols))
+        .map(|(rel, entry)| sidebar_row(viewport.start + rel, entry, app, &cols))
         .collect();
-    f.render_widget(List::new(items), list_area);
-
-    draw_sidebar_scroll_hints(f, list_area, start, end, app.sidebar_entries.len());
-}
-
-/// Overlay "↑N more" / "↓N more" markers at the right edge of the
-/// list when entries scroll off-screen so operators see there's
-/// more to reach.
-fn draw_sidebar_scroll_hints(f: &mut Frame, list_area: Rect, start: usize, end: usize, total: usize) {
-    if list_area.height == 0 || list_area.width < 10 {
-        return;
-    }
-    if start > 0 {
-        let hint = format!("↑{start}");
-        let width = hint.chars().count() as u16;
-        let x = list_area.right().saturating_sub(width);
-        let rect = Rect::new(x, list_area.y, width, 1);
-        let para = Paragraph::new(hint).style(Style::default().add_modifier(Modifier::DIM));
-        f.render_widget(para, rect);
-    }
-    let remaining = total.saturating_sub(end);
-    if remaining > 0 {
-        let hint = format!("↓{remaining}");
-        let width = hint.chars().count() as u16;
-        let x = list_area.right().saturating_sub(width);
-        let y = list_area.y + list_area.height.saturating_sub(1);
-        let rect = Rect::new(x, y, width, 1);
-        let para = Paragraph::new(hint).style(Style::default().add_modifier(Modifier::DIM));
-        f.render_widget(para, rect);
-    }
+    f.render_widget(List::new(items), rows_area);
+    render_scrollbar(f, list_area, viewport);
 }
 
 /// Column widths for the agents table. `name` flexes to fill the
@@ -231,14 +251,16 @@ struct SidebarColumns {
 
 impl SidebarColumns {
     fn fit(width: u16) -> Self {
-        let state = 12;
-        let up = 8;
-        let down = 8;
-        let cost = 10;
-        let info = 14;
+        // NAME is fixed-compact; INFO absorbs the remaining width so
+        // operator hints / reconcile notes get the room they need.
+        let name = 28;
+        let state = 11;
+        let up = 7;
+        let down = 7;
+        let cost = 8;
         let gaps = 5; // 5 single-space gaps between 6 columns
-        let fixed = state + up + down + cost + info + gaps;
-        let name = (width as usize).saturating_sub(fixed).max(10);
+        let fixed = name + state + up + down + cost + gaps;
+        let info = (width as usize).saturating_sub(fixed).max(12);
         Self {
             name,
             state,
@@ -279,8 +301,13 @@ fn sidebar_row<'a>(
     app: &'a App,
     cols: &SidebarColumns,
 ) -> ListItem<'a> {
+    // Two-column indent per depth level, starting from zero at the
+    // top-level project so the tree reads "L1 → 0, L2 → 2, …". Leaves
+    // additionally carry a one-char cursor column, which visually
+    // shifts them right of their parent group — that's intentional so
+    // the `▸` cursor has somewhere to land without pushing the label.
+    let indent = "  ".repeat(entry.level);
     if entry.group {
-        let indent = "  ".repeat(entry.level);
         return ListItem::new(Line::from(Span::styled(
             format!("{indent}{}", entry.label),
             Style::default().add_modifier(Modifier::BOLD),
@@ -290,31 +317,72 @@ fn sidebar_row<'a>(
     let live = entry.session_index.is_some();
     let is_selected = idx == app.selected_entry;
     let cursor = if is_selected { "▸" } else { " " };
-    let indent = "  ".repeat(entry.level);
     let marker = if live { "●" } else { "○" };
     let name_raw = format!("{cursor} {indent}{marker} {}", entry.label);
 
     let info_opt = app.workspace_infos.get(&entry.workspace);
-    let state_raw = info_opt.map_or("offline", |w| agent_status_str(&w.status));
+    // Flip between "running" (animated spinner) and "idle" based on
+    // whether the tmux capture is actively changing. A few seconds of
+    // quiet output past the last captured diff means the agent is
+    // waiting for input, so the spinner stops. Offline sessions show
+    // the plain daemon-reported status.
+    let state_raw: String = if live {
+        if app
+            .captures
+            .is_recently_active(&entry.workspace, std::time::Instant::now())
+        {
+            format!("{} running", spinner_frame(&app.throbber_state))
+        } else {
+            "idle".to_owned()
+        }
+    } else {
+        info_opt
+            .map_or("offline", |w| agent_status_str(&w.status))
+            .to_owned()
+    };
 
+    // Prefer the live tmux-capture numbers when a Claude session is
+    // actively rendering its `↑ tokens ↓ tokens · $x.yz` footer —
+    // that gives us a current-turn readout. Otherwise fall back to
+    // the daemon's persisted `usage_trends` totals so offline agents
+    // still show the tokens they logged before going idle.
     let capture = app
         .captures
         .entries
         .get(&entry.workspace)
         .map_or("", |e| e.content.as_str());
-    let tokens = crate::tokens::parse_agent_tokens(&entry.workspace, capture);
-    let up_raw = token_cell(&tokens.up, '↑');
-    let down_raw = token_cell(&tokens.down, '↓');
-    let cost_raw = if tokens.cost.is_empty() {
-        "-".to_owned()
+    let live_tokens = crate::tokens::parse_agent_tokens(&entry.workspace, capture);
+    let trend = app.usage_trends.get(&entry.workspace);
+    let (up_raw, down_raw, cost_raw) = if !live_tokens.is_empty() {
+        let cost = if live_tokens.cost.is_empty() {
+            "-".to_owned()
+        } else {
+            live_tokens.cost.clone()
+        };
+        (
+            token_cell(&live_tokens.up, '↑'),
+            token_cell(&live_tokens.down, '↓'),
+            cost,
+        )
+    } else if let Some(t) = trend.filter(|t| t.available && t.total.total() > 0) {
+        // Persisted trend has no cost tracking (that's a Claude CLI
+        // footer artifact), so we substitute the cumulative total as
+        // the third number instead of leaving the column blank.
+        let total_all = (t.total.cache_read + t.total.cache_creation + t.total.input) as f64;
+        (
+            format!("↑{}", crate::tokens::format_token_count(t.total.input as f64)),
+            format!(
+                "↓{}",
+                crate::tokens::format_token_count(t.total.output as f64)
+            ),
+            format!("Σ{}", crate::tokens::format_token_count(total_all)),
+        )
     } else {
-        tokens.cost
+        ("-".to_owned(), "-".to_owned(), "-".to_owned())
     };
 
     let info_raw = if entry.reconcile.is_empty() {
-        info_opt
-            .map(|w| w.status_text.clone())
-            .unwrap_or_default()
+        info_opt.map(|w| w.status_text.clone()).unwrap_or_default()
     } else {
         entry.reconcile.clone()
     };
@@ -322,7 +390,7 @@ fn sidebar_row<'a>(
     let text = format!(
         "{name} {state} {up} {down} {cost} {info}",
         name = pad_or_trunc(&name_raw, cols.name),
-        state = pad_or_trunc(state_raw, cols.state),
+        state = pad_or_trunc(&state_raw, cols.state),
         up = pad_or_trunc(&up_raw, cols.up),
         down = pad_or_trunc(&down_raw, cols.down),
         cost = pad_or_trunc(&cost_raw, cols.cost),
@@ -359,7 +427,7 @@ fn pad_or_trunc(s: &str, width: usize) -> String {
     out
 }
 
-fn draw_body(f: &mut Frame, area: Rect, app: &App) {
+fn draw_body(f: &mut Frame, area: Rect, app: &mut App) {
     if let Some(workspace) = app.streamed_workspace.clone() {
         draw_stream_single(f, area, app, &workspace);
         return;
@@ -377,29 +445,28 @@ fn draw_stream_tabs(f: &mut Frame, area: Rect, app: &App) {
     if area.height == 0 || area.width == 0 {
         return;
     }
-    let mut spans: Vec<Span> = Vec::with_capacity(StreamView::ALL.len() * 2);
-    for (idx, view) in StreamView::ALL.iter().enumerate() {
-        if idx > 0 {
-            spans.push(Span::styled(
-                " │ ",
-                Style::default().add_modifier(Modifier::DIM),
-            ));
-        }
-        let label = format!(" {}·{} ", idx + 1, view.tab_label());
-        let style = if *view == app.stream {
+    let titles: Vec<Line> = StreamView::ALL
+        .iter()
+        .enumerate()
+        .map(|(idx, view)| Line::from(format!("{}·{}", idx + 1, view.tab_label())))
+        .collect();
+    let selected = StreamView::ALL
+        .iter()
+        .position(|view| *view == app.stream)
+        .unwrap_or(0);
+    let tabs = Tabs::new(titles)
+        .select(selected)
+        .divider("│")
+        .style(Style::default().add_modifier(Modifier::DIM))
+        .highlight_style(
             Style::default()
                 .add_modifier(Modifier::REVERSED)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().add_modifier(Modifier::DIM)
-        };
-        spans.push(Span::styled(label, style));
-    }
-    let para = Paragraph::new(Line::from(spans));
-    f.render_widget(para, area);
+                .add_modifier(Modifier::BOLD),
+        );
+    f.render_widget(tabs, area);
 }
 
-fn draw_stream_single(f: &mut Frame, area: Rect, app: &App, workspace: &str) {
+fn draw_stream_single(f: &mut Frame, area: Rect, app: &mut App, workspace: &str) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan))
@@ -416,20 +483,54 @@ fn draw_stream_single(f: &mut Frame, area: Rect, app: &App, workspace: &str) {
         .get(workspace)
         .map_or("", |entry| entry.content.as_str());
     if capture.is_empty() {
-        let para =
-            Paragraph::new("(capturing…)").style(Style::default().add_modifier(Modifier::DIM));
-        f.render_widget(para, inner);
+        let loading_area = centered_loading_area(inner);
+        let throbber = status_throbber(
+            "waiting for tmux capture…".to_owned(),
+            Style::default().add_modifier(Modifier::DIM),
+        );
+        f.render_stateful_widget(throbber, loading_area, &mut app.throbber_state);
         return;
     }
 
     let rows = inner.height as usize;
     let width = inner.width as usize;
-    let lines: Vec<Line> = crate::captures::recent_lines(capture, rows)
+    let lines: Vec<Line> = crate::captures::recent_wrapped_lines(capture, rows, width)
         .into_iter()
-        .map(|line| Line::from(Span::raw(sanitize_capture_line(line, width))))
+        .map(|line| Line::from(Span::raw(line)))
         .collect();
     let para = Paragraph::new(lines);
     f.render_widget(para, inner);
+}
+
+/// Pick the current frame of the shared braille spinner based on the
+/// app-wide [`ThrobberState`]. Each refresh tick advances the state
+/// via `tick_animation`, so successive draws naturally cycle through
+/// the symbols.
+fn spinner_frame(state: &throbber_widgets_tui::ThrobberState) -> &'static str {
+    let symbols = BRAILLE_SIX.symbols;
+    let len = symbols.len() as i16;
+    let idx = (i16::from(state.index())).rem_euclid(len) as usize;
+    symbols[idx]
+}
+
+fn status_throbber<'a>(label: impl Into<Span<'a>>, style: Style) -> Throbber<'a> {
+    Throbber::default()
+        .label(label)
+        .style(style)
+        .throbber_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .throbber_set(BRAILLE_SIX)
+        .use_type(WhichUse::Spin)
+}
+
+fn centered_loading_area(area: Rect) -> Rect {
+    let width = area.width.saturating_sub(2).clamp(1, 36);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(1) / 2;
+    Rect::new(x, y, width, 1)
 }
 
 fn draw_messages(f: &mut Frame, area: Rect, app: &App) {
@@ -458,101 +559,201 @@ fn draw_messages(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_tokens(f: &mut Frame, area: Rect, app: &App) {
-    let inner_width = area.width.saturating_sub(2) as usize;
-    let inner_height = area.height.saturating_sub(2) as usize;
     let block = Block::default()
         .borders(Borders::ALL)
         .title(StreamView::Tokens.title());
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
 
-    // Scan every active session's tmux capture for token markers,
-    // keeping rows ordered the same way the sidebar groups them so
-    // the eye can trace sidebar → token row easily.
-    let mut rows: Vec<crate::tokens::AgentTokens> = app
-        .sessions
-        .iter()
-        .map(|s| {
-            let capture = app
-                .captures
-                .entries
-                .get(&s.workspace)
-                .map_or("", |entry| entry.content.as_str());
-            crate::tokens::parse_agent_tokens(&s.workspace, capture)
-        })
-        .filter(|t| !t.is_empty())
+    // Pull rolled-up totals from the daemon's `usage_trends` cache
+    // (populated by `app::refresh_usage`). Unlike the live tmux-
+    // capture scraper this sees every workspace that has ever
+    // produced a transcript, so offline agents still show their
+    // historical token totals.
+    let mut rows: Vec<&ax_proto::usage::WorkspaceTrend> = app
+        .usage_trends
+        .values()
+        .filter(|trend| trend.available && trend.total.total() > 0)
         .collect();
     rows.sort_by(|a, b| a.workspace.cmp(&b.workspace));
 
     if rows.is_empty() {
-        let hint = if app.sessions.is_empty() {
-            "  (no active agents — run `ax up` to start workspaces)"
+        let hint = if !app.daemon_running {
+            "  (daemon offline — start it with `ax up`)"
+        } else if app.workspace_dirs.is_empty() {
+            "  (no workspaces in config — add one to .ax/config.yaml)"
+        } else if app.last_usage_refresh.is_none() {
+            "  (collecting usage…)"
         } else {
-            "  (no token markers in recent tmux captures)"
+            "  (no token usage recorded yet — run an agent to produce a transcript)"
         };
-        let para = Paragraph::new(hint)
-            .style(Style::default().add_modifier(Modifier::DIM))
-            .block(block);
-        f.render_widget(para, area);
+        f.render_widget(
+            Paragraph::new(hint).style(Style::default().add_modifier(Modifier::DIM)),
+            inner,
+        );
         return;
     }
 
-    let max_cost = rows
-        .iter()
-        .map(|r| crate::tokens::parse_cost_value(&r.cost))
-        .fold(0.0_f64, f64::max);
+    let max_total = rows.iter().map(|t| t.total.total()).max().unwrap_or(0) as f64;
 
-    let mut lines: Vec<Line> = Vec::with_capacity(inner_height);
-    lines.push(Line::from(Span::styled(
-        " live usage ",
-        Style::default().add_modifier(Modifier::DIM),
-    )));
-    lines.push(Line::from(Span::styled(
-        " WORKSPACE              INPUT      OUTPUT      COST",
-        Style::default().add_modifier(Modifier::DIM),
-    )));
+    // Caption + column header. One row each, rendered as plain
+    // Paragraphs on the top of the inner area so the per-workspace
+    // grid below can lean on a real Layout split (needed for the
+    // inline Sparkline).
+    let caption = Paragraph::new(" last 24h · ▁▂▃▄▅▆▇ = rolling usage per 5-min bucket")
+        .style(Style::default().add_modifier(Modifier::DIM));
+    let header = Paragraph::new(format!(
+        " {:<24} {:<14} {:<9} {:<9} {:<9} {:<7} {:<12}  TREND",
+        "WORKSPACE", "MODEL", "INPUT", "OUTPUT", "CACHE", "TURNS", "LAST"
+    ))
+    .style(Style::default().add_modifier(Modifier::DIM));
 
-    let budget = inner_height.saturating_sub(lines.len());
-    for tokens in rows.into_iter().take(budget) {
-        let up_display = if tokens.up.is_empty() {
-            "-".to_owned()
+    let header_rows = 2_u16;
+    if inner.height <= header_rows {
+        f.render_widget(caption, inner);
+        return;
+    }
+    let caption_area = Rect::new(inner.x, inner.y, inner.width, 1);
+    let header_area = Rect::new(inner.x, inner.y + 1, inner.width, 1);
+    f.render_widget(caption, caption_area);
+    f.render_widget(header, header_area);
+
+    let list_area = Rect::new(
+        inner.x,
+        inner.y + header_rows,
+        inner.width,
+        inner.height - header_rows,
+    );
+
+    // Text column reserves a fixed width; the sparkline absorbs the
+    // rest (with a lower bound so it isn't degenerate on narrow
+    // panes).
+    let text_width: u16 = 94;
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(text_width.min(list_area.width.saturating_sub(12))),
+            Constraint::Min(10),
+        ])
+        .split(list_area);
+    let text_col = chunks[0];
+    let spark_col = chunks[1];
+
+    let now = chrono::Utc::now();
+    let budget = (list_area.height as usize).min(rows.len());
+    for (idx, trend) in rows.into_iter().take(budget).enumerate() {
+        let y = list_area.y + idx as u16;
+        let row_text = Rect::new(text_col.x, y, text_col.width, 1);
+        let row_spark = Rect::new(spark_col.x, y, spark_col.width, 1);
+
+        let total = trend.total.total() as f64;
+        let input = crate::tokens::format_token_count(trend.total.input as f64);
+        let output = crate::tokens::format_token_count(trend.total.output as f64);
+        let cache = crate::tokens::format_token_count(
+            (trend.total.cache_read + trend.total.cache_creation) as f64,
+        );
+        let turns = trend
+            .agents
+            .iter()
+            .flat_map(|a| a.buckets.iter())
+            .map(|b| b.turns)
+            .sum::<i64>();
+        let turns_display = if turns > 0 {
+            turns.to_string()
         } else {
-            format!(
-                "↑{}",
-                crate::tokens::format_token_count(crate::tokens::parse_token_value(&tokens.up))
-            )
-        };
-        let down_display = if tokens.down.is_empty() {
             "-".to_owned()
-        } else {
-            format!(
-                "↓{}",
-                crate::tokens::format_token_count(crate::tokens::parse_token_value(&tokens.down))
-            )
         };
-        let cost = crate::tokens::parse_cost_value(&tokens.cost);
-        let cost_display = if tokens.cost.is_empty() {
-            "-".to_owned()
+        let model = if trend.latest_model.is_empty() {
+            trend
+                .agents
+                .iter()
+                .find(|a| !a.latest_model.is_empty())
+                .map(|a| a.latest_model.clone())
+                .unwrap_or_else(|| "-".to_owned())
         } else {
-            tokens.cost.clone()
+            trend.latest_model.clone()
         };
-        let style = if max_cost > 0.0 && cost >= max_cost * 0.8 {
+        let last = trend
+            .last_activity
+            .map(|ts| format_last_activity(now, ts))
+            .unwrap_or_else(|| "-".to_owned());
+        let style = if max_total > 0.0 && total >= max_total * 0.8 {
             Style::default().fg(Color::Red)
         } else {
             Style::default()
         };
+
         let row = format!(
-            " {:<22} {:<10} {:<10} {}",
-            crate::tasks::truncate(&tokens.workspace, 22),
-            up_display,
-            down_display,
-            cost_display,
+            " {:<24} {:<14} {:<9} {:<9} {:<9} {:<7} {:<12}",
+            crate::tasks::truncate(&trend.workspace, 24),
+            crate::tasks::truncate(&short_model(&model), 14),
+            input,
+            output,
+            cache,
+            turns_display,
+            last,
         );
-        lines.push(Line::from(Span::styled(
-            crate::tasks::truncate(&row, inner_width.max(1)),
-            style,
-        )));
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                crate::tasks::truncate(&row, text_col.width as usize),
+                style,
+            )),
+            row_text,
+        );
+
+        // Bucket series → per-row sparkline. `UsageBucket.turns` would
+        // spike during an active session so the sparkline is driven by
+        // `totals.total()` instead (token volume per bucket).
+        let series: Vec<u64> = trend
+            .buckets
+            .iter()
+            .map(|b| b.totals.total().max(0) as u64)
+            .collect();
+        if series.iter().any(|v| *v > 0) {
+            let spark = Sparkline::default()
+                .data(&series)
+                .style(Style::default().fg(Color::Cyan));
+            f.render_widget(spark, row_spark);
+        } else {
+            f.render_widget(
+                Paragraph::new(" (flat)").style(Style::default().add_modifier(Modifier::DIM)),
+                row_spark,
+            );
+        }
     }
-    let para = Paragraph::new(lines).block(block);
-    f.render_widget(para, area);
+}
+
+/// Compact model label — strips vendor prefixes so names like
+/// `claude-sonnet-4-6` and `gpt-5.1-codex` fit into a narrow column.
+fn short_model(model: &str) -> String {
+    model
+        .trim_start_matches("anthropic/")
+        .trim_start_matches("openai/")
+        .to_owned()
+}
+
+/// Human-friendly "last seen" label relative to `now`. Falls back to
+/// a YYYY-MM-DD stamp for anything older than a day so the column
+/// stays parseable at a glance.
+fn format_last_activity(now: chrono::DateTime<chrono::Utc>, ts: chrono::DateTime<chrono::Utc>) -> String {
+    let delta = now.signed_duration_since(ts);
+    if delta.num_seconds() < 0 {
+        return "just now".to_owned();
+    }
+    let secs = delta.num_seconds();
+    if secs < 60 {
+        return format!("{secs}s ago");
+    }
+    if secs < 60 * 60 {
+        return format!("{}m ago", secs / 60);
+    }
+    if secs < 24 * 60 * 60 {
+        return format!("{}h ago", secs / 3600);
+    }
+    ts.format("%Y-%m-%d").to_string()
 }
 
 fn draw_tasks(f: &mut Frame, area: Rect, app: &App) {
@@ -584,58 +785,76 @@ fn draw_tasks(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_tasks_list(f: &mut Frame, area: Rect, app: &App, filtered: &[ax_proto::types::Task]) {
-    let inner_width = area.width.saturating_sub(2) as usize;
-    let inner_height = area.height.saturating_sub(2) as usize;
     let block = Block::default().borders(Borders::ALL).title(format!(
         " tasks {} {}/{} ",
         app.task_filter.label(),
         filtered.len().min(app.task_selected.saturating_add(1)),
         filtered.len(),
     ));
-
-    let summary = crate::tasks::summarize_tasks(&app.tasks);
-    let mut lines: Vec<Line> = Vec::with_capacity(inner_height);
-    lines.push(Line::from(Span::styled(
-        crate::tasks::truncate(
-            &format!("Summary: {}", crate::tasks::format_task_summary(&summary)),
-            inner_width.max(1),
-        ),
-        Style::default().add_modifier(Modifier::BOLD),
-    )));
-    lines.push(Line::from(Span::styled(
-        crate::tasks::truncate(
-            "ID       PRI      STATUS          AGE    ASSIGNEE        TITLE",
-            inner_width.max(1),
-        ),
-        Style::default().add_modifier(Modifier::DIM),
-    )));
-
-    if filtered.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "  (no tasks match current filter — press f to cycle)",
-            Style::default().add_modifier(Modifier::DIM),
-        )));
-        let para = Paragraph::new(lines).block(block);
-        f.render_widget(para, area);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
         return;
     }
 
-    let body_budget = inner_height.saturating_sub(lines.len());
-    let (start, end) = viewport_range(filtered.len(), app.task_selected, body_budget);
-    for (idx, task) in filtered[start..end].iter().enumerate() {
-        let absolute = start + idx;
+    let summary = crate::tasks::summarize_tasks(&app.tasks);
+    let header_height = inner.height.min(2);
+    let header_area = Rect::new(inner.x, inner.y, inner.width, header_height);
+    let body_area = Rect::new(
+        inner.x,
+        inner.y + header_height,
+        inner.width,
+        inner.height.saturating_sub(header_height),
+    );
+    let inner_width = inner.width as usize;
+
+    let header_lines = vec![
+        Line::from(Span::styled(
+            crate::tasks::truncate(&format_task_summary_compact(&summary), inner_width.max(1)),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            crate::tasks::truncate(
+                "ID       STATE         OWNER        TITLE",
+                inner_width.max(1),
+            ),
+            Style::default().add_modifier(Modifier::DIM),
+        )),
+    ];
+    let visible_headers: Vec<Line> = header_lines
+        .into_iter()
+        .take(header_height as usize)
+        .collect();
+    f.render_widget(Paragraph::new(visible_headers), header_area);
+
+    if filtered.is_empty() {
+        if body_area.height > 0 {
+            let para = Paragraph::new("  (no tasks match current filter — press f to cycle)")
+                .style(Style::default().add_modifier(Modifier::DIM));
+            f.render_widget(para, body_area);
+        }
+        return;
+    }
+
+    let viewport = compute_viewport(filtered.len(), app.task_selected, body_area.height as usize);
+    let rows_area = viewport.content_area(body_area);
+    let rows_width = rows_area.width as usize;
+    let mut lines: Vec<Line> = Vec::with_capacity(viewport.visible);
+    for (idx, task) in filtered[viewport.start..viewport.end].iter().enumerate() {
+        let absolute = viewport.start + idx;
         let style = if absolute == app.task_selected {
             Style::default().add_modifier(Modifier::REVERSED)
         } else {
             Style::default()
         };
         lines.push(Line::from(Span::styled(
-            format_task_row(task, inner_width),
+            format_task_row(task, rows_width),
             style,
         )));
     }
-    let para = Paragraph::new(lines).block(block);
-    f.render_widget(para, area);
+    let para = Paragraph::new(lines);
+    f.render_widget(para, rows_area);
+    render_scrollbar(f, body_area, viewport);
 }
 
 fn draw_task_detail(f: &mut Frame, area: Rect, app: &App, filtered: &[ax_proto::types::Task]) {
@@ -656,12 +875,48 @@ fn draw_task_detail(f: &mut Frame, area: Rect, app: &App, filtered: &[ax_proto::
     f.render_widget(para, area);
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Viewport {
+    start: usize,
+    end: usize,
+    visible: usize,
+    total: usize,
+}
+
+impl Viewport {
+    fn is_scrollable(self) -> bool {
+        self.total > self.visible && self.visible > 0
+    }
+
+    fn shows_scrollbar(self, area: Rect) -> bool {
+        self.is_scrollable() && area.height > 0 && area.width > 2
+    }
+
+    fn content_area(self, area: Rect) -> Rect {
+        if self.shows_scrollbar(area) {
+            Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height)
+        } else {
+            area
+        }
+    }
+
+    fn scroll_state(self) -> ScrollbarState {
+        ScrollbarState::new(self.total)
+            .position(self.start)
+            .viewport_content_length(self.visible)
+    }
+}
+
 /// Walk `tasks[..]` around `selected` so the cursor stays visible
-/// once the list outgrows the pane. Mirrors Go's
-/// `computeTaskListViewport` at height=1 row per task.
-fn viewport_range(total: usize, selected: usize, budget: usize) -> (usize, usize) {
+/// once the list outgrows the pane (one row per task).
+fn compute_viewport(total: usize, selected: usize, budget: usize) -> Viewport {
     if total == 0 || budget == 0 {
-        return (0, 0);
+        return Viewport {
+            start: 0,
+            end: 0,
+            visible: 0,
+            total,
+        };
     }
     let visible = budget.min(total);
     let start = if selected >= visible {
@@ -671,20 +926,90 @@ fn viewport_range(total: usize, selected: usize, budget: usize) -> (usize, usize
     };
     let max_start = total - visible;
     let start = start.min(max_start);
-    (start, start + visible)
+    Viewport {
+        start,
+        end: start + visible,
+        visible,
+        total,
+    }
+}
+
+#[cfg(test)]
+fn viewport_range(total: usize, selected: usize, budget: usize) -> (usize, usize) {
+    let viewport = compute_viewport(total, selected, budget);
+    (viewport.start, viewport.end)
+}
+
+fn render_scrollbar(f: &mut Frame, area: Rect, viewport: Viewport) {
+    if !viewport.shows_scrollbar(area) {
+        return;
+    }
+    let mut state = viewport.scroll_state();
+    let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+        .begin_symbol(None)
+        .end_symbol(None);
+    f.render_stateful_widget(scrollbar, area, &mut state);
 }
 
 fn format_task_row(task: &ax_proto::types::Task, width: usize) -> String {
     let id = crate::tasks::short_task_id(&task.id);
+    let state = format_task_state(task);
     let row = format!(
-        "{id:<8} {:<8} {:<15} {:<6} {:<15} {}",
-        crate::tasks::truncate(crate::tasks::task_priority_label(task.priority.as_ref()), 8),
-        crate::tasks::truncate(&crate::tasks::task_status_label(task), 15),
-        crate::tasks::format_task_age(task),
-        crate::tasks::truncate(&task.assignee, 15),
+        "{id:<8} {:<13} {:<12} {}",
+        crate::tasks::truncate(&state, 13),
+        crate::tasks::truncate(&task.assignee, 12),
         task.title,
     );
     crate::tasks::truncate(&row, width.max(1))
+}
+
+fn format_task_summary_compact(summary: &crate::tasks::TaskSummary) -> String {
+    let mut parts = vec![
+        format!("tot {}", summary.total),
+        format!("run {}", summary.in_progress),
+        format!("pend {}", summary.pending),
+        format!("stale {}", summary.stale),
+    ];
+    if summary.failed > 0 {
+        parts.push(format!("fail {}", summary.failed));
+    }
+    if summary.completed > 0 {
+        parts.push(format!("done {}", summary.completed));
+    }
+    if summary.queued_messages > 0 {
+        parts.push(format!("msg {}", summary.queued_messages));
+    }
+    if summary.diverged > 0 {
+        parts.push(format!("div {}", summary.diverged));
+    }
+    if summary.urgent_or_high > 0 {
+        parts.push(format!("hi {}", summary.urgent_or_high));
+    }
+    if summary.cancelled > 0 {
+        parts.push(format!("cancel {}", summary.cancelled));
+    }
+    parts.join(" · ")
+}
+
+fn format_task_state(task: &ax_proto::types::Task) -> String {
+    let base = match task.status {
+        ax_proto::types::TaskStatus::Pending => "pending",
+        ax_proto::types::TaskStatus::InProgress => "running",
+        ax_proto::types::TaskStatus::Blocked => "blocked",
+        ax_proto::types::TaskStatus::Completed => "done",
+        ax_proto::types::TaskStatus::Failed => "failed",
+        ax_proto::types::TaskStatus::Cancelled => "cancelled",
+    };
+    if crate::tasks::task_is_stale(task)
+        && matches!(
+            task.status,
+            ax_proto::types::TaskStatus::Pending | ax_proto::types::TaskStatus::InProgress
+        )
+    {
+        format!("{base} stale")
+    } else {
+        base.to_owned()
+    }
 }
 
 /// Render the right-hand detail pane. Line count caps to `height`
@@ -836,29 +1161,6 @@ fn build_detail_lines<'a>(
     out
 }
 
-/// Strip control characters + truncate to the given width so the
-/// single-workspace stream mirror doesn't break its border.
-fn sanitize_capture_line(line: &str, width: usize) -> String {
-    let mut clean: String = line
-        .chars()
-        .filter(|c| !c.is_control() || matches!(c, '\t'))
-        .collect();
-    // Replace tabs with spaces so we keep single-row alignment.
-    clean = clean.replace('\t', "  ");
-    if clean.chars().count() <= width {
-        return clean;
-    }
-    if width == 0 {
-        return String::new();
-    }
-    if width == 1 {
-        return "…".to_owned();
-    }
-    let mut truncated: String = clean.chars().take(width - 1).collect();
-    truncated.push('…');
-    truncated
-}
-
 fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     let (text, style) = if let Some(notice) = &app.quick_notice {
         let s = if notice.error {
@@ -881,8 +1183,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         )
     } else {
         (
-            "j/k sidebar · 1-4/Tab view · [/] tasks · f filter · enter actions · q quit"
-                .to_owned(),
+            "j/k sidebar · 1-3/Tab view · [/] tasks · f filter · enter actions · q quit".to_owned(),
             Style::default().add_modifier(Modifier::DIM),
         )
     };
@@ -901,6 +1202,7 @@ fn agent_status_str(status: &AgentStatus) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ax_proto::types::{Task, TaskStartMode, TaskStatus};
 
     #[test]
     fn viewport_range_handles_empty_and_small_windows() {
@@ -914,5 +1216,73 @@ mod tests {
         assert_eq!(viewport_range(20, 4, 5), (0, 5));
         assert_eq!(viewport_range(20, 5, 5), (1, 6));
         assert_eq!(viewport_range(20, 19, 5), (15, 20));
+    }
+
+    #[test]
+    fn compact_task_summary_prioritizes_short_labels() {
+        let summary = crate::tasks::TaskSummary {
+            total: 12,
+            pending: 3,
+            in_progress: 2,
+            completed: 4,
+            failed: 1,
+            stale: 2,
+            diverged: 1,
+            queued_messages: 9,
+            urgent_or_high: 2,
+            ..crate::tasks::TaskSummary::default()
+        };
+        assert_eq!(
+            format_task_summary_compact(&summary),
+            "tot 12 · run 2 · pend 3 · stale 2 · fail 1 · done 4 · msg 9 · div 1 · hi 2"
+        );
+    }
+
+    #[test]
+    fn compact_task_state_marks_active_stale_tasks() {
+        let mut task = mock_task();
+        task.status = TaskStatus::InProgress;
+        task.stale_after_seconds = 1;
+        task.updated_at = chrono::Utc::now() - chrono::Duration::seconds(5);
+        assert_eq!(format_task_state(&task), "running stale");
+    }
+
+    fn mock_task() -> Task {
+        let now = chrono::Utc::now();
+        Task {
+            id: "abc".into(),
+            title: "task title".into(),
+            description: String::new(),
+            assignee: "alpha".into(),
+            created_by: "orch".into(),
+            parent_task_id: String::new(),
+            child_task_ids: Vec::new(),
+            version: 1,
+            status: TaskStatus::Pending,
+            start_mode: TaskStartMode::Default,
+            workflow_mode: None,
+            priority: None,
+            stale_after_seconds: 0,
+            dispatch_message: String::new(),
+            dispatch_config_path: String::new(),
+            dispatch_count: 0,
+            attempt_count: 0,
+            last_dispatch_at: None,
+            last_attempt_at: None,
+            next_retry_at: None,
+            claimed_at: None,
+            claimed_by: String::new(),
+            claim_source: String::new(),
+            result: String::new(),
+            logs: Vec::new(),
+            rollup: None,
+            sequence: None,
+            stale_info: None,
+            removed_at: None,
+            removed_by: String::new(),
+            remove_reason: String::new(),
+            created_at: now,
+            updated_at: now,
+        }
     }
 }

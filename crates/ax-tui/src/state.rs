@@ -3,11 +3,13 @@
 //! a real terminal.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::time::Instant;
 
 use ax_config::ProjectNode;
 use ax_daemon::HistoryEntry;
 use ax_proto::types::{Task, WorkspaceInfo};
+use ax_proto::usage::WorkspaceTrend;
 use ax_tmux::SessionInfo;
 
 use crate::actions::{Notice, QuickActionId, QuickActionState};
@@ -53,10 +55,23 @@ pub(crate) struct App {
     /// app loop (where paths are available) and cleared.
     pub(crate) pending_lifecycle: Option<PendingLifecycle>,
     pub(crate) captures: CaptureCache,
+    /// Rolled-up per-workspace token usage returned by the daemon's
+    /// `usage_trends` handler. Persists across refresh ticks so the
+    /// tokens panel can still render totals for offline agents (their
+    /// transcripts are on disk, not in a live tmux pane). Throttled
+    /// in `app::refresh` via `last_usage_refresh`.
+    pub(crate) usage_trends: BTreeMap<String, WorkspaceTrend>,
+    pub(crate) last_usage_refresh: Option<Instant>,
+    /// Absolute workspace-dir lookup keyed by merged workspace name.
+    /// Built when the config tree reloads and consumed by the
+    /// `usage_trends` request so the daemon resolves the correct
+    /// Claude project dir + `CODEX_HOME` per workspace.
+    pub(crate) workspace_dirs: BTreeMap<String, PathBuf>,
+    pub(crate) throbber_state: throbber_widgets_tui::ThrobberState,
     /// When `Some(ws)`, the body pane becomes a full-pane live
     /// tmux capture mirror of `ws`. Pressing `esc` clears the
     /// streaming mode; pressing it again opens the quick-action
-    /// overlay. Matches the Go TUI's `viewModeStream`.
+    /// overlay. Corresponds to `viewModeStream`.
     pub(crate) streamed_workspace: Option<String>,
     pub(crate) last_refresh: Option<Instant>,
     pub(crate) daemon_running: bool,
@@ -85,6 +100,10 @@ impl App {
             streamed_workspace: None,
             pending_lifecycle: None,
             captures: CaptureCache::default(),
+            usage_trends: BTreeMap::new(),
+            last_usage_refresh: None,
+            workspace_dirs: BTreeMap::new(),
+            throbber_state: throbber_widgets_tui::ThrobberState::default(),
             last_refresh: None,
             daemon_running: false,
             notice: None,
@@ -201,6 +220,10 @@ impl App {
                 self.quick_notice = None;
             }
         }
+    }
+
+    pub(crate) fn tick_animation(&mut self) {
+        self.throbber_state.calc_next();
     }
 }
 

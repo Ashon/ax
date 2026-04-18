@@ -1,11 +1,10 @@
 //! Main event loop — owns the state and drives render/input/refresh.
-//! Mirrors Bubbletea's `NewProgram(model).Run()` but stays sync +
-//! single-threaded since ratatui doesn't push messages through an
-//! async runtime.
+//! Stays sync + single-threaded since ratatui doesn't push messages
+//! through an async runtime.
 //!
-//! Refresh cadence matches the Go TUI's `watchDataRefreshInterval`
-//! (250ms): tmux sessions re-listed, daemon re-queried for workspace
-//! info, view redrawn.
+//! Refresh cadence is `watchDataRefreshInterval` (250ms): tmux
+//! sessions re-listed, daemon re-queried for workspace info, view
+//! redrawn.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -18,6 +17,15 @@ use crate::terminal::TerminalGuard;
 
 const REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// How often the TUI re-asks the daemon for historical token totals.
+/// Slower than the main refresh tick because scanning transcripts
+/// from disk is measurably more expensive than `list_workspaces`.
+const USAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+/// Rolling window the tokens panel asks the daemon to bucketise.
+/// 24h × 60min keeps offline-but-recently-active agents visible
+/// without dragging in weeks of stale data.
+const USAGE_WINDOW_MINUTES: i64 = 24 * 60;
+const USAGE_BUCKET_MINUTES: i64 = 5;
 
 #[derive(Debug, Clone)]
 pub struct RunOptions {
@@ -44,7 +52,7 @@ pub fn run(opts: &RunOptions) -> Result<(), RunError> {
     loop {
         guard
             .terminal
-            .draw(|f| crate::render::draw(f, &app))
+            .draw(|f| crate::render::draw(f, &mut app))
             .map_err(RunError::Render)?;
 
         if event::poll(POLL_INTERVAL).map_err(RunError::Input)? {
@@ -63,6 +71,7 @@ pub fn run(opts: &RunOptions) -> Result<(), RunError> {
             .last_refresh
             .is_none_or(|t| t.elapsed() >= REFRESH_INTERVAL);
         if due {
+            app.tick_animation();
             refresh(&mut app, opts);
         }
     }
@@ -129,7 +138,42 @@ fn refresh(app: &mut App, opts: &RunOptions) {
     refresh_messages(app, opts);
     refresh_tasks(app, opts);
     refresh_captures(app);
+    refresh_usage(app, opts);
     app.last_refresh = Some(Instant::now());
+}
+
+/// Ask the daemon for rolled-up token totals, throttled to
+/// `USAGE_REFRESH_INTERVAL` so the TUI doesn't rescan every transcript
+/// on each 250 ms redraw. Quiet on failure — a dropped daemon is
+/// already signalled by `daemon_running = false`.
+fn refresh_usage(app: &mut App, opts: &RunOptions) {
+    if !app.daemon_running || app.workspace_dirs.is_empty() {
+        return;
+    }
+    let due = app
+        .last_usage_refresh
+        .is_none_or(|t| t.elapsed() >= USAGE_REFRESH_INTERVAL);
+    if !due {
+        return;
+    }
+    let bindings: Vec<(String, String)> = app
+        .workspace_dirs
+        .iter()
+        .map(|(name, dir)| (name.clone(), dir.display().to_string()))
+        .collect();
+    let Ok(mut client) = Client::connect(&opts.socket_path) else {
+        return;
+    };
+    match client.usage_trends(&bindings, USAGE_WINDOW_MINUTES, USAGE_BUCKET_MINUTES) {
+        Ok(trends) => {
+            app.usage_trends = trends
+                .into_iter()
+                .map(|t| (t.workspace.clone(), t))
+                .collect();
+            app.last_usage_refresh = Some(Instant::now());
+        }
+        Err(e) => app.set_notice(format!("usage_trends: {e}")),
+    }
 }
 
 fn refresh_captures(app: &mut App) {
@@ -163,24 +207,39 @@ fn refresh_tree(app: &mut App) {
         app.tree = None;
         app.desired.clear();
         app.reconfigure_enabled = false;
+        app.workspace_dirs.clear();
         return;
     };
     let Some(cfg_path) = ax_config::find_config_file(cwd) else {
         app.tree = None;
         app.desired.clear();
         app.reconfigure_enabled = false;
+        app.workspace_dirs.clear();
         return;
     };
     let tree = ax_config::Config::load_tree(&cfg_path).ok();
-    let reconfigure = ax_config::Config::load(&cfg_path)
-        .map(|cfg| cfg.experimental_mcp_team_reconfigure)
-        .unwrap_or(false);
+    // `Config::load` normalises every workspace dir to an absolute
+    // path, which is exactly what the `usage_trends` handler needs to
+    // derive Claude project + `CODEX_HOME` bindings.
+    let flat = ax_config::Config::load(&cfg_path).ok();
+    let reconfigure = flat
+        .as_ref()
+        .is_some_and(|cfg| cfg.experimental_mcp_team_reconfigure);
     app.reconfigure_enabled = reconfigure;
     if let Some(ref tree) = tree {
         app.desired = build_desired_set(tree, reconfigure);
     } else {
         app.desired.clear();
     }
+    app.workspace_dirs = flat
+        .as_ref()
+        .map(|cfg| {
+            cfg.workspaces
+                .iter()
+                .map(|(name, ws)| (name.clone(), PathBuf::from(&ws.dir)))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
     app.tree = tree;
 }
 

@@ -1,8 +1,5 @@
-//! Per-agent token extraction + tokens stream view. Mirrors the
-//! subset of `cmd/watch_streams.go::parseAgentTokens` + the live
-//! token table in `liveTokenLines` that we render without the
-//! trend/MCP columns (those come in a later slice once we port the
-//! usage-trend feed).
+//! Per-agent token extraction + tokens stream view (no trend/MCP
+//! columns yet).
 //!
 //! Tokens are parsed directly from the tail of each workspace's
 //! tmux capture. Claude CLI renders lines like
@@ -13,7 +10,7 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
-/// Recent-line window size we scan for token markers. Matches Go's
+/// Recent-line window size we scan for token markers. Matches
 /// `parseAgentTokens` (`len(lines) - 30`).
 const TOKEN_SCAN_WINDOW: usize = 30;
 
@@ -61,10 +58,10 @@ fn claude_done_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"\bDone \(").unwrap())
 }
 
-/// Port of Go `parseAgentTokens`. Scans the last
-/// `TOKEN_SCAN_WINDOW` capture lines for directional token counts +
-/// cost; falls back to the "Done (…N.Mk tokens…)" summary line for
-/// a single total when no directional pair was found.
+/// Scans the last `TOKEN_SCAN_WINDOW` capture lines for directional
+/// token counts + cost; falls back to the "Done (…N.Mk tokens…)"
+/// summary line for a single total when no directional pair was
+/// found.
 pub(crate) fn parse_agent_tokens(workspace: &str, capture: &str) -> AgentTokens {
     let lines: Vec<&str> = capture.lines().collect();
     let start = lines.len().saturating_sub(TOKEN_SCAN_WINDOW);
@@ -131,6 +128,7 @@ pub(crate) fn parse_token_value(s: &str) -> f64 {
     body.parse::<f64>().unwrap_or(0.0) * multiplier
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn parse_cost_value(s: &str) -> f64 {
     if s.is_empty() {
         return 0.0;

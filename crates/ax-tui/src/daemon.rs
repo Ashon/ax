@@ -11,9 +11,10 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
 
-use ax_proto::payloads::RegisterPayload;
-use ax_proto::responses::{ListWorkspacesResponse, StatusResponse};
+use ax_proto::payloads::{RegisterPayload, UsageTrendWorkspace, UsageTrendsPayload};
+use ax_proto::responses::{ListWorkspacesResponse, StatusResponse, UsageTrendsResponse};
 use ax_proto::types::WorkspaceInfo;
+use ax_proto::usage::WorkspaceTrend;
 use ax_proto::{Envelope, ErrorPayload, MessageType, ResponsePayload};
 use serde::de::DeserializeOwned;
 
@@ -76,6 +77,32 @@ impl Client {
         let response: ListWorkspacesResponse =
             self.request(MessageType::ListWorkspaces, &serde_json::json!({}))?;
         Ok(response.workspaces)
+    }
+
+    /// Ask the daemon to roll up token / turn totals from Claude and
+    /// Codex transcripts for each `(name, cwd)` binding. The server
+    /// still answers for offline workspaces — transcripts live on
+    /// disk, not in the tmux session — so the TUI can surface
+    /// historical usage once an agent has stopped.
+    pub(crate) fn usage_trends(
+        &mut self,
+        bindings: &[(String, String)],
+        since_minutes: i64,
+        bucket_minutes: i64,
+    ) -> Result<Vec<WorkspaceTrend>, DaemonClientError> {
+        let payload = UsageTrendsPayload {
+            workspaces: bindings
+                .iter()
+                .map(|(name, cwd)| UsageTrendWorkspace {
+                    workspace: name.clone(),
+                    cwd: cwd.clone(),
+                })
+                .collect(),
+            since_minutes,
+            bucket_minutes,
+        };
+        let response: UsageTrendsResponse = self.request(MessageType::UsageTrends, &payload)?;
+        Ok(response.trends)
     }
 
     fn request<P, R>(&mut self, kind: MessageType, payload: &P) -> Result<R, DaemonClientError>
