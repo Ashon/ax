@@ -7,9 +7,11 @@
 #![forbid(unsafe_code)]
 
 mod daemon_client;
+mod memory_scope;
 mod server;
 
 pub use daemon_client::{
     DaemonClient, DaemonClientBuilder, DaemonClientError, DEFAULT_REQUEST_TIMEOUT,
 };
+pub use memory_scope::find_effective_config;
 pub use server::{run_stdio, Server};
