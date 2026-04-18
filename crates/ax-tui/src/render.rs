@@ -16,38 +16,64 @@ use crate::sidebar::SidebarEntry;
 use crate::state::App;
 use crate::stream::{format_message_line, StreamView};
 
-const SIDEBAR_WIDTH: u16 = 34;
-
 pub(crate) fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(2), // header
-            Constraint::Min(1),    // body split
+            Constraint::Min(1),    // agents + tabs + content
             Constraint::Length(1), // footer
         ])
         .split(area);
 
     draw_header(f, chunks[0], app);
 
-    let body_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(1)])
-        .split(chunks[1]);
-    draw_sidebar(f, body_chunks[0], app);
-    draw_body(f, body_chunks[1], app);
+    let streaming = app.streamed_workspace.is_some();
+    let agents_h = compute_agents_height(app, chunks[1].height, streaming);
+    let middle = if streaming {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(agents_h), Constraint::Min(1)])
+            .split(chunks[1])
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(agents_h),
+                Constraint::Length(1),
+                Constraint::Min(1),
+            ])
+            .split(chunks[1])
+    };
+    let agents_area = middle[0];
+    let content_area = *middle.last().expect("layout produces >= 2 rows");
+    draw_sidebar(f, agents_area, app);
+    if !streaming {
+        draw_stream_tabs(f, middle[1], app);
+    }
+    draw_body(f, content_area, app);
 
     if app.quick_actions.open {
-        draw_quick_actions(f, area, body_chunks[0], app);
+        draw_quick_actions(f, area, agents_area, app);
     }
 
     draw_footer(f, chunks[2], app);
 }
 
-/// Context-menu style overlay: anchored just to the right of the
-/// selected sidebar row so it reads as a popup on that agent. Clamps
-/// into the frame so it never runs off the edge on small terminals.
+/// Clamp the agents pane so it shows every live row when possible
+/// but never starves the tab+content pane below it. Leaves at least
+/// four content rows (tab strip + 3 body rows) on tiny terminals.
+fn compute_agents_height(app: &App, middle_h: u16, streaming: bool) -> u16 {
+    let reserved = if streaming { 3 } else { 4 };
+    let desired = (app.sidebar_entries.len() as u16).saturating_add(2).max(5);
+    let cap = middle_h.saturating_sub(reserved).max(3);
+    desired.min(cap)
+}
+
+/// Context-menu style overlay: drops down from the selected agent
+/// row with a small indent so it reads as a popup on that row.
+/// Clamps into the frame so it never runs off the edge.
 fn draw_quick_actions(f: &mut Frame, frame: Rect, sidebar: Rect, app: &App) {
     let workspace = app.selected_workspace().unwrap_or("");
     let action_count = app.quick_actions.actions.len() as u16;
@@ -55,8 +81,9 @@ fn draw_quick_actions(f: &mut Frame, frame: Rect, sidebar: Rect, app: &App) {
     let width: u16 = 42;
     let width = width.min(frame.width.saturating_sub(2));
 
-    let anchor_x = sidebar.x + sidebar.width;
-    let anchor_y = sidebar.y + 1 + app.selected_entry as u16;
+    let selected_row = sidebar.y + 1 + app.selected_entry as u16;
+    let anchor_x = sidebar.x + 2;
+    let anchor_y = selected_row + 1;
     let max_x = frame.right().saturating_sub(width);
     let max_y = frame.bottom().saturating_sub(height);
     let x = anchor_x.min(max_x).max(frame.x);
@@ -194,24 +221,16 @@ fn sidebar_item<'a>(idx: usize, entry: &'a SidebarEntry, app: &'a App) -> ListIt
 }
 
 fn draw_body(f: &mut Frame, area: Rect, app: &App) {
-    // Streaming mode wins over the regular stream views — no tab
-    // bar, the whole pane is the live tmux mirror.
     if let Some(workspace) = app.streamed_workspace.clone() {
         draw_stream_single(f, area, app, &workspace);
         return;
     }
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
-        .split(area);
-    let content = chunks[0];
     match app.stream {
-        StreamView::Messages => draw_messages(f, content, app),
-        StreamView::Tasks => draw_tasks(f, content, app),
-        StreamView::Tokens => draw_tokens(f, content, app),
-        StreamView::Hidden => draw_selection_summary(f, content, app),
+        StreamView::Messages => draw_messages(f, area, app),
+        StreamView::Tasks => draw_tasks(f, area, app),
+        StreamView::Tokens => draw_tokens(f, area, app),
+        StreamView::Hidden => draw_selection_summary(f, area, app),
     }
-    draw_stream_tabs(f, chunks[1], app);
 }
 
 /// Tab strip at the foot of the body pane so the rotating stream
