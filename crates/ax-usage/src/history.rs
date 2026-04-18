@@ -1,11 +1,9 @@
-//! Claude transcript directory scan + per-transcript series.
+//! Claude/Codex transcript directory scan + per-transcript series.
 //!
-//! Initial slice: single-binding flow (enough to prove end-to-end Claude
-//! → bucketed usage for one workspace). Multi-binding attribution (hint
-//! matching, shared cwd, cross-workspace session ids) and the Codex
-//! integration land in the next slice.
-//!
-//! Port tracks `internal/usage/history.go`; names match where practical.
+//! Surface: Claude single- and multi-binding attribution (hint
+//! matching, shared cwd, cross-workspace session ids) plus the Codex
+//! integration that rolls per-turn `token_count` deltas into the same
+//! bucketed shape.
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
@@ -45,8 +43,8 @@ pub struct HistoryQuery {
 }
 
 impl HistoryQuery {
-    /// Fills in the Go-compatible defaults for zero values: a 5-minute
-    /// bucket, a 3-hour window ending at `now`.
+    /// Fills in defaults for zero values: a 5-minute bucket, a
+    /// 3-hour window ending at `now`.
     #[must_use]
     pub fn normalized(mut self, now: DateTime<Utc>) -> Self {
         if self.bucket_size.as_secs() == 0 {
@@ -134,9 +132,21 @@ pub struct WorkspaceBinding {
     /// Resolved Claude project directory. Callers usually derive this
     /// via `ax_agent::claude_project_path`.
     pub claude_project_dir: Option<PathBuf>,
-    /// Resolved `CODEX_HOME`. Callers usually derive this via
-    /// `ax_agent::codex_home_path`.
-    pub codex_home: Option<PathBuf>,
+    /// Every `CODEX_HOME` that might hold sessions for this workspace,
+    /// in priority order. The first entry is the canonical path; any
+    /// additional entries are legacy home variants (e.g. derived from
+    /// a pre-normalisation sha1) and are merged on top so historical
+    /// rollouts still surface. Callers usually populate this via
+    /// [`ax_agent::discover_codex_home_candidates`].
+    pub codex_homes: Vec<PathBuf>,
+}
+
+impl WorkspaceBinding {
+    /// Convenience accessor for the primary (canonical) codex home.
+    #[must_use]
+    pub fn primary_codex_home(&self) -> Option<&Path> {
+        self.codex_homes.first().map(PathBuf::as_path)
+    }
 }
 
 /// Multi-binding response returned by [`query_history`].
@@ -155,9 +165,9 @@ pub struct HistoryResponse {
 /// `workspace`. `dir` is the workspace's own directory; it's stored on
 /// the returned value so callers can render the binding.
 ///
-/// Missing `project_dir` yields `available = false` with the same
-/// reason codes Go emits (`missing_workspace_dir`, `no_project_transcripts`,
-/// `no_transcripts`). The full multi-binding / hint-matching flow lands
+/// Missing `project_dir` yields `available = false` with one of the
+/// reason codes `missing_workspace_dir`, `no_project_transcripts`, or
+/// `no_transcripts`. The full multi-binding / hint-matching flow lands
 /// in a later slice.
 pub fn scan_workspace_from_project_dir(
     workspace: &str,
@@ -209,7 +219,7 @@ pub fn scan_workspace_from_project_dir(
 }
 
 /// List `*.jsonl` files directly under `project_dir`. Entry order is
-/// alphabetised to match Go's `sort.Strings`.
+/// alphabetised so results are deterministic.
 pub fn discover_transcripts(project_dir: &Path) -> Result<Vec<PathBuf>, HistoryError> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
         for entry in std::fs::read_dir(dir)? {
@@ -261,7 +271,7 @@ pub(crate) fn scan_transcript(
             path: path.display().to_string(),
             source: e,
         })?;
-        // Malformed lines silently skipped to match Go.
+        // Malformed lines are silently skipped.
         let Ok(rec) = parse_line(line.as_bytes()) else {
             continue;
         };
@@ -476,9 +486,8 @@ fn add_mcp(a: MCPProxyMetrics, b: MCPProxyMetrics) -> MCPProxyMetrics {
 
 // ---------- multi-binding entry point ----------
 
-/// Scan every binding's Claude transcripts plus its Codex sessions and
-/// return one [`WorkspaceHistory`] per binding. Mirrors Go's
-/// `QueryHistory`.
+/// Scan every binding's Claude transcripts plus its Codex sessions
+/// and return one [`WorkspaceHistory`] per binding.
 ///
 /// Callers populate `binding.claude_project_dir` and/or
 /// `binding.codex_home` before calling; missing paths simply mean "no
@@ -526,18 +535,31 @@ pub fn query_history(
         seen_dirs.insert(key, state);
     }
 
-    // Codex scan per-binding (one CODEX_HOME per workspace).
+    // Codex scan per-binding. A workspace can legitimately have
+    // several `CODEX_HOME` directories — the canonical one plus any
+    // pre-normalisation legacy variants — so we walk every home and
+    // merge the series. `home_exists` / `sessions_found` are `OR`-ed
+    // across variants so the unavailable-reason stays accurate.
     let mut codex_by_binding: std::collections::BTreeMap<String, Vec<TranscriptSeries>> =
         std::collections::BTreeMap::new();
     let mut codex_flags: std::collections::BTreeMap<String, (bool, bool)> =
         std::collections::BTreeMap::new();
     for binding in bindings {
-        if let Some(home) = &binding.codex_home {
+        if binding.codex_homes.is_empty() {
+            continue;
+        }
+        let mut any_exists = false;
+        let mut any_sessions = false;
+        let mut merged_series: Vec<TranscriptSeries> = Vec::new();
+        for home in &binding.codex_homes {
             let res = crate::codex::scan_codex_for_binding(&binding.name, home, query)?;
-            codex_flags.insert(binding.name.clone(), (res.home_exists, res.sessions_found));
-            if !res.series.is_empty() {
-                codex_by_binding.insert(binding.name.clone(), res.series);
-            }
+            any_exists |= res.home_exists;
+            any_sessions |= res.sessions_found;
+            merged_series.extend(res.series);
+        }
+        codex_flags.insert(binding.name.clone(), (any_exists, any_sessions));
+        if !merged_series.is_empty() {
+            codex_by_binding.insert(binding.name.clone(), merged_series);
         }
     }
 
@@ -634,10 +656,10 @@ pub fn query_workspace_trends(resp: &HistoryResponse) -> Vec<ax_proto::usage::Wo
         .collect()
 }
 
-/// Convenience wrapper matching Go's `usage.QueryWorkspaceTrends`
+/// Convenience wrapper matching the `usage.QueryWorkspaceTrends`
 /// signature: builds the `HistoryQuery` window from `(now, since,
 /// bucket)`, runs [`query_history`], and reshapes the result. Zero
-/// `since` / `bucket` pick up the Go-compatible defaults.
+/// `since` / `bucket` pick up the built-in defaults.
 pub fn query_workspace_trends_for(
     bindings: &[WorkspaceBinding],
     now: DateTime<Utc>,
@@ -754,8 +776,8 @@ fn unavailable_reason_for(
     "workspace_unattributed".to_owned()
 }
 
-/// Attribute transcript series to bindings via the same three-step
-/// heuristic Go uses: workspace hint first, then shared session id, and
+/// Attribute transcript series to bindings via a three-step
+/// heuristic: workspace hint first, then shared session id, and
 /// finally a unique-cwd fallback.
 fn assign_series<'a>(
     bindings: &[WorkspaceBinding],

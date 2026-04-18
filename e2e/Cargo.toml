@@ -16,11 +16,14 @@ tempfile = "3"
 thiserror = { workspace = true }
 
 [dev-dependencies]
+ax-agent = { path = "../crates/ax-agent" }
 ax-config = { path = "../crates/ax-config" }
 ax-daemon = { path = "../crates/ax-daemon" }
 ax-proto = { path = "../crates/ax-proto" }
 ax-tmux = { path = "../crates/ax-tmux" }
+ax-usage = { path = "../crates/ax-usage" }
 ax-workspace = { path = "../crates/ax-workspace" }
+chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tempfile = "3"

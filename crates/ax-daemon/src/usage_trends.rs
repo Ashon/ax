@@ -2,9 +2,6 @@
 //! for each requested workspace via `ax_agent`, builds the
 //! `WorkspaceBinding` list, and calls through to
 //! `ax_usage::query_workspace_trends_for`.
-//!
-//! Mirrors `internal/daemon/daemon_handlers.go::handleUsageTrendsEnvelope`
-//! plus `internal/usage/trend.go::QueryWorkspaceTrends`.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -36,26 +33,30 @@ pub(crate) fn handle_usage_trends(env: &Envelope) -> Result<Envelope, HandlerErr
     response_envelope(&env.id, &UsageTrendsResponse { trends })
 }
 
-/// Resolve the optional `claude_project_dir` + `codex_home` for a
-/// single `(workspace, cwd)` request. Missing `HOME` or empty `cwd`
-/// leaves the corresponding path as `None` — the ax-usage scanner then
-/// falls through to its "no transcripts" branch for that binding, same
-/// as Go.
+/// Resolve the optional `claude_project_dir` + every known
+/// `CODEX_HOME` for a single `(workspace, cwd)` request. Missing
+/// `HOME` or empty `cwd` leaves the corresponding fields empty — the
+/// ax-usage scanner then falls through to its "no transcripts" branch
+/// for that binding.
+///
+/// `codex_homes` includes the canonical path **and** any legacy
+/// sibling directories so sessions rolled out before the key
+/// normalisation still surface in the usage reply.
 fn build_binding(workspace: &str, cwd: &str) -> WorkspaceBinding {
     let claude_project_dir: Option<PathBuf> = if cwd.is_empty() {
         None
     } else {
         ax_agent::claude_project_path(std::path::Path::new(cwd)).ok()
     };
-    let codex_home: Option<PathBuf> = if cwd.is_empty() {
-        None
+    let codex_homes: Vec<PathBuf> = if cwd.is_empty() {
+        Vec::new()
     } else {
-        ax_agent::codex_home_path(workspace, cwd).ok()
+        ax_agent::discover_codex_home_candidates(workspace, cwd).unwrap_or_default()
     };
     WorkspaceBinding {
         name: workspace.to_owned(),
         dir: cwd.to_owned(),
         claude_project_dir,
-        codex_home,
+        codex_homes,
     }
 }

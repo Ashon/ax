@@ -1,6 +1,6 @@
 //! Multi-binding `query_history` + Codex integration + `query_workspace_trends`.
 //!
-//! Exercises the three attribution heuristics Go uses (hint, session id,
+//! Exercises the three attribution heuristics (hint, session id,
 //! unique cwd) plus the Codex session stitching.
 
 use std::fs;
@@ -24,7 +24,7 @@ fn default_query() -> HistoryQuery {
     }
 }
 
-// Attached workspace hint extractor uses the Go prefix verbatim.
+// Attached workspace hint extractor uses the canonical prefix verbatim.
 fn turn(req: &str, ts: &str, input: i64, output: i64, hint: Option<&str>) -> String {
     let hint_line = match hint {
         Some(name) => format!(
@@ -141,7 +141,7 @@ fn codex_series_merges_into_workspace_history() {
         name: "codex-only".into(),
         dir: "/tmp/codex-workspace".into(),
         claude_project_dir: None,
-        codex_home: Some(codex_home.clone()),
+        codex_homes: vec![codex_home.clone()],
     }];
     let resp = query_history(&bindings, &default_query()).unwrap();
     let ws = &resp.workspaces[0];
@@ -180,7 +180,7 @@ fn mixed_claude_and_codex_produces_two_agents() {
         name: "mixed".into(),
         dir: "/tmp/claude-proj".into(),
         claude_project_dir: Some(claude_proj),
-        codex_home: Some(codex_home),
+        codex_homes: vec![codex_home],
     }];
     let resp = query_history(&bindings, &default_query()).unwrap();
     let ws = &resp.workspaces[0];
@@ -231,7 +231,7 @@ fn unavailable_reasons_reflect_runtime_visibility() {
         name: "no-data".into(),
         dir: "/tmp/claude-proj".into(),
         claude_project_dir: Some(tmp.path().join("missing_dir")),
-        codex_home: None,
+        codex_homes: Vec::new(),
     }];
     let resp = query_history(&empty_case, &default_query()).unwrap();
     assert_eq!(
@@ -246,7 +246,7 @@ fn unavailable_reasons_reflect_runtime_visibility() {
         name: "present".into(),
         dir: "/tmp/claude-proj".into(),
         claude_project_dir: Some(present_empty),
-        codex_home: None,
+        codex_homes: Vec::new(),
     }];
     let resp = query_history(&bindings, &default_query()).unwrap();
     assert_eq!(resp.workspaces[0].unavailable_reason, "no_transcripts");

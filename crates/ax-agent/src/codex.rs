@@ -2,13 +2,14 @@
 //!
 //! Every workspace running codex gets an isolated config dir under
 //! `~/.ax/codex/<workspace>-<sha1>`. The sha1 is truncated to 6 bytes
-//! (12 hex chars) and derived from the workspace's base directory — the
-//! same truncation Go's `codexHomeKey` uses so a Rust daemon and a Go
-//! daemon resolve the same path.
+//! (12 hex chars) and derived from the workspace's base directory,
+//! lexically normalised so different representations of the same path
+//! (absolute, relative with `./`, trailing slash, …) collapse onto the
+//! same key.
 
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use ax_config::{Config, DEFAULT_CODEX_REASONING_EFFORT};
 use sha1::{Digest, Sha1};
@@ -50,12 +51,17 @@ pub enum CodexHomeError {
     },
 }
 
-/// Stable per-workspace key used as the directory name. sha1(dir)[0..6]
-/// hex-encoded, suffixed onto the workspace name.
+/// Stable per-workspace key used as the directory name.
+/// sha1(normalize(dir))[0..6] hex-encoded, suffixed onto the workspace
+/// name. `dir` is normalised lexically (absolutized against the process
+/// cwd if it's relative, then `.`/`..` collapsed and trailing `/`
+/// stripped) so any representation of the same filesystem location
+/// maps to the same key.
 #[must_use]
 pub fn codex_home_key(workspace: &str, dir: &str) -> String {
+    let normalized = normalize_dir_for_key(dir);
     let mut hasher = Sha1::new();
-    hasher.update(dir.as_bytes());
+    hasher.update(normalized.as_bytes());
     let digest = hasher.finalize();
     let truncated = &digest[..6];
     format!("{workspace}-{}", hex::encode(truncated))
@@ -68,6 +74,107 @@ pub fn codex_home_path(workspace: &str, dir: &str) -> Result<PathBuf, CodexHomeE
         .join(".ax")
         .join("codex")
         .join(codex_home_key(workspace, dir)))
+}
+
+/// Directory holding every managed `CODEX_HOME` for this host
+/// (`$HOME/.ax/codex/`).
+pub fn codex_homes_root() -> Result<PathBuf, CodexHomeError> {
+    Ok(resolve_home()?.join(".ax").join("codex"))
+}
+
+/// Return every `~/.ax/codex/<workspace>-<12hex>` directory that looks
+/// like it belongs to `workspace`. The canonical path for the supplied
+/// `dir` comes first (even if it doesn't exist yet); any legacy
+/// sibling entries — left over from earlier key derivations — follow,
+/// sorted by name for stability.
+///
+/// Used by the usage scanner so sessions rollout'd before the key
+/// normalisation are still attributed to the workspace instead of
+/// silently dropped.
+pub fn discover_codex_home_candidates(
+    workspace: &str,
+    dir: &str,
+) -> Result<Vec<PathBuf>, CodexHomeError> {
+    let root = codex_homes_root()?;
+    let canonical = root.join(codex_home_key(workspace, dir));
+    let mut out: Vec<PathBuf> = vec![canonical.clone()];
+
+    let prefix = format!("{workspace}-");
+    let Ok(iter) = fs::read_dir(&root) else {
+        return Ok(out);
+    };
+    let mut extras: Vec<PathBuf> = Vec::new();
+    for entry in iter.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with(&prefix) {
+            continue;
+        }
+        let suffix = &name[prefix.len()..];
+        if suffix.len() != 12 || !suffix.chars().all(|c| c.is_ascii_hexdigit()) {
+            continue;
+        }
+        let path = entry.path();
+        if path == canonical {
+            continue;
+        }
+        extras.push(path);
+    }
+    extras.sort();
+    out.extend(extras);
+    Ok(out)
+}
+
+/// Lexically normalise a workspace dir for use as a sha1 input.
+///
+/// - Relative paths are absolutized against the current process cwd
+///   (best-effort; falls back to the raw input if that fails).
+/// - `.` and `..` components are collapsed.
+/// - A trailing path separator is stripped.
+///
+/// Pure: no filesystem access beyond what `std::path::absolute`
+/// performs (reads cwd only) and no symlink resolution.
+pub(crate) fn normalize_dir_for_key(dir: &str) -> String {
+    let raw = Path::new(dir);
+    let absolute = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        std::path::absolute(raw).unwrap_or_else(|_| raw.to_path_buf())
+    };
+
+    let mut rooted = false;
+    let mut stack: Vec<std::ffi::OsString> = Vec::new();
+    for comp in absolute.components() {
+        match comp {
+            Component::Prefix(_) | Component::RootDir => {
+                rooted = true;
+                stack.clear();
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                stack.pop();
+            }
+            Component::Normal(n) => stack.push(n.to_owned()),
+        }
+    }
+
+    let mut out = PathBuf::new();
+    if rooted {
+        out.push(std::path::MAIN_SEPARATOR_STR);
+    }
+    for part in &stack {
+        out.push(part);
+    }
+    let rendered = out.to_string_lossy().into_owned();
+    if rendered.len() > 1 {
+        rendered
+            .trim_end_matches(std::path::MAIN_SEPARATOR)
+            .to_owned()
+    } else {
+        rendered
+    }
 }
 
 /// Create or refresh the ax-managed `CODEX_HOME` tree for a workspace,
@@ -369,7 +476,7 @@ fn toml_array(values: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::upsert_top_level_key;
+    use super::{codex_home_key, normalize_dir_for_key, upsert_top_level_key};
 
     #[test]
     fn upsert_top_level_key_replaces_existing_value() {
@@ -382,5 +489,56 @@ mod tests {
             1
         );
         assert!(!updated.contains("model_reasoning_effort = \"medium\""));
+    }
+
+    #[test]
+    fn normalize_dir_for_key_collapses_current_dir_segments() {
+        assert_eq!(
+            normalize_dir_for_key("/Users/x/project/./crates/ax-cli"),
+            "/Users/x/project/crates/ax-cli"
+        );
+    }
+
+    #[test]
+    fn normalize_dir_for_key_strips_trailing_slash() {
+        assert_eq!(
+            normalize_dir_for_key("/Users/x/project/"),
+            "/Users/x/project"
+        );
+    }
+
+    #[test]
+    fn normalize_dir_for_key_preserves_root_alone() {
+        assert_eq!(normalize_dir_for_key("/"), "/");
+    }
+
+    #[test]
+    fn normalize_dir_for_key_collapses_parent_segments() {
+        assert_eq!(
+            normalize_dir_for_key("/a/b/../c"),
+            "/a/c"
+        );
+    }
+
+    #[test]
+    fn codex_home_key_is_stable_across_equivalent_path_forms() {
+        // Absolute with `/./`, absolute clean, and absolute with a
+        // trailing slash must all collapse onto the same sha1 input so
+        // a workspace's sessions live in one codex home regardless of
+        // where the launch path was composed.
+        let forms = [
+            "/tmp/demo/crates/ax-cli",
+            "/tmp/demo/./crates/ax-cli",
+            "/tmp/demo/crates/ax-cli/",
+            "/tmp/demo/extra/../crates/ax-cli",
+        ];
+        let base = codex_home_key("ax.cli", forms[0]);
+        for form in &forms[1..] {
+            assert_eq!(
+                codex_home_key("ax.cli", form),
+                base,
+                "form {form:?} produced a different key"
+            );
+        }
     }
 }
