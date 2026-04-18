@@ -2,7 +2,7 @@
 //! typed tool methods on the `Server` struct directly against an
 //! in-process `ax-daemon`, checking that scope aliases normalise to
 //! the daemon's stored form and that the message helpers produce
-//! the same human-friendly output shape Go emits.
+//! the expected human-friendly output shape.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

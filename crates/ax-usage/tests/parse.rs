@@ -1,6 +1,5 @@
 //! Parse transcript lines that mirror real Claude Code JSONL records.
-//! Each test pins the semantics documented in `internal/usage/parse.go`
-//! so the Rust port stays honest against the Go aggregator behaviour.
+//! Each test pins the semantics documented in [`parse::parse_line`].
 
 use ax_usage::parse_line;
 

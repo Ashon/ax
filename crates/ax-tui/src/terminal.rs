@@ -1,6 +1,5 @@
 //! Terminal setup/teardown wrapper so callers can use `?` without
-//! worrying about leaking the alternate screen. Mirrors the safety
-//! guarantees Bubbletea's `WithAltScreen` option provides in Go.
+//! worrying about leaking the alternate screen.
 
 use std::io::{self, Stdout};
 

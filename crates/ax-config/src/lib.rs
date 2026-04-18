@@ -1,9 +1,9 @@
 //! ax config loader.
 //!
-//! This is the Rust port of `internal/config`. Covers the full config
-//! surface: YAML schema (`Config`, `Workspace`, `Child`), path discovery,
-//! recursive child loading with project-tree construction, machine-
-//! managed overlay merging, and structural validation.
+//! Covers the full config surface: YAML schema (`Config`, `Workspace`,
+//! `Child`), path discovery, recursive child loading with project-tree
+//! construction, machine-managed overlay merging, and structural
+//! validation.
 
 #![forbid(unsafe_code)]
 

@@ -1,7 +1,4 @@
 //! Generated full-file instructions for project orchestrators.
-//!
-//! Mirrors the prompt-building portion of
-//! `internal/workspace/orchestrator.go`.
 
 // This module is essentially a template renderer that grows a String
 // by appending formatted pieces; rewriting every `push_str(&format!(...))`

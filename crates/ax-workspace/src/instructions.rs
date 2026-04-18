@@ -1,10 +1,8 @@
 //! Marker-delimited `ax` section inside the runtime's instruction file
-//! (CLAUDE.md / AGENTS.md). Mirrors
-//! `internal/workspace/instructions.go`.
+//! (CLAUDE.md / AGENTS.md).
 //!
-//! The literal Korean-language contract strings are kept verbatim so
-//! the instructions emitted by Rust are byte-identical to Go's — any
-//! drift here would silently retrain downstream agents.
+//! The literal Korean-language contract strings are kept verbatim —
+//! any drift here would silently retrain downstream agents.
 
 use std::fs;
 use std::io;

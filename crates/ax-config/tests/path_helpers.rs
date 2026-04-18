@@ -1,5 +1,5 @@
-//! Sanity coverage for path helpers. The Go-parity assertions are driven
-//! from behaviour, not specific paths, so tests work on any test sandbox.
+//! Sanity coverage for path helpers. Assertions are driven from
+//! behaviour, not specific paths, so tests work on any test sandbox.
 
 use std::fs;
 

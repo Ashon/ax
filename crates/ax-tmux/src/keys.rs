@@ -1,7 +1,6 @@
 //! Named-key resolution for `tmux send-keys`.
 //!
-//! Mirrors the `specialKeyMap` in `internal/tmux/tmux.go`. Any token not in
-//! the map is treated as literal text (sent via `-l`).
+//! Any token not in the map is treated as literal text (sent via `-l`).
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolvedKey {

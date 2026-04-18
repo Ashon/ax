@@ -1,8 +1,10 @@
 # Workspace Token / Context Usage Tracking — Design
 
-Status: **draft** (stage 1 of 3)
+Status: **design note (shipped, historical reference)**
 Scope: ax daemon + MCP + watch UI
-Owner: ax.daemon (direct delegation from root orchestrator)
+Owner: ax.usage (구현체는 `crates/ax-usage/`, `crates/ax-daemon/src/usage_trends.rs`,
+`crates/ax-proto/src/usage.rs`에 살아 있습니다. 이 문서는 원래 Go로 초안된 것을
+Rust 구현과 동기화한 스냅샷입니다.)
 
 ## 1. Goal
 
@@ -75,40 +77,31 @@ file-history-snapshots, user turns) are skipped silently.
 
 ## 3. Data model
 
-Package: `internal/usage` — parser, tailer, and in-memory aggregation.
+Crate: `ax-usage` — parser, tailer, and in-memory aggregation (wire types는
+`ax-proto::usage`).
 
-```go
-// internal/usage/usage.go
-package usage
-
-type Tokens struct {
-    Input              int64 `json:"input"`
-    Output             int64 `json:"output"`
-    CacheRead          int64 `json:"cache_read"`
-    CacheCreation      int64 `json:"cache_creation"`
+```rust
+// crates/ax-proto/src/usage.rs
+pub struct Tokens {
+    pub input: i64,
+    pub output: i64,
+    pub cache_read: i64,
+    pub cache_creation: i64,
 }
 
-type ModelTotals struct {
-    Model string `json:"model"`
-    Turns int64  `json:"turns"`
-    Totals Tokens `json:"totals"`
+pub struct ModelTotals {
+    pub model: String,
+    pub turns: i64,
+    pub totals: Tokens,
 }
 
-type WorkspaceUsage struct {
-    Workspace       string        `json:"workspace"`
-    TranscriptPath  string        `json:"transcript_path,omitempty"`
-    SessionID       string        `json:"session_id,omitempty"`
-    SessionStart    *time.Time    `json:"session_start,omitempty"`
-    LastActivity    *time.Time    `json:"last_activity,omitempty"`
-    CumulativeTotals Tokens       `json:"cumulative_totals"`
-    ByModel         []ModelTotals `json:"by_model,omitempty"`
-    // Current context = last assistant record's totals (input+cache_read+cache_creation gives the model's working context on that turn).
-    CurrentContext  Tokens        `json:"current_context"`
-    CurrentModel    string        `json:"current_model,omitempty"`
-    Turns           int64         `json:"turns"`
-    Available       bool          `json:"available"`
-    Error           string        `json:"error,omitempty"`
-}
+// 실제 snapshot은 crates/ax-usage/src/aggregator.rs의
+// `UsageSnapshot`과 crates/ax-usage/src/history.rs의
+// `WorkspaceHistory` / `CurrentSnapshot`로 구현되어 있으며
+// 아래 필드 구성을 유지합니다:
+//   workspace, transcript_path, session_id, session_start,
+//   last_activity, cumulative_totals, by_model,
+//   current_context, current_model, turns, available, error
 ```
 
 ### 3.1 "Current context" definition
@@ -129,27 +122,29 @@ grouped by `model`. Rolled up to `CumulativeTotals` (all models) and
 
 ## 4. Collector
 
-Package: `internal/daemon` (wires to `internal/usage`).
+Crate: `ax-daemon` (wires to `ax-usage`). 실제 구현은 tick-기반이 아닌 on-demand
+스캔으로 단순화되었습니다 — `crates/ax-daemon/src/usage_trends.rs`가
+`handle_usage_trends_envelope`에서 `ax-usage::query_workspace_trends`를 호출해
+transcript를 스캔하고 `ax-proto::UsageTrendsResponse`로 응답합니다.
 
-```go
-type UsageCollector struct {
-    mu        sync.RWMutex
-    byWS      map[string]*usage.WorkspaceUsage
-    // per-workspace tailing state
-    state     map[string]*fileState
-    logger    *log.Logger
+```rust
+// 개념적 형태 (tick-기반 draft)
+struct UsageCollector {
+    by_ws: HashMap<String, UsageSnapshot>,   // ax-usage::UsageSnapshot
+    state: HashMap<String, FileState>,       // per-workspace tailing
 }
 
-type fileState struct {
-    path   string
-    offset int64        // last parsed byte offset
-    wsUsage *usage.WorkspaceUsage
+struct FileState {
+    path: PathBuf,
+    offset: u64,                             // last parsed byte offset
+    snapshot: UsageSnapshot,
 }
 ```
 
-- Triggered by a daemon goroutine on a 2s tick (configurable), iterating
-  over `Registry.List()` to pick up workspaces that are currently
-  connected.
+- Draft plan called for a daemon background task on a 2s tick
+  (configurable), iterating over `Registry::list()` to pick up
+  workspaces currently connected. The shipped implementation scans on
+  demand instead.
 - For each workspace: resolve transcript path (via cwd in `WorkspaceInfo.Dir`),
   stat the file, if size grew then read from `offset` to `EOF` and parse
   new JSONL records. Update totals incrementally. No full re-parse.
@@ -258,33 +253,29 @@ show offline workspaces or agents when they still have recorded usage.
 
 ## 7. Tests
 
-Package: `internal/usage/usage_test.go`.
+Crate: `ax-usage` 테스트 (`crates/ax-usage/tests/{parse.rs,aggregator.rs}` +
+소스 내 `#[cfg(test)]`).
 
-- `TestProjectDirFromCwd` — golden cases for the `/`+`.` → `-` rule.
-- `TestParseRecord_ValidAssistant` — fixture line; expect totals populated.
-- `TestParseRecord_NoUsageSkipped` — user/attachment lines skipped.
-- `TestParseRecord_Malformed` — returns error, doesn't update state.
-- `TestAggregate_Cumulative` — multi-record fixture: verify totals and
-  `ByModel` grouping.
-- `TestAggregate_CurrentContext` — last assistant record wins for
-  `CurrentContext`.
-- `TestTail_Incremental` — write fixture file, parse from offset 0, write
-  more lines, re-parse from previous offset, totals equal full re-parse.
-- `TestSessionSwitch` — new sessionId in newer file resets state.
+- `project_dir_from_cwd` — golden cases for the `/`+`.` → `-` rule.
+- parse 계열 — assistant 레코드 totals 파싱, user/attachment skip, malformed
+  처리.
+- aggregator 계열 — 다중 레코드 cumulative totals 및 `by_model` 그룹핑,
+  가장 최근 assistant 레코드를 `current_context`로 채택.
+- tail 계열 — offset 기반 증분 파싱, session 스위치 감지.
 
-Fixtures under `internal/usage/testdata/`.
+Fixtures under `crates/ax-usage/tests/fixtures/`.
 
 No network, no tmpdir pollution beyond `t.TempDir()`.
 
 ## 8. Work breakdown / stages
 
 1. **Stage 1 (this doc)** — design review. No code yet.
-2. **Stage 2** — implement `internal/usage` parser + collector (no daemon
-   wiring yet) with full unit tests under `internal/usage/testdata/`.
-3. **Stage 3** — wire collector goroutine into `daemon.New`; add envelope
-   type `MsgGetWorkspaceUsage`; add MCP tool `get_workspace_usage`;
-   integration smoke test via daemon test fixture. Watch/CLI surfacing
-   deferred to a stage 3b or follow-up task.
+2. **Stage 2** — implement `ax-usage` parser + aggregator (no daemon wiring
+   yet) with full unit tests under `crates/ax-usage/tests/fixtures/`.
+3. **Stage 3** — wire scan into `ax-daemon` via `usage_trends` handler; add
+   envelope `msg_get_workspace_usage` / `msg_usage_trends`; add MCP tool
+   `get_workspace_usage`; integration smoke test via daemon test fixture.
+   Watch/CLI surfacing deferred to a stage 3b or follow-up task.
 
 Each stage ends with a mid-report to the root orchestrator. Commits are
 gated on explicit user approval — working tree only.
@@ -307,5 +298,5 @@ gated on explicit user approval — working tree only.
   the per-name case.
 - Tick interval: 2s default. Worth exposing as `--usage-interval` flag on
   `ax daemon`? Deferred to stage 3 if it matters.
-- Context-window table: hardcode in `internal/usage` or make
-  config-driven? Deferred to watch/CLI surfacing stage.
+- Context-window table: hardcode in `ax-usage` or make config-driven?
+  Deferred to watch/CLI surfacing stage.

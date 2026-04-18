@@ -1,9 +1,9 @@
-//! Domain types ported from `internal/types/types.go`.
+//! Shared domain types referenced by request/response payloads:
+//! Task, Message, Workspace info, team reconfigure state, ….
 //!
-//! These are the entity types referenced by request/response payloads
-//! (Task, Message, Workspace info, team reconfigure state, …). Map fields
-//! use [`std::collections::BTreeMap`] so the serialized JSON keys come out
-//! alphabetically sorted, matching Go's `encoding/json` behaviour.
+//! Map fields use [`std::collections::BTreeMap`] so serialized JSON
+//! keys come out alphabetically sorted — the wire format depends on
+//! that ordering.
 
 use std::collections::BTreeMap;
 
@@ -261,9 +261,9 @@ pub enum TaskStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskStartMode {
-    // Older persisted snapshots and Go-era payloads used empty
-    // string to mean "unset / use default". Accept both on the wire
-    // so loading pre-Rust state files still works.
+    // Older persisted snapshots used an empty string to mean
+    // "unset / use default". Accept both on the wire so legacy state
+    // files still load.
     #[serde(rename = "default", alias = "")]
     Default,
     #[serde(rename = "fresh")]
@@ -282,8 +282,8 @@ pub enum TaskWorkflowMode {
 pub enum TaskPriority {
     #[serde(rename = "low")]
     Low,
-    // Empty string is the historical "unset" value from the Go
-    // daemon; map it to Normal for backwards compat.
+    // Empty string is the historical "unset" value; map it to
+    // Normal for backwards compat.
     #[serde(rename = "normal", alias = "")]
     Normal,
     #[serde(rename = "high")]
@@ -414,9 +414,8 @@ pub struct TaskSequenceInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(clippy::struct_excessive_bools)] // wire-compat DTO mirroring Go struct; flags are
-                                         // semantically independent (wake / claim / recovery / divergence) and any regrouping would
-                                         // change the JSON layout.
+#[allow(clippy::struct_excessive_bools)] // wire-compat DTO; flags are semantically independent
+                                         // (wake / claim / recovery / divergence) and any regrouping would change the JSON layout.
 pub struct TaskStaleInfo {
     pub is_stale: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]

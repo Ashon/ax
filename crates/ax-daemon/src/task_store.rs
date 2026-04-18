@@ -1,8 +1,7 @@
-//! Persistent task store for the daemon. Mirrors
-//! `internal/daemon/taskstore.go` field-for-field: the JSON on disk is
-//! a sorted `Vec<Task>`, derived fields (`sequence`, `stale_info`) are
-//! stripped before persistence, and every mutation refreshes the
-//! parent rollup in place.
+//! Persistent task store for the daemon. The JSON on disk is a sorted
+//! `Vec<Task>`, derived fields (`sequence`, `stale_info`) are stripped
+//! before persistence, and every mutation refreshes the parent rollup
+//! in place.
 //!
 //! The store is intentionally free of queue / wake-scheduler /
 //! session-manager coupling; those orchestrations live in the
@@ -109,8 +108,8 @@ impl TaskStore {
     }
 
     /// Load tasks from `state_dir`. Checks `tasks-state.json` first
-    /// and falls back to the legacy `tasks.json` so daemons upgraded
-    /// from the Go build see their existing task state.
+    /// and falls back to the legacy `tasks.json` so upgraded daemons
+    /// see their existing task state.
     pub fn load(state_dir: &Path) -> Result<Arc<Self>, TaskStoreError> {
         let primary = state_dir.join(STATE_FILE);
         let legacy = state_dir.join(SNAPSHOT_FILE);
@@ -227,7 +226,7 @@ impl TaskStore {
     /// Look up `id`, validate that `workspace` may operate on it, and
     /// confirm the task is still in a state where intervention is
     /// meaningful (pending / `in_progress` / blocked). Mirrors the
-    /// guard Go's `handleInterveneTaskEnvelope` runs before dispatching
+    /// guard `handleInterveneTaskEnvelope` runs before dispatching
     /// on the `action` string.
     pub fn get_for_intervention(
         &self,
@@ -490,7 +489,7 @@ impl TaskStore {
         task.version += 1;
         let snapshot = task.clone();
         // Persist asynchronously to disk; failure here is logged by
-        // the caller (record_dispatch is best-effort in Go too).
+        // the caller (record_dispatch is best-effort).
         let _ = self.persist_locked(&inner);
         Some(snapshot)
     }

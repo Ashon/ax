@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "ax config loader (Rust port of internal/config)"
+description = "ax config loader + project tree + managed overlay"
 
 [dependencies]
 serde.workspace = true

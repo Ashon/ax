@@ -1,10 +1,9 @@
-//! Verify the Rust schema parses real Go-produced `.ax/config.yaml` files
-//! and that the materialised values match the source-of-truth semantics.
+//! Verify the schema parses real-world `.ax/config.yaml` fixtures and
+//! that the materialised values match the source-of-truth semantics.
 //!
-//! Exact byte-level YAML round-tripping is not something we pursue; YAML
-//! writers differ on indentation, quoting, and key ordering, and Go's
-//! yaml.v3 output is not byte-identical to `serde_yml`'s anyway. What
-//! matters is that Rust parses the same content to the same in-memory
+//! Exact byte-level YAML round-tripping is not something we pursue;
+//! YAML writers differ on indentation, quoting, and key ordering. What
+//! matters is that we parse the same content to the same in-memory
 //! model.
 
 use ax_config::{Child, Config, Workspace};

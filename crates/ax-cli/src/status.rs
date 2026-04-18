@@ -1,8 +1,6 @@
-//! Rendering + helpers for `ax status`. Mirrors `cmd/status.go`
-//! plus the workspace/task summary helpers it depends on:
-//! `summarizeTasks` / `formatTaskSummary` / `taskAttentionHint` /
-//! `workspaceAgentStatus` / `workspaceStatusPreview` / the config-tree
-//! pretty printer. Consumes the sync `DaemonClient` in
+//! Rendering + helpers for `ax status`. Covers task summaries,
+//! workspace/agent status lines, status previews, and the
+//! config-tree pretty printer. Consumes the sync `DaemonClient` in
 //! [`crate::daemon_client`] and `ax_tmux::list_sessions`.
 
 use std::collections::{BTreeMap, BTreeSet};

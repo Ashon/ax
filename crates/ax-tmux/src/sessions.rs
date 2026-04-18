@@ -10,16 +10,14 @@ use crate::TmuxError;
 
 pub const SESSION_PREFIX: &str = "ax-";
 
-/// Returns the tmux session name assigned to `workspace`. Matches
-/// `tmux.SessionName` in Go (`ax-<encoded>`).
+/// Returns the tmux session name assigned to `workspace`
+/// (`ax-<encoded>`).
 #[must_use]
 pub fn session_name(workspace: &str) -> String {
     format!("{SESSION_PREFIX}{}", encode_workspace_name(workspace))
 }
 
-/// Replace `.` with `_` so tmux session names stay single-token. The Go
-/// daemon uses the same substitution so both languages see the same tmux
-/// namespace during the migration.
+/// Replace `.` with `_` so tmux session names stay single-token.
 #[must_use]
 pub fn encode_workspace_name(workspace: &str) -> String {
     workspace.replace('.', "_")

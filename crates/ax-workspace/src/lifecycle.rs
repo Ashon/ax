@@ -1,6 +1,4 @@
 //! Targeted lifecycle control for managed sessions.
-//!
-//! Mirrors `internal/workspace/lifecycle.go`.
 
 use std::path::Path;
 use std::path::{Component, PathBuf};

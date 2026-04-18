@@ -1,9 +1,8 @@
 //! Workspace + orchestrator reconcile pass.
 //!
-//! This ports the generated-artifact and managed-session half of
-//! `internal/workspace/reconcile.go`: persisted runtime state,
-//! desired-vs-actual diffing, create/remove/restart for workspaces and
-//! sub-orchestrators, and root-orchestrator manual-restart reporting.
+//! Covers persisted runtime state, desired-vs-actual diffing,
+//! create/remove/restart for workspaces and sub-orchestrators, and
+//! root-orchestrator manual-restart reporting.
 
 use std::collections::BTreeMap;
 use std::fs;

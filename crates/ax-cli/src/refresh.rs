@@ -1,6 +1,6 @@
-//! `ax-rs refresh` — port of cmd/refresh.go. Refreshes generated ax
-//! artifacts (workspace MCP config + instructions, orchestrator
-//! prompts) and optionally reconciles tmux sessions.
+//! `ax refresh` — refreshes generated ax artifacts (workspace MCP
+//! config + instructions, orchestrator prompts) and optionally
+//! reconciles tmux sessions.
 //!
 //! Two shapes:
 //! - Experimental team-reconfigure mode: delegates to the Rust
@@ -203,9 +203,9 @@ fn destroy_orchestrator_sessions(out: &mut String, node: &ProjectNode) {
     }
 }
 
-/// Mirrors Go's `reconcileRootOrchestratorState`: if the config
-/// disables the root orchestrator, tear down its generated artifacts
-/// and tell callers to skip the root node during ensure loops.
+/// If the config disables the root orchestrator, tear down its
+/// generated artifacts and tell callers to skip the root node during
+/// ensure loops.
 fn reconcile_root_orchestrator_state(cfg: &Config) -> Result<bool, OrchestratorError> {
     if !cfg.disable_root_orchestrator {
         return Ok(false);

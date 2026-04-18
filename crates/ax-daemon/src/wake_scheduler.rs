@@ -1,13 +1,13 @@
 //! Retry-aware wake scheduler for workspaces with unread messages.
 //!
-//! Mirrors `internal/daemon/wakescheduler.go`: when a `send_message`
-//! or broadcast lands in a workspace inbox the scheduler records a
-//! pending wake. A background loop wakes the target tmux session when
-//! the agent is idle, retrying with exponential backoff (5s → 10s →
-//! 20s → 40s → 60s cap) up to ten attempts. Optional collaborators
-//! install queue rehydration, missing-session recovery, and a
-//! post-success retry policy so task-flow hooks can plug in without
-//! widening this module's surface.
+//! When a `send_message` or broadcast lands in a workspace inbox the
+//! scheduler records a pending wake. A background loop wakes the
+//! target tmux session when the agent is idle, retrying with
+//! exponential backoff (5s → 10s → 20s → 40s → 60s cap) up to ten
+//! attempts. Optional collaborators install queue rehydration,
+//! missing-session recovery, and a post-success retry policy so
+//! task-flow hooks can plug in without widening this module's
+//! surface.
 //!
 //! The scheduler is generic over a [`WakeBackend`] trait so tests can
 //! substitute a fake tmux without shelling out. Production wiring
@@ -28,7 +28,7 @@ use crate::queue::MessageQueue;
 pub const WAKE_CHECK_INTERVAL: Duration = Duration::from_secs(3);
 pub const WAKE_MAX_ATTEMPTS: usize = 10;
 
-/// Exponential backoff table for retries. Matches Go verbatim.
+/// Exponential backoff table for retries.
 #[must_use]
 pub fn wake_backoff(attempt: usize) -> Duration {
     match attempt {
@@ -158,7 +158,7 @@ impl<B: WakeBackend> WakeScheduler<B> {
     }
 
     /// Register (or reset) a pending wake for `workspace`. Always
-    /// schedules the first retry 5s out, matching Go.
+    /// schedules the first retry 5s out.
     pub fn schedule(&self, workspace: &str, sender: &str) {
         let next = Utc::now() + chrono::Duration::seconds(5);
         let entry = PendingWake {

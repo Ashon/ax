@@ -1,16 +1,12 @@
 //! Thin orchestration layer that sits between the daemon handlers
-//! and the workspace tmux backend. Mirrors
-//! `internal/daemon/session_manager.go`: wraps
-//! `dispatch_runnable_work` and the lifecycle `{start,stop,restart}
-//! _named_target` helpers so handlers and the wake-scheduler's
-//! missing-session ensurer hook share one entry point and one
-//! config-path validation path.
+//! and the workspace tmux backend. Wraps `dispatch_runnable_work` and
+//! the lifecycle `{start,stop,restart}_named_target` helpers so
+//! handlers and the wake-scheduler's missing-session ensurer hook
+//! share one entry point and one config-path validation path.
 //!
-//! `should_sleep` and `stop_idle` are ported but currently only used
-//! by the session-manager unit tests and the `intervene_task` +
-//! `start_task` handler flow; the idle-sleep loop in Go
-//! (`internal/daemon/idle_sleep.go`) will wire in once the tmux side
-//! grows `is_idle` observability.
+//! `should_sleep` and `stop_idle` are wired into the
+//! `intervene_task` + `start_task` handler flow; a full idle-sleep
+//! loop will land once the tmux side grows `is_idle` observability.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -234,9 +230,9 @@ impl<B: TmuxBackend + DispatchBackend + Clone + Send + Sync + 'static> SessionMa
 
     /// Walk every registered workspace and stop the ones that have
     /// been idle past their configured timeout and have no work
-    /// pending. Mirrors Go's `sessionManager.stopIdle`. Returns the
-    /// number of workspaces the loop actually put to sleep so the
-    /// caller can log visibility into the reconcile cadence.
+    /// pending. Returns the number of workspaces the loop actually put
+    /// to sleep so the caller can log visibility into the reconcile
+    /// cadence.
     pub fn stop_idle(&self, now: DateTime<Utc>) -> usize {
         let mut stopped = 0usize;
         for registered in self.registry.snapshot() {

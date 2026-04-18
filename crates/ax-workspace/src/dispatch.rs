@@ -1,6 +1,4 @@
 //! Dispatch-target startup + wake helpers.
-//!
-//! Mirrors `internal/workspace/dispatch.go`.
 
 use std::path::{Component, Path, PathBuf};
 use std::thread;

@@ -1,5 +1,4 @@
-//! Response payload types. Mirrors `internal/daemon/protocol.go` response
-//! structs.
+//! Response payload types.
 
 use std::collections::BTreeMap;
 

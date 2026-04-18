@@ -1,6 +1,5 @@
 //! Utility helpers shared between the task store, the message queue
-//! and task-handling envelope dispatch. Mirrors the free-standing
-//! helpers in `internal/daemon/{taskref.go,daemon.go,daemon_handlers.go}`.
+//! and task-handling envelope dispatch.
 
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -11,8 +10,7 @@ use regex::Regex;
 use ax_proto::types::{Message, Task, TaskPriority, TaskStartMode, TaskStatus, TaskWorkflowMode};
 
 /// Duplicate status/log messages from the same workspace are suppressed
-/// when they repeat a no-op update within this window. Mirrors
-/// `internal/daemon/daemon.go::duplicateSuppressionWindow`.
+/// when they repeat a no-op update within this window.
 pub(crate) const DUPLICATE_SUPPRESSION_WINDOW: Duration = Duration::from_secs(15);
 
 /// `_cli` is the synthetic workspace name the CLI uses when sending
@@ -22,7 +20,7 @@ pub(crate) const DUPLICATE_SUPPRESSION_WINDOW: Duration = Duration::from_secs(15
 pub(crate) const OPERATOR_WORKSPACE_NAME: &str = "_cli";
 
 static TASK_ID_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    // Go: (?i)task id:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})
+    // Pattern: (?i)task id:\s*([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})
     Regex::new(
         r"(?i)task id:\s*([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})",
     )
@@ -30,7 +28,7 @@ static TASK_ID_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 static DUPLICATE_NOOP_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    // Go's pattern with `\b` word boundaries and case-insensitive matching.
+    // `\b` word boundaries and case-insensitive matching.
     Regex::new(
         r"(?i)\b(ack|acked|acknowledged|received|noted|thanks?|thank you|roger|copy that|working on it|on it|looking into it|in progress|still working|status|no update|no-op|noop|same update|same status)\b",
     )
@@ -38,7 +36,7 @@ static DUPLICATE_NOOP_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// Pull a `Task ID: <uuid>` reference out of a free-form message body.
-/// Returns an empty string when no match is found, matching Go.
+/// Returns an empty string when no match is found.
 #[must_use]
 pub(crate) fn extract_task_id(content: &str) -> String {
     TASK_ID_PATTERN
@@ -48,8 +46,7 @@ pub(crate) fn extract_task_id(content: &str) -> String {
 }
 
 /// Normalise a message body for suppression comparison: trim, collapse
-/// whitespace, lowercase. Mirrors `normalizeMessageForSuppression` in
-/// `daemon.go`.
+/// whitespace, lowercase.
 #[must_use]
 pub(crate) fn normalize_message_for_suppression(content: &str) -> String {
     let trimmed = content.trim();
@@ -91,8 +88,8 @@ pub(crate) fn format_task_dispatch_message(task_id: &str, message: &str) -> Stri
     format!("Task ID: {task_id}\n\n{}", message.trim())
 }
 
-/// Trim + validate a dispatch body used by `start_task`. Go rejects
-/// bodies that embed a Task ID so dispatch paths can always inject the
+/// Trim + validate a dispatch body used by `start_task`. Bodies that
+/// embed a Task ID are rejected so dispatch paths can always inject the
 /// real one. Exposed for the pending `start_task` slice.
 #[allow(dead_code)]
 pub(crate) fn normalize_task_dispatch_body(message: &str) -> Result<String, TaskDispatchError> {
@@ -129,10 +126,8 @@ pub(crate) enum TaskLifecycleError {
 }
 
 /// Build the reminder text dispatch paths send when a task needs a
-/// follow-up nudge (retry / rehydrate). Mirrors Go's
-/// `buildTaskReminderMessage` down to the Operator note suffix so the
-/// downstream agent sees a byte-identical prompt regardless of which
-/// binary produced it.
+/// follow-up nudge (retry / rehydrate), including the operator note
+/// suffix so downstream agents see a stable prompt shape.
 #[must_use]
 pub(crate) fn build_task_reminder_message(task: &Task, note: &str) -> String {
     let title = task.title.trim();
@@ -161,11 +156,11 @@ pub(crate) fn build_task_reminder_message(task: &Task, note: &str) -> String {
     }
 }
 
-/// Pick the dispatch body used when re-hydrating a runnable task.
-/// Matches Go's `taskDispatchContent`: prefer the stored
-/// `dispatch_message` when it's present and the operator note is
-/// empty; otherwise fall back to the reminder template. Exposed
-/// ahead of the runnable-rehydrate slice that will consume it.
+/// Pick the dispatch body used when re-hydrating a runnable task:
+/// prefer the stored `dispatch_message` when it's present and the
+/// operator note is empty; otherwise fall back to the reminder
+/// template. Exposed ahead of the runnable-rehydrate slice that will
+/// consume it.
 #[must_use]
 #[allow(dead_code)]
 pub(crate) fn task_dispatch_content(task: &Task, note: &str) -> String {
@@ -176,9 +171,8 @@ pub(crate) fn task_dispatch_content(task: &Task, note: &str) -> String {
 }
 
 /// Build a `Message` whose `task_id` field is populated from the body
-/// when present. Mirrors Go's `taskAwareMessage` — the daemon stamps
-/// the id + `created_at` when the message lands in the queue, so
-/// callers leave those blank.
+/// when present. The daemon stamps the id + `created_at` when the
+/// message lands in the queue, so callers leave those blank.
 #[must_use]
 pub(crate) fn task_aware_message(from: &str, to: &str, content: &str) -> Message {
     Message {
@@ -202,8 +196,8 @@ fn status_label(status: &TaskStatus) -> &'static str {
     }
 }
 
-/// Validate and default task lifecycle options. Mirrors Go's
-/// `parseTaskLifecycleOptions` including its "empty → default" rules.
+/// Validate and default task lifecycle options, including the
+/// "empty → default" fallback rules.
 pub(crate) fn parse_task_lifecycle_options(
     start_mode: &str,
     workflow_mode: &str,

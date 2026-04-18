@@ -1,8 +1,7 @@
 //! Atomic write for persisted JSON state. Writes to a sibling
 //! `.<name>.tmp-<rand>` file under the same directory, fsyncs, then
 //! renames in place so readers (or a crashed daemon being restarted)
-//! never observe a half-written file. Mirrors
-//! `internal/daemon/atomicfile.go`.
+//! never observe a half-written file.
 
 use std::fs::{self, File};
 use std::io::{self, Write};

@@ -5,17 +5,19 @@
 ## 저장소 구조
 
 ```text
-cmd/           CLI 명령
-internal/
-  agent/       runtime 통합 (claude / codex)
-  config/      config 로딩 / project tree
-  daemon/      daemon, queue, task, session manager
-  mcpserver/   MCP server와 daemon client
-  memory/      durable memory store
-  workspace/   workspace/orchestrator artifact 생성
-  tmux/        tmux 세션 제어
-e2e/           live orchestration harness
-docs/          사용자/운영/개발 문서
+crates/
+  ax-cli/          CLI 엔트리(바이너리 `ax`)
+  ax-agent/        runtime 통합(claude / codex)
+  ax-config/       config 로딩 / project tree
+  ax-daemon/       daemon, queue, task, session manager
+  ax-mcp-server/   MCP server와 daemon client
+  ax-proto/        wire 타입(Envelope, Payload)
+  ax-tmux/         tmux 세션 제어
+  ax-tui/          ratatui 기반 watch TUI
+  ax-usage/        transcript 파서 + usage 집계
+  ax-workspace/    workspace/orchestrator artifact 생성과 reconcile
+e2e/               live orchestration harness
+docs/              사용자/운영/개발 문서
 ```
 
 ## 자주 쓰는 명령
@@ -23,23 +25,17 @@ docs/          사용자/운영/개발 문서
 ```bash
 make build
 make test
-go test ./...
-go test ./internal/daemon
-go test ./internal/mcpserver
-go test ./internal/workspace
-```
-
-필요하면 sandbox friendly cache 지정:
-
-```bash
-env GOCACHE=/tmp/ax-gocache go test ./internal/workspace
+cargo test --workspace
+cargo test -p ax-daemon
+cargo test -p ax-mcp-server
+cargo test -p ax-workspace
 ```
 
 ## 문서 읽는 순서
 
 - 사용자/운영 관점: [README](../README.md) → [docs/](README.md)
 - 심화 구현 레퍼런스: [DEVELOPER_GUIDE.md](../DEVELOPER_GUIDE.md)
-- 패키지 ownership / local rules: `cmd/AGENTS.md`, `internal/*/AGENTS.md`
+- 크레이트 ownership / local rules: `crates/*/AGENTS.md`
 - 설계 노트: [docs/design/](design/)
 
 ## 구현 시 참고할 것
@@ -49,4 +45,4 @@ env GOCACHE=/tmp/ax-gocache go test ./internal/workspace
 - daemon이 task, queue, wake, session lifecycle, durable memory를 소유
 - prompt/instruction artifact 변경은 runtime behavior에 직접 영향
 
-즉, 문서나 코드 수정 시에도 “artifact 생성 시점”과 “runtime/session 재시작 필요 여부”를 함께 봐야 합니다.
+즉, 문서나 코드 수정 시에도 "artifact 생성 시점"과 "runtime/session 재시작 필요 여부"를 함께 봐야 합니다.

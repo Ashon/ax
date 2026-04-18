@@ -1,8 +1,8 @@
-//! Byte-level compatibility tests for domain types from `internal/types`.
+//! Byte-level wire-format golden tests for the shared domain types.
 //!
-//! Fixtures were produced by marshalling each struct with Go's
-//! `encoding/json`. The Rust types must reproduce the exact same bytes so
-//! the daemon's on-wire format is language-agnostic.
+//! Fixtures capture the exact JSON each struct must serialize to; a
+//! decode → re-encode round-trip must reproduce every golden file
+//! byte-for-byte so the daemon's on-wire format stays stable.
 
 use ax_proto::types::{LifecycleTarget, Memory, Message, Task, WorkspaceInfo};
 use serde::{de::DeserializeOwned, Serialize};
@@ -28,31 +28,31 @@ where
 }
 
 #[test]
-fn workspace_info_matches_go() {
+fn workspace_info_matches_wire_golden() {
     assert_roundtrip::<WorkspaceInfo>("workspace_info");
 }
 
 #[test]
-fn message_matches_go() {
+fn message_matches_wire_golden() {
     assert_roundtrip::<Message>("message");
 }
 
 #[test]
-fn lifecycle_target_matches_go() {
+fn lifecycle_target_matches_wire_golden() {
     assert_roundtrip::<LifecycleTarget>("lifecycle_target");
 }
 
 #[test]
-fn task_full_matches_go() {
+fn task_full_matches_wire_golden() {
     assert_roundtrip::<Task>("task_full");
 }
 
 #[test]
-fn task_minimal_matches_go() {
+fn task_minimal_matches_wire_golden() {
     assert_roundtrip::<Task>("task_minimal");
 }
 
 #[test]
-fn memory_matches_go() {
+fn memory_matches_wire_golden() {
     assert_roundtrip::<Memory>("memory");
 }

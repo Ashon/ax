@@ -1,12 +1,12 @@
-//! Quick-action overlay — port of `cmd/watch_actions.go`. When open,
-//! the overlay takes over key input and lets operators run lifecycle
-//! controls against the workspace under the sidebar cursor:
-//! interrupt (Escape via tmux) and restart/stop (goes through
+//! Quick-action overlay. When open, the overlay takes over key input
+//! and lets operators run lifecycle controls against the workspace
+//! under the sidebar cursor: interrupt (Escape via tmux) and
+//! restart/stop (goes through
 //! `ax_workspace::{restart,stop}_named_target`). Flow-switching
 //! actions (show messages / tasks) just flip the stream view.
 //!
-//! Restart + stop require a confirmation enter (Go does the same)
-//! so stray key presses don't nuke a running agent.
+//! Restart + stop require a confirmation enter so stray key presses
+//! don't nuke a running agent.
 
 use std::time::{Duration, Instant};
 

@@ -1,5 +1,4 @@
-//! Tilde expansion for the default socket path. Matches Go's
-//! `internal/daemonutil.ExpandSocketPath` semantics: "~" and "~/..." are
+//! Tilde expansion for the default socket path. `~` and `~/...` are
 //! resolved against `$HOME`; anything else passes through.
 
 use std::path::{Path, PathBuf};

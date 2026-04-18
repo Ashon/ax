@@ -1,13 +1,9 @@
-//! Stream pane renderer — port of `cmd/watch_streams.go`. This slice
-//! ports the messages view only; tasks + tokens views ship in
-//! follow-up slices (they need the tasks-file cache + the tmux
-//! token-regex parser respectively).
+//! Stream pane renderer — messages view.
 //!
 //! History is read directly from `message_history.jsonl` under the
 //! daemon state dir. We keep the reader minimal (no mtime cache
 //! yet) — the TUI only refreshes every 250ms so re-reading a small
-//! JSONL file is cheap enough; caching can land once we merge the
-//! tasks view.
+//! JSONL file is cheap enough.
 
 use std::path::{Path, PathBuf};
 

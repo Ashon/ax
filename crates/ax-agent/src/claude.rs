@@ -9,8 +9,8 @@ pub enum ClaudeProjectError {
 }
 
 /// Return the `~/.claude/projects/<encoded-cwd>` directory where Claude
-/// Code stores project-specific session state. The encoding mirrors the
-/// one Go uses: replace `/` and `.` with `-` in the absolute dir path.
+/// Code stores project-specific session state. The encoding replaces
+/// `/` and `.` with `-` in the absolute dir path.
 pub fn claude_project_path(dir: &Path) -> Result<PathBuf, ClaudeProjectError> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)

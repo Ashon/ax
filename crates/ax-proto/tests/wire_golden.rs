@@ -1,16 +1,16 @@
-//! Byte-level compatibility tests against JSON produced by the Go daemon.
+//! Byte-level wire-format golden tests.
 //!
-//! Each fixture under `tests/fixtures/` was generated from the Go
-//! `internal/daemon` package with `daemon.NewEnvelope` / `NewResponseEnvelope`.
+//! Each fixture under `tests/fixtures/` is a frozen snapshot of the
+//! daemon's on-wire JSON encoding for one envelope/payload variant.
 //! For every fixture we:
 //!
 //!   1. deserialize into our typed envelope + payload,
 //!   2. re-serialize from the typed form, and
-//!   3. assert the re-serialized bytes exactly match the Go output.
+//!   3. assert the re-serialized bytes exactly match the golden file.
 //!
-//! Any drift — key rename, `omitempty` mismatch, field reorder — will make
-//! the byte comparison fail loudly, which is what we want during the
-//! migration: Rust must be indistinguishable from Go on the wire.
+//! Any drift — key rename, `omitempty` mismatch, field reorder — will
+//! make the byte comparison fail loudly. The daemon's on-wire format
+//! is a stable contract; this test enforces it.
 
 use ax_proto::{
     AgentLifecycleResponse, BroadcastPayload, BroadcastResponse, CancelTaskPayload,
@@ -59,7 +59,7 @@ where
 }
 
 #[test]
-fn register_request_matches_go() {
+fn register_request_matches_wire_golden() {
     assert_envelope_roundtrip("register", &MessageType::Register);
     assert_payload_roundtrip::<RegisterPayload>("register");
 }
@@ -71,7 +71,7 @@ fn register_minimal_skips_omitempty_fields() {
 }
 
 #[test]
-fn send_message_with_config_path_matches_go() {
+fn send_message_with_config_path_matches_wire_golden() {
     assert_envelope_roundtrip("send_message", &MessageType::SendMessage);
     assert_payload_roundtrip::<SendMessagePayload>("send_message");
 }
@@ -83,27 +83,26 @@ fn send_message_without_config_path_omits_field() {
 }
 
 #[test]
-fn broadcast_matches_go() {
+fn broadcast_matches_wire_golden() {
     assert_envelope_roundtrip("broadcast", &MessageType::Broadcast);
     assert_payload_roundtrip::<BroadcastPayload>("broadcast");
 }
 
 #[test]
-fn status_response_matches_go() {
+fn status_response_matches_wire_golden() {
     let env = assert_envelope_roundtrip("resp_status", &MessageType::Response);
     let response: ResponsePayload = env.decode_payload().expect("decode response payload");
     let status: StatusResponse =
         serde_json::from_str(response.data.get()).expect("decode status response");
     assert_eq!(status.status, "registered");
 
-    // Re-encode the inner StatusResponse and compare to the raw data bytes
-    // the Go daemon emits.
+    // Re-encode the inner StatusResponse and compare to the golden bytes.
     let encoded = serde_json::to_string(&status).unwrap();
     assert_eq!(encoded, response.data.get());
 }
 
 #[test]
-fn send_message_response_sent_matches_go() {
+fn send_message_response_sent_matches_wire_golden() {
     let env = assert_envelope_roundtrip("resp_send_message_sent", &MessageType::Response);
     let response: ResponsePayload = env.decode_payload().unwrap();
     let decoded: SendMessageResponse = serde_json::from_str(response.data.get()).unwrap();
@@ -115,9 +114,9 @@ fn send_message_response_sent_matches_go() {
 
 #[test]
 fn send_message_response_suppressed_keeps_empty_message_id() {
-    // Unlike Go's omitempty string fields, `message_id` is always emitted on
-    // SendMessageResponse (no `,omitempty` in Go). The round-trip must
-    // preserve the empty string rather than dropping the key.
+    // `message_id` is always emitted on SendMessageResponse even when
+    // empty — the round-trip must preserve the empty string rather
+    // than dropping the key.
     let env = assert_envelope_roundtrip("resp_send_message_suppressed", &MessageType::Response);
     let response: ResponsePayload = env.decode_payload().unwrap();
     let decoded: SendMessageResponse = serde_json::from_str(response.data.get()).unwrap();
@@ -128,7 +127,7 @@ fn send_message_response_suppressed_keeps_empty_message_id() {
 }
 
 #[test]
-fn broadcast_response_matches_go() {
+fn broadcast_response_matches_wire_golden() {
     let env = assert_envelope_roundtrip("resp_broadcast", &MessageType::Response);
     let response: ResponsePayload = env.decode_payload().unwrap();
     let decoded: BroadcastResponse = serde_json::from_str(response.data.get()).unwrap();
@@ -141,7 +140,7 @@ fn broadcast_response_matches_go() {
 // ---------- Expanded request payload coverage ----------
 
 #[test]
-fn create_task_payload_matches_go() {
+fn create_task_payload_matches_wire_golden() {
     assert_envelope_roundtrip("create_task", &MessageType::CreateTask);
     assert_payload_roundtrip::<CreateTaskPayload>("create_task");
 }
@@ -159,14 +158,14 @@ fn cancel_task_payload_preserves_expected_version() {
 }
 
 #[test]
-fn intervene_task_payload_matches_go() {
+fn intervene_task_payload_matches_wire_golden() {
     assert_envelope_roundtrip("intervene_task", &MessageType::InterveneTask);
     assert_payload_roundtrip::<InterveneTaskPayload>("intervene_task");
 }
 
 #[test]
-fn remember_memory_renames_supersedes_to_ids() {
-    // Critical: Go uses `supersedes_ids` as the JSON key, not `supersedes`.
+fn remember_memory_uses_supersedes_ids_key() {
+    // Critical: the wire field name is `supersedes_ids`, not `supersedes`.
     assert_envelope_roundtrip("remember_memory", &MessageType::RememberMemory);
     assert_payload_roundtrip::<RememberMemoryPayload>("remember_memory");
 }
@@ -194,33 +193,33 @@ where
 }
 
 #[test]
-fn list_workspaces_response_matches_go() {
+fn list_workspaces_response_matches_wire_golden() {
     assert_response_data_roundtrip::<ListWorkspacesResponse>("resp_list_workspaces");
 }
 
 #[test]
-fn control_lifecycle_response_matches_go() {
+fn control_lifecycle_response_matches_wire_golden() {
     assert_response_data_roundtrip::<ControlLifecycleResponse>("resp_control_lifecycle");
 }
 
 #[test]
-fn agent_lifecycle_response_matches_go() {
+fn agent_lifecycle_response_matches_wire_golden() {
     assert_response_data_roundtrip::<AgentLifecycleResponse>("resp_agent_lifecycle");
 }
 
 #[test]
-fn start_task_response_with_nested_task_matches_go() {
+fn start_task_response_with_nested_task_matches_wire_golden() {
     assert_response_data_roundtrip::<StartTaskResponse>("resp_start_task");
 }
 
 #[test]
-fn usage_trends_response_matches_go() {
+fn usage_trends_response_matches_wire_golden() {
     assert_response_data_roundtrip::<UsageTrendsResponse>("resp_usage_trends");
 }
 
 #[test]
 fn error_envelope_round_trip() {
-    // No fixture yet — synthesize a Go-shaped error envelope and verify the
+    // No fixture yet — synthesize an error envelope and verify the
     // struct round-trips through serde cleanly.
     let raw = r#"{"id":"err-1","type":"error","payload":{"message":"boom"}}"#;
     let env: Envelope = serde_json::from_str(raw).unwrap();

@@ -92,7 +92,7 @@ fn default_child_prefix_falls_back_to_alias() {
     let child = root.join("child");
 
     // No `prefix:` on the child -- normalize should treat the alias
-    // ("kid") as the implicit prefix, matching Go's normalizeLocalConfig.
+    // ("kid") as the implicit prefix, matching normalizeLocalConfig.
     write_config(
         &default_config_path(root),
         "project: parent\nchildren:\n  kid:\n    dir: ./child\nworkspaces:\n  main:\n    dir: .\n    runtime: codex\n",

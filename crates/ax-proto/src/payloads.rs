@@ -1,4 +1,4 @@
-//! Request payload types. Mirrors `internal/daemon/protocol.go`.
+//! Request payload types.
 
 use serde::{Deserialize, Serialize};
 
@@ -90,7 +90,7 @@ pub struct RememberMemoryPayload {
     pub content: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
-    /// `supersedes_ids` in the JSON, named after the Go struct tag.
+    /// Serialises as `supersedes_ids` in the JSON wire format.
     #[serde(
         default,
         rename = "supersedes_ids",
@@ -167,10 +167,10 @@ pub struct StartTaskPayload {
     pub stale_after_seconds: i64,
 }
 
-/// `UpdateTaskPayload`'s nullable fields intentionally preserve Go's `*T`
-/// semantics: absent means "don't change", present-but-empty-string means
-/// "clear". serde `Option<T>` models that exactly when paired with
-/// `skip_serializing_if = "Option::is_none"`.
+/// `UpdateTaskPayload`'s nullable fields intentionally preserve the
+/// three-state semantics: absent means "don't change",
+/// present-but-empty-string means "clear". serde `Option<T>` models that
+/// exactly when paired with `skip_serializing_if = "Option::is_none"`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UpdateTaskPayload {
     pub id: String,

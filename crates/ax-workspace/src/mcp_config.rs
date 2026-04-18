@@ -1,4 +1,4 @@
-//! `.mcp.json` management. Mirrors `internal/workspace/mcpconfig.go`.
+//! `.mcp.json` management.
 //!
 //! The daemon registers itself as the "ax" MCP server inside the
 //! workspace's local `.mcp.json` so the runtime (Claude or Codex)
@@ -80,8 +80,8 @@ pub fn write_mcp_config(
     fs::write(&path, body).map_err(|source| McpConfigError::Write { path, source })
 }
 
-/// Drop the "ax" entry from `<dir>/.mcp.json`. Deletes the file when it
-/// would otherwise become empty, matching Go's Remove semantics.
+/// Drop the "ax" entry from `<dir>/.mcp.json`. Deletes the file when
+/// it would otherwise become empty.
 pub fn remove_mcp_config(dir: &Path) -> Result<(), McpConfigError> {
     let path = dir.join(MCP_CONFIG_FILE);
     let bytes = match fs::read(&path) {

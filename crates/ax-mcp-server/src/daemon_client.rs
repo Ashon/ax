@@ -1,12 +1,9 @@
 //! Async client that brokers envelopes between an MCP tool handler
-//! and the ax daemon's Unix socket. Mirrors
-//! `internal/mcpserver/client.go`: a single reader task demultiplexes
+//! and the ax daemon's Unix socket. A single reader task demultiplexes
 //! responses back to per-request oneshot channels keyed by envelope
 //! id, with a separate bucket for push envelopes that tools can drain
 //! via [`DaemonClient::take_push_messages`].
 //!
-//! The synchronous Go client uses a background `readLoop` goroutine;
-//! here we use a tokio task and a `Mutex<HashMap<id, oneshot>>`.
 //! Callers invoke `request()` / `request_json()` which await the
 //! matching oneshot receiver with a configurable per-request timeout.
 
@@ -29,7 +26,7 @@ use ax_proto::types::Message;
 use ax_proto::{Envelope, ErrorPayload, MessageType, ResponsePayload};
 
 /// Default per-request timeout when the caller doesn't supply one.
-/// Matches Go's `DefaultRequestTimeout`.
+/// Matches `DefaultRequestTimeout`.
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, thiserror::Error)]

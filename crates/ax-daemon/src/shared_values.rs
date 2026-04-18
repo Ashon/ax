@@ -1,8 +1,6 @@
-//! In-memory shared-values store with JSON persistence. Mirrors the
-//! `sharedValues` / `sharedPath` portion of
-//! `internal/daemon/daemon.go`. Values are a flat `BTreeMap<String,
-//! String>` — ordered, so persisted JSON key order matches Go's
-//! (encoding/json sorts map keys alphabetically).
+//! In-memory shared-values store with JSON persistence. Values are a
+//! flat `BTreeMap<String, String>` — ordered, so persisted JSON key
+//! order is stable (alphabetical).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

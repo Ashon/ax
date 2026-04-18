@@ -1,12 +1,8 @@
 //! Sidebar entry builder — turns the active sessions + optional
-//! config tree into a flat list of renderable rows. Mirrors the
-//! `buildSidebarEntries` / `buildSidebarFromTree` / `appendProjectEntries`
-//! chain in `cmd/watch_sidebar.go`.
+//! config tree into a flat list of renderable rows.
 //!
 //! Split out from rendering so tests can assert the tree expansion
-//! without touching ratatui. Fancier features (agent-state spinner,
-//! token summary, attention badge) depend on state we don't populate
-//! yet and land in later slices.
+//! without touching ratatui.
 
 use std::collections::BTreeMap;
 
@@ -261,8 +257,8 @@ fn runtime_only_group_label(enabled: bool) -> &'static str {
     }
 }
 
-/// Reconcile state label used by the sidebar. Mirrors Go's
-/// `reconfigureSidebarState`: desired-only / runtime-only / (empty).
+/// Reconcile state label used by the sidebar: desired-only /
+/// runtime-only / (empty).
 fn reconfigure_sidebar_state(
     name: &str,
     desired: &BTreeMap<String, bool>,

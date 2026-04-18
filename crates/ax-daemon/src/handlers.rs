@@ -1,10 +1,6 @@
 //! Envelope dispatch. Each handler takes a decoded payload, mutates
 //! the shared state (registry + queue), and returns the response
 //! envelope the server should write back.
-//!
-//! Port of `internal/daemon/daemon_handlers.go` restricted to the MVP
-//! handler set. Persistence side-effects, task-store dispatch, and
-//! session-manager wake ensuring will land in later slices.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

@@ -182,7 +182,7 @@ async fn usage_trends_populates_totals_and_unavailable_reasons() {
         .expect("ghost trend");
     assert!(!ghost.available);
     assert_eq!(ghost.unavailable_reason, "no_project_transcripts");
-    // Go mirrors unavailable_reason into `error` for unavailable workspaces.
+    // `unavailable_reason` is mirrored into `error` for unavailable workspaces.
     assert_eq!(ghost.error, "no_project_transcripts");
 
     handle.shutdown().await;

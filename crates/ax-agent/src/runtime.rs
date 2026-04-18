@@ -23,11 +23,9 @@ impl Runtime {
         }
     }
 
-    /// Mirrors `NormalizeRuntime` in Go: empty / claude → Claude,
-    /// codex → Codex, anything else is left as-is for downstream lookup.
-    /// Returns `Some(runtime)` for recognised built-ins, `None` when the
-    /// caller-supplied string should be treated as an opaque custom
-    /// runtime name.
+    /// Normalise a runtime name: empty / `claude` → `Claude`, `codex`
+    /// → `Codex`, anything else is treated as an opaque custom
+    /// runtime name (returned as `None`).
     #[must_use]
     pub fn normalize(name: &str) -> Option<Self> {
         match name.trim().to_ascii_lowercase().as_str() {
@@ -56,8 +54,8 @@ impl fmt::Display for Runtime {
 
 /// Resolve a runtime name (possibly mixed case, whitespace, empty) into
 /// the instruction filename `<WORKSPACE>/{CLAUDE.md|AGENTS.md|...}`. For
-/// custom runtimes the caller must bring their own mapping; Go returns
-/// an error there, we return `None` instead.
+/// custom runtimes the caller must bring their own mapping; we return
+/// `None` when the runtime is unknown.
 #[must_use]
 pub fn instruction_file(name: &str) -> Option<&'static str> {
     Runtime::normalize(name).map(Runtime::instruction_file)

@@ -1,5 +1,4 @@
-//! Path helpers for locating `.ax/config.yaml`. Mirrors the path-related
-//! functions in `internal/config/config.go`.
+//! Path helpers for locating `.ax/config.yaml`.
 
 use std::path::{Path, PathBuf};
 
@@ -45,7 +44,6 @@ pub fn config_path_in_dir(dir: impl AsRef<Path>) -> Option<PathBuf> {
 
 /// Walk upward from `start` and return the *topmost* ancestor that
 /// contains an ax config. Also checks `$HOME` so a global config wins.
-/// Mirrors `config.FindConfigFile` in the Go implementation.
 pub fn find_config_file(start: impl AsRef<Path>) -> Option<PathBuf> {
     let mut topmost: Option<PathBuf> = None;
     let mut current = start.as_ref().to_path_buf();
@@ -67,8 +65,8 @@ pub fn find_config_file(start: impl AsRef<Path>) -> Option<PathBuf> {
 }
 
 fn dirs_home() -> Option<PathBuf> {
-    // Avoid an extra dependency: $HOME is how the Go code expresses this on
-    // all the platforms we target today (macOS + Linux).
+    // macOS + Linux both expose the home directory via $HOME, so we
+    // avoid pulling in the `dirs` crate for this single lookup.
     std::env::var_os("HOME").map(PathBuf::from)
 }
 

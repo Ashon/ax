@@ -140,7 +140,7 @@ async fn remember_then_recall_filters_scope_and_applies_supersede() {
         "req-r1",
         "project:ax",
         "decision",
-        "migration: Rust first, Go second",
+        "initial architecture note, v1",
         &["rust"],
         &[],
     )
@@ -150,7 +150,7 @@ async fn remember_then_recall_filters_scope_and_applies_supersede() {
         "req-r2",
         "project:ax",
         "decision",
-        "protocol is wire-compat with Go",
+        "protocol is the canonical wire contract",
         &[],
         &[],
     )
@@ -172,7 +172,7 @@ async fn remember_then_recall_filters_scope_and_applies_supersede() {
         "req-r4",
         "project:ax",
         "decision",
-        "migration: Rust only; delete Go after cutover",
+        "updated architecture note, v2",
         &["rust"],
         &[orig.memory.id.as_str()],
     )

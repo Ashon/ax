@@ -1,5 +1,4 @@
-//! Config YAML schema. Mirrors `Config` / `Workspace` / `Child` from
-//! `internal/config/config.go`.
+//! Config YAML schema — `Config`, `Workspace`, `Child`.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -166,8 +165,8 @@ impl Config {
     }
 
     /// Parse a config from a YAML string. Does not resolve children or
-    /// apply normalization; callers wanting the full `internal/config`
-    /// behaviour should use the (forthcoming) `load` entry point.
+    /// apply normalization; callers wanting the full recursive behaviour
+    /// should use [`Config::load`] instead.
     pub fn from_yaml(source: &str) -> Result<Self, serde_yml::Error> {
         serde_yml::from_str(source)
     }
@@ -199,8 +198,8 @@ impl Config {
         })
     }
 
-    /// Builds a Config matching `DefaultConfigForRuntime` in Go — used by
-    /// `ax init`-style flows.
+    /// Build a fresh Config populated with the default single
+    /// `main` workspace for `ax init`-style flows.
     #[must_use]
     pub fn default_for_runtime(project_name: &str, runtime: &str) -> Self {
         let mut workspaces = BTreeMap::new();

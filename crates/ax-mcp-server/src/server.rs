@@ -1,13 +1,10 @@
 //! MCP server scaffold + tool registrations that delegate to the
-//! daemon client. Mirrors `internal/mcpserver/server.go` + the
-//! `tools_shared.go` / `tools_workspace.go` / `tools_memory.go` /
-//! `tools_messages.go` groups. Remaining groups (usage, tasks,
-//! agents, `team_reconfigure`) land in follow-up commits.
+//! daemon client. Groups covered: shared, workspace, memory, messages,
+//! usage, tasks, agents, and `team_reconfigure`.
 //!
 //! Each tool body calls into the `DaemonClient` using the typed
 //! envelope payloads and returns JSON-formatted text through
-//! `CallToolResult::success`, keeping the output byte-compatible with
-//! what Go's `mcp.NewToolResultText(json.MarshalIndent(...))` emits.
+//! `CallToolResult::success`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -149,7 +146,7 @@ impl Server {
     /// Resolve the effective config path for tools that dispatch
     /// through the daemon (`send_message` / `broadcast` /
     /// project-scope memory). Returns whatever was passed to
-    /// [`Self::with_config_path`]; callers who want Go-style CWD
+    /// [`Self::with_config_path`]; callers who want a CWD-based
     /// fallback should resolve the path at the binary entry point
     /// and pass it explicitly so tests can keep the process-global
     /// env untouched.

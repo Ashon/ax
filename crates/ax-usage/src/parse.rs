@@ -1,7 +1,7 @@
 //! Claude transcript JSONL line parser.
 //!
-//! Mirrors `internal/usage/parse.go`. Each transcript line decodes to a
-//! [`ParsedRecord`] suitable for feeding into the aggregator:
+//! Each transcript line decodes to a [`ParsedRecord`] suitable for
+//! feeding into the aggregator:
 //! - Usage-bearing records carry the four-dimension [`Tokens`] breakdown
 //!   and a request key used for per-turn deduplication.
 //! - Non-usage records (user turns, attachments) still propagate
@@ -289,8 +289,9 @@ fn workspace_hint_from_attachment(att: Option<&RawAttachment>) -> String {
     String::new()
 }
 
-/// Mirrors `workspaceHintPattern` in Go: `You are the "<name>" workspace
-/// agent in an ax multi-agent environment.`
+/// Match the workspace hint string the orchestrator injects into each
+/// workspace prompt: `You are the "<name>" workspace agent in an ax
+/// multi-agent environment.`
 fn extract_workspace_hint(text: &str) -> Option<&str> {
     const PREFIX: &str = "You are the \"";
     const SUFFIX: &str = "\" workspace agent in an ax multi-agent environment.";

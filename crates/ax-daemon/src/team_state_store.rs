@@ -1,7 +1,6 @@
-//! Persistent team-reconfigure state. Mirrors
-//! `internal/daemon/teamstate_store.go`: the file contains a JSON
-//! array of `TeamReconfigureState` entries keyed by `team_id`, with
-//! atomic replacement on every put.
+//! Persistent team-reconfigure state. The file contains a JSON array
+//! of `TeamReconfigureState` entries keyed by `team_id`, with atomic
+//! replacement on every put.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

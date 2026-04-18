@@ -1,9 +1,8 @@
 //! Pure-parser tests that don't require a running tmux server.
 //!
-//! These mirror `internal/tmux/tmux_test.go` and cover the four places
-//! where tmux output shape or key-name semantics matter: session name
-//! encoding, list-sessions parsing, key token resolution, and idle
-//! detection from a captured pane.
+//! Cover the four places where tmux output shape or key-name
+//! semantics matter: session name encoding, list-sessions parsing,
+//! key token resolution, and idle detection from a captured pane.
 
 use ax_tmux::{
     decode_workspace_name, encode_workspace_name, resolve_key_token, session_name, ResolvedKey,

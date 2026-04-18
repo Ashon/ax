@@ -1,10 +1,9 @@
 //! Recursive `Config` / `ProjectNode` loading.
 //!
-//! Mirrors `internal/config/config.go::Load` (workspace-merged view) and
-//! `internal/config/tree.go::LoadTree` (hierarchical view). Stale child
-//! references where the target `.ax/config.yaml` no longer exists are
-//! skipped with a warning-like log, matching the Go behaviour so the rest
-//! of the tree keeps loading.
+//! Two views: `Config::load` produces a workspace-merged flat map,
+//! `Config::load_tree` preserves the hierarchy. Stale child references
+//! where the target `.ax/config.yaml` no longer exists are skipped with
+//! a warning log so the rest of the tree keeps loading.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -213,7 +212,7 @@ fn qualify_name(prefix: &str, name: &str) -> String {
 }
 
 /// Combines `readConfigFile` + `initializeLocalConfig` + optional
-/// managed-overlay application + `normalizeLocalConfig` from the Go
+/// managed-overlay application + `normalizeLocalConfig`, matching the
 /// `loadLocalConfig` helper.
 fn load_local_config(abs: &Path) -> Result<Config, LoadError> {
     let mut cfg = Config::read_local(abs)?;

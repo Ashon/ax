@@ -1,8 +1,6 @@
-//! Memory scope resolver for the MCP tool handlers. Mirrors
-//! `internal/mcpserver/tools_memory.go::resolveMemoryScopeSelector`
-//! and the Go memory package's scope helpers so the Rust server
-//! accepts identical scope aliases (`workspace`, `project`, `global`)
-//! and explicit selectors (`project:x`, `workspace:y`, `task:<id>`).
+//! Memory scope resolver for the MCP tool handlers. Accepts the scope
+//! aliases `workspace`, `project`, and `global`, plus explicit
+//! selectors of the form `project:x`, `workspace:y`, `task:<id>`.
 
 use std::path::{Path, PathBuf};
 
@@ -45,8 +43,7 @@ pub(crate) fn project_scope(prefix: &str) -> String {
 }
 
 /// Normalise a raw scope string so case and whitespace match the
-/// scope the daemon already stores. Mirrors Go's `NormalizeScope`
-/// used by `memory.Store`.
+/// scope the daemon already stores in the memory store.
 pub(crate) fn normalize_scope(raw: &str) -> String {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -103,8 +100,7 @@ pub(crate) fn resolve(
 }
 
 /// Resolve a list of scopes, deduping while preserving insertion
-/// order. Empty input falls back to `[global, project, workspace]`
-/// like Go.
+/// order. Empty input falls back to `[global, project, workspace]`.
 pub(crate) fn resolve_many(
     scopes: &[String],
     workspace: &str,

@@ -1,6 +1,6 @@
 //! Aggregator behaviour pinned against Claude transcript sequences.
 //!
-//! Key behaviours exercised (all mirror `internal/usage/aggregator.go`):
+//! Key behaviours exercised:
 //!   - Each unique request key counts as exactly one turn.
 //!   - Updates to the same request key replace (not add to) the turn's
 //!     tokens, so editor-style edits don't double-count usage.

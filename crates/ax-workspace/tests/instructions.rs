@@ -1,6 +1,6 @@
-//! Marker-delimited instruction section behaviour. Ports the three Go
-//! tests in `internal/workspace/instructions_test.go` plus a coverage
-//! test for the cleanup pass over stale runtime files.
+//! Marker-delimited instruction-section behaviour: the three
+//! write-through cases plus a coverage test for the cleanup pass over
+//! stale runtime files.
 
 use std::fs;
 

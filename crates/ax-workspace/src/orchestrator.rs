@@ -1,9 +1,6 @@
-//! Orchestrator naming, path, and cleanup helpers.
-//!
-//! This ports the low-risk helper portion of `internal/workspace/state.go`
-//! and `internal/workspace/orchestrator.go`: stable orchestrator IDs,
-//! artifact directory derivation, and cleanup of generated orchestrator
-//! files/state.
+//! Orchestrator naming, path, and cleanup helpers: stable orchestrator
+//! IDs, artifact directory derivation, and cleanup of generated
+//! orchestrator files/state.
 
 use std::collections::BTreeMap;
 use std::fs;

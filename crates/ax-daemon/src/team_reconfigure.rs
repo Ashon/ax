@@ -1,6 +1,5 @@
-//! Team-reconfigure controller. Mirrors
-//! `internal/daemon/team_reconfigure.go` — the state machine that
-//! powers the `get_team_state` / `dry_run_team_reconfigure` /
+//! Team-reconfigure controller — the state machine that powers the
+//! `get_team_state` / `dry_run_team_reconfigure` /
 //! `apply_team_reconfigure` / `finish_team_reconfigure` handlers.
 //!
 //! Responsibilities:
@@ -687,8 +686,8 @@ fn diff_team_actions(
 }
 
 fn kind_rank(kind: &TeamEntryKind) -> u8 {
-    // Matches Go's lexicographic sort on the rendered string, so the
-    // daemon emits `child < root_orchestrator < workspace`.
+    // Lexicographic sort on the rendered string, so the daemon emits
+    // `child < root_orchestrator < workspace`.
     match kind {
         TeamEntryKind::Child => 0,
         TeamEntryKind::RootOrchestrator => 1,

@@ -3,13 +3,12 @@
 //! keyed by UUID, persisted as a sorted `Vec<Memory>` JSON array via
 //! the shared `write_file_atomic` helper.
 //!
-//! Mirrors `internal/memory/store.go`. Behaviours pinned here:
+//! Behaviours pinned here:
 //!
 //!   - `Remember` atomically updates supersedes-target pointers and
 //!     rolls them back on persist failure.
 //!   - `List` filters by scope / kind / tag / superseded, sorts active
 //!     entries first, then most-recently updated, and applies a limit.
-//!   - Scope / kind / tag normalisation matches Go verbatim.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

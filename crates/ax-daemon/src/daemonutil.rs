@@ -1,13 +1,9 @@
 //! Small helpers shared between the daemon's control loops. Today
-//! this just holds [`wake_prompt`], which mirrors
-//! `internal/daemonutil/daemonutil.go::WakePrompt`; additional
-//! cross-module utilities can land here without polluting the
-//! handler/scheduler modules.
+//! this just holds [`wake_prompt`]; additional cross-module utilities
+//! can land here without polluting the handler/scheduler modules.
 
 /// Build the tmux nudge text used by the wake scheduler and direct
-/// dispatch paths. The Korean strings are reproduced verbatim from Go
-/// so managed instructions and the runtime prompt stay byte-identical
-/// across both binaries during the migration.
+/// dispatch paths.
 #[must_use]
 pub fn wake_prompt(sender: &str, fresh: bool) -> String {
     let base = format!(

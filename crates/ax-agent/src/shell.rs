@@ -1,5 +1,5 @@
-//! POSIX shell quoting. Mirrors the Go `shellQuote` helper used when
-//! building user-visible command strings (e.g. for display or for
+//! POSIX shell quoting used when building user-visible command
+//! strings (e.g. for display or for
 //! `tmux new-session -c <dir> sh -c '<quoted command>'`).
 
 /// Wrap `value` in POSIX single quotes, escaping any interior quotes via
@@ -39,7 +39,7 @@ mod tests {
 
     #[test]
     fn embedded_single_quotes_are_escaped() {
-        // Go's implementation produces `'it'\''s'` for `it's`.
+        // Expected encoding of `it's` is `'it'\''s'`.
         assert_eq!(shell_quote("it's"), r"'it'\''s'");
     }
 }

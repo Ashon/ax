@@ -1,5 +1,4 @@
-//! .mcp.json merge/write/remove behaviour pinned against the Go
-//! workspace package.
+//! .mcp.json merge/write/remove behaviour for the workspace package.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -50,7 +49,7 @@ fn write_creates_ax_entry_when_file_is_absent() {
             "/etc/ax/config.yaml",
         ]
     );
-    // Trailing newline per Go's behaviour.
+    // Trailing newline is part of the expected output.
     assert!(fs::read(&path).unwrap().ends_with(b"\n"));
 }
 

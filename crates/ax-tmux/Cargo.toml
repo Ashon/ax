@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Thin tmux shell-out wrappers for ax (Rust port of internal/tmux)"
+description = "Thin tmux shell-out wrappers for ax"
 
 [dependencies]
 thiserror.workspace = true

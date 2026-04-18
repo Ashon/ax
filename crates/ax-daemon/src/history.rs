@@ -1,9 +1,8 @@
-//! Append-only message history with a JSONL backing file. Mirrors
-//! `internal/daemon/history.go` — each call to [`History::append`]
-//! writes one line to `message_history.jsonl` in the daemon state
-//! dir, keeping the last `max_size` entries in memory for `Recent` /
-//! `RecentMatching` queries (powering `list_workspaces` status
-//! snippets and task-observability checks).
+//! Append-only message history with a JSONL backing file. Each call
+//! to [`History::append`] writes one line to `message_history.jsonl`
+//! in the daemon state dir, keeping the last `max_size` entries in
+//! memory for `Recent` / `RecentMatching` queries (powering
+//! `list_workspaces` status snippets and task-observability checks).
 
 use std::collections::VecDeque;
 use std::io::Write;
@@ -17,8 +16,7 @@ use ax_proto::types::Message;
 
 pub(crate) const HISTORY_FILE: &str = "message_history.jsonl";
 
-/// Default ring-buffer capacity matching Go's production daemon
-/// (`internal/daemon/daemon.go` passes 500 to `NewHistory`).
+/// Default ring-buffer capacity used by production daemon wiring.
 pub const DEFAULT_HISTORY_MAX_SIZE: usize = 500;
 
 #[derive(Debug, thiserror::Error)]
@@ -75,7 +73,7 @@ impl History {
 
     /// Open a persistent history under `state_dir`. Missing file is
     /// treated as an empty buffer. On-disk lines beyond `max_size` are
-    /// discarded from the in-memory tail on load, matching Go.
+    /// discarded from the in-memory tail on load.
     pub fn load(state_dir: &Path, max_size: usize) -> Result<Arc<Self>, HistoryError> {
         let path = state_dir.join(HISTORY_FILE);
         let max_size = max_size.max(1);

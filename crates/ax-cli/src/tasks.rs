@@ -1,7 +1,7 @@
-//! `ax tasks` — port of cmd/tasks.go. Implements the list /
-//! show / cancel / remove / recover / intervene / retry / activity
-//! subcommands against the sync [`DaemonClient`]. Shares the task
-//! summary + workspace status helpers with [`crate::status`].
+//! `ax tasks` — list / show / cancel / remove / recover / intervene /
+//! retry / activity subcommands against the sync [`DaemonClient`].
+//! Shares the task summary + workspace status helpers with
+//! [`crate::status`].
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -908,7 +908,7 @@ fn read_history_file(path: &Path, max_entries: usize) -> Vec<HistoryEntry> {
     entries
 }
 
-/// Shared by parsers: accept Go's `--status` values.
+/// Shared by parsers: accept the historical `--status` values.
 pub(crate) fn parse_task_status_flag(raw: &str) -> Result<Option<TaskStatus>, TasksError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {

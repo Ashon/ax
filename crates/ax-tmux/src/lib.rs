@@ -1,13 +1,11 @@
 //! Thin synchronous wrappers around the `tmux` CLI.
 //!
-//! Rust port of `internal/tmux`. Every entry point shells out to `tmux` via
-//! [`std::process::Command`]; no tmux library binding. The daemon binary
-//! (forthcoming) is free to wrap the blocking calls in
-//! `tokio::task::spawn_blocking` when it needs async.
+//! Every entry point shells out to `tmux` via
+//! [`std::process::Command`]; no tmux library binding. Async callers
+//! wrap the blocking calls in `tokio::task::spawn_blocking`.
 //!
-//! Session-name conventions match Go exactly: workspace names are ASCII
-//! with `.` → `_` substitution and prefixed with `ax-`, so an ax daemon
-//! running in Rust sees the same tmux namespace as the one running in Go.
+//! Session-name convention: workspace names are ASCII with `.` → `_`
+//! substitution and prefixed with `ax-`.
 
 #![forbid(unsafe_code)]
 

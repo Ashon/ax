@@ -1,8 +1,8 @@
-//! Path-derivation parity with the Go implementation.
+//! Path-derivation golden tests.
 //!
-//! Key constants (sha1 truncation length, directory layout) are exercised
-//! against known-good values so the Rust daemon and the Go daemon agree on
-//! where any given workspace's codex or claude state lives.
+//! Key constants (sha1 truncation length, directory layout) are
+//! exercised against known-good values so the daemon and client agree
+//! on where any given workspace's codex or claude state lives.
 
 use std::path::PathBuf;
 
@@ -25,9 +25,9 @@ fn instruction_file_returns_per_runtime_filenames() {
 }
 
 #[test]
-fn codex_home_key_matches_go_truncated_sha1() {
+fn codex_home_key_uses_truncated_sha1() {
     // Ground truth sha1 of "/tmp/proj": 3a55d7b82e11b3c0ba8e…
-    // The Go code keeps the first 6 bytes (12 hex chars) and prepends
+    // The key keeps the first 6 bytes (12 hex chars) and prepends
     // the workspace name. We don't hardcode the hex here to avoid
     // coupling to a specific sha1 crate's output; instead we assert
     // structural properties + stability.
@@ -86,8 +86,8 @@ fn claude_project_path_encodes_cwd_with_dashes() {
             std::env::remove_var("HOME");
         }
     }
-    // Exact encoding Go produces for that cwd -- also the key ax-usage
-    // tests against when discovering transcripts.
+    // Expected encoding for that cwd -- also the key ax-usage tests
+    // against when discovering transcripts.
     assert_eq!(
         path.file_name().unwrap().to_str().unwrap(),
         "-Users-ashon-git-github-ashon-ax"

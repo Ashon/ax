@@ -12,11 +12,10 @@ use crate::sessions::session_name;
 use crate::TmuxError;
 
 /// Trailing characters that indicate a pane is sitting at an interactive
-/// prompt. Matches the list used by `tmux.IsIdle` in Go.
+/// prompt — the idle-detector treats any of these as "ready for input".
 const IDLE_PROMPT_SUFFIXES: [&str; 5] = ["❯", "> ", "$ ", "# ", "claude>"];
 
-/// Session listing entry emitted by [`list_sessions`]. Mirrors
-/// `tmux.SessionInfo`.
+/// Session listing entry emitted by [`list_sessions`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionInfo {
     pub name: String,
@@ -55,9 +54,8 @@ pub fn create_session(
     Ok(())
 }
 
-/// `tmux new-session … sh -c <command>` with `remain-on-exit` on so the
-/// pane stays visible when the command exits (matches
-/// `CreateSessionWithCommand` in Go).
+/// `tmux new-session … sh -c <command>` with `remain-on-exit` on so
+/// the pane stays visible when the command exits.
 pub fn create_session_with_command(
     workspace: &str,
     dir: &str,
@@ -99,8 +97,7 @@ pub fn create_ephemeral_session(
     Ok(())
 }
 
-/// Long-lived session running `argv` with `remain-on-exit`. Equivalent to
-/// `CreateSessionWithArgs` in Go.
+/// Long-lived session running `argv` with `remain-on-exit`.
 pub fn create_session_with_args(
     workspace: &str,
     dir: &str,
@@ -286,7 +283,7 @@ fn set_remain_on_exit(session_name: &str) -> Result<(), TmuxError> {
     match run_combined("set-option remain-on-exit", &args) {
         Ok(_) => Ok(()),
         Err(e) => {
-            // Best-effort cleanup matches the Go helper.
+            // Best-effort cleanup so a partially-created session doesn't linger.
             let _ = Command::new("tmux")
                 .args(["kill-session", "-t", session_name])
                 .status();
@@ -316,7 +313,7 @@ fn command_with_env(argv: &[&str], env: &BTreeMap<String, String>) -> Vec<String
     out
 }
 
-/// Run tmux with `args` and `output()` semantics matching Go's
+/// Run tmux with `args` and `output()` semantics matching
 /// `CombinedOutput` — both stdout and stderr merged into the error body.
 fn run_combined<S: AsRef<str>>(op: &str, args: &[S]) -> Result<Vec<u8>, TmuxError> {
     let output = Command::new("tmux")
@@ -343,7 +340,7 @@ pub(crate) fn parse_list_sessions_result(output: &Output) -> Result<Vec<SessionI
     if !output.status.success() {
         let combined = format!("{}{}", stdout, String::from_utf8_lossy(&output.stderr));
         // "no server running" is how tmux signals an empty-but-healthy
-        // state; translate to an empty list like Go does.
+        // state; surface it as an empty list rather than an error.
         if combined.contains("no server running") {
             return Ok(Vec::new());
         }
@@ -355,9 +352,9 @@ pub(crate) fn parse_list_sessions_result(output: &Output) -> Result<Vec<SessionI
     parse_list_sessions_stdout(&stdout)
 }
 
-// `Result` return type mirrors the Go caller signature so future parse
-// failures can be surfaced without an API break. Clippy flags it as
-// unnecessary today because the current body always succeeds.
+// `Result` return type is preserved so future parse failures can be
+// surfaced without an API break. Clippy flags it as unnecessary today
+// because the current body always succeeds.
 #[allow(clippy::unnecessary_wraps)]
 pub fn parse_list_sessions_stdout(stdout: &str) -> Result<Vec<SessionInfo>, TmuxError> {
     use crate::sessions::decode_workspace_name;

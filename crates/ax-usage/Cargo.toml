@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Transcript parsing and usage aggregation (Rust port of internal/usage)"
+description = "Transcript parsing and usage aggregation for ax"
 
 [dependencies]
 ax-proto = { path = "../ax-proto" }

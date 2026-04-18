@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Runtime identity + path helpers for ax agent bootstrap (Rust port of internal/agent)"
+description = "Runtime identity + path helpers for ax agent bootstrap"
 
 [dependencies]
 ax-config = { path = "../ax-config" }

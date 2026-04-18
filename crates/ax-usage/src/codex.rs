@@ -10,10 +10,8 @@
 //!
 //! A populated `token_count` event carries both `total_token_usage`
 //! (cumulative since session start) and `last_token_usage` (per-turn
-//! delta); we treat the latter as the turn's tokens because the Go
-//! aggregator semantics expect per-turn deltas, not cumulative snapshots.
-//!
-//! Mirrors `internal/usage/codex.go`.
+//! delta); we treat the latter as the turn's tokens because the
+//! aggregator expects per-turn deltas, not cumulative snapshots.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

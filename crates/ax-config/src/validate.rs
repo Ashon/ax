@@ -1,9 +1,9 @@
 //! Structural validation for the ax config tree.
 //!
-//! Mirrors `internal/config/validate.go`. `validate_tree` does a pre-pass
-//! over the entire project tree so duplicate child prefixes, duplicate
-//! workspace directories, and reserved-name collisions with orchestrator
-//! sessions fail loudly before `Config::load` tries to merge anything.
+//! `validate_tree` does a pre-pass over the entire project tree so
+//! duplicate child prefixes, duplicate workspace directories, and
+//! reserved-name collisions with orchestrator sessions fail loudly
+//! before `Config::load` tries to merge anything.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -255,8 +255,8 @@ fn validate_recursive(
         if let Err(err) = validate_recursive(&child_cfg_path, &claim_prefix, depth + 1, seen, state)
         {
             if is_missing_file(&err) {
-                // Roll back claims — matches Go's behaviour for stale
-                // descendents.
+                // Stale descendent — roll back claims and keep validating
+                // the rest of the tree.
                 state.child_prefixes.remove(&claim_prefix);
                 state.orchestrators.remove(&orch_claim.session_name);
                 continue;
@@ -383,7 +383,7 @@ fn absolutize(path: &Path) -> Result<PathBuf, TreeError> {
 
 fn load_validated_config(abs: &Path) -> Result<Config, TreeError> {
     let mut cfg = Config::read_local(abs)?;
-    // validate pass mirrors Go's loadLocalConfig: initialize + overlay +
+    // validate pass mirrors loadLocalConfig: initialize + overlay +
     // normalize so validation sees the same merged view Config::load will.
     if cfg.project.is_empty() {
         let root = crate::paths::ConfigRoot::from_config_path(abs).0;

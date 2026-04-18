@@ -1,5 +1,4 @@
-//! Usage-domain types ported from `internal/usage/usage.go` and
-//! `internal/usage/trend.go`. These appear inside the daemon's
+//! Usage-domain types. These appear inside the daemon's
 //! `UsageTrendsResponse` and on-disk trend snapshots.
 
 use std::ops::{Add, Sub};
@@ -7,9 +6,8 @@ use std::ops::{Add, Sub};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// Four-dimension token aggregate mirroring Go's `usage.Tokens`. Implements
-/// `Add` / `Sub` so downstream callers can express the same arithmetic the
-/// Go code does (`a.Add(b)` → `a + b`).
+/// Four-dimension token aggregate. Implements `Add` / `Sub` so
+/// downstream callers can sum or diff token buckets inline.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Tokens {
     pub input: i64,

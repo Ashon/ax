@@ -1,7 +1,7 @@
-//! `ax workspace` — port of cmd/workspace.go. Subcommands:
-//! `create`, `destroy`, `list`, `attach`, `interrupt`. The `list`
-//! view mirrors `buildWorkspaceListRows` + the experimental
-//! reconfigure state annotations so stale terminals still parse.
+//! `ax workspace` — `create`, `destroy`, `list`, `attach`,
+//! `interrupt` subcommands. The `list` view renders the workspace
+//! rows plus experimental reconfigure-state annotations so stale
+//! terminals still parse.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;

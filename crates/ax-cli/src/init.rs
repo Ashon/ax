@@ -1,13 +1,13 @@
-//! `ax-rs init` — port of `cmd/init_cmd.go`. Writes a minimal
-//! `.ax/config.yaml`, registers the current directory as a child
-//! of any ancestor/global config, refreshes the orchestrator tree,
-//! adds `.mcp.json` to `.gitignore`, and optionally launches a
-//! setup agent (Claude or Codex) to flesh out the workspace list.
+//! `ax init` — writes a minimal `.ax/config.yaml`, registers the
+//! current directory as a child of any ancestor/global config,
+//! refreshes the orchestrator tree, adds `.mcp.json` to `.gitignore`,
+//! and optionally launches a setup agent (Claude or Codex) to flesh
+//! out the workspace list.
 //!
-//! The Go version rendered a Bubbletea spinner while streaming the
-//! Claude stream-json output. This port keeps the stream parsing so
-//! progress text still shows up, but drops the animated spinner — the
-//! intent is to let `ax init` stay usable from a terminal without
+//! While streaming the setup agent's output we keep the stream-JSON
+//! parsing so progress text still shows up, but deliberately skip any
+//! animated spinner — the intent is to let `ax init` stay usable from a
+//! terminal without
 //! dragging in a TUI library. The full animated UX can come back
 //! when the watch TUI ports to ratatui.
 //!
@@ -617,9 +617,8 @@ fn add_child_to_config(
 
 fn pathdiff_rel(base: &Path, path: &Path) -> Option<PathBuf> {
     // Minimal path_diff: if path starts with base, strip it; otherwise return
-    // path as-is so callers can fall back to the absolute form. This matches
-    // the Go `filepath.Rel` behaviour in the common subpath case that
-    // `ax init` relies on.
+    // path as-is so callers can fall back to the absolute form. Covers the
+    // common subpath case that `ax init` relies on.
     let base_comps: Vec<_> = base.components().collect();
     let path_comps: Vec<_> = path.components().collect();
     if path_comps.len() < base_comps.len() {

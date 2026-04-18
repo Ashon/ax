@@ -1,9 +1,7 @@
 //! Async Unix-socket daemon that routes envelopes between workspace
-//! agents. MVP slice: `register` / `unregister` / `send_message` /
-//! `broadcast` / `read_messages` / `list_workspaces` / `set_status`. No
-//! persistence, task store, memory, wake scheduler, or session manager
-//! yet — those land in later slices as we work through the Go
-//! `internal/daemon` surface.
+//! agents. Covers registry, message queue + history, durable memory,
+//! task store, wake scheduler, session manager, and team-reconfigure
+//! controller.
 
 #![forbid(unsafe_code)]
 

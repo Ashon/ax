@@ -1,10 +1,8 @@
-//! Live orchestration harness — Rust port of the Go-era
-//! `e2e/orchestration_codex_live_test.go`. The helpers in this
-//! module own every side-effect the live e2e takes (building ax,
-//! copying a fixture, seeding codex auth, booting the daemon,
-//! driving a real tmux session), so individual scenarios stay
-//! declarative: "use this fixture, send this prompt, pass when
-//! validate.sh exits 0".
+//! Live orchestration harness. The helpers in this module own every
+//! side-effect the live e2e takes (building ax, copying a fixture,
+//! seeding codex auth, booting the daemon, driving a real tmux
+//! session), so individual scenarios stay declarative: "use this
+//! fixture, send this prompt, pass when validate.sh exits 0".
 //!
 //! Everything is gated by `AX_E2E_LIVE=1` at the test entry point.
 //! The harness itself is pure — `cargo test` still compiles it, but
@@ -461,9 +459,9 @@ pub fn run_validate_script(sandbox: &Sandbox, script_name: &str) -> Result<(), H
 
 /// Pick the L1-style "settled success" predicate: validate.sh
 /// passes AND the orchestrator pane has been idle continuously for
-/// `settle_window`. The 15s settle window matches the Go harness
-/// so multi-agent teams don't report success while a worker still
-/// has a response in-flight.
+/// `settle_window`. The 15s settle window keeps multi-agent teams
+/// from reporting success while a worker still has a response
+/// in-flight.
 pub fn wait_for_settled_success<F>(
     timeout: Duration,
     poll_interval: Duration,

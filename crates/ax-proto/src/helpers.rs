@@ -1,4 +1,4 @@
-//! Serde helpers that reproduce Go's `json:",omitempty"` behaviour for
+//! Serde helpers that reproduce `json:",omitempty"` behaviour for
 //! concrete field types. Because serde has no generic "skip if zero" we
 //! expose one predicate per primitive used in the protocol.
 

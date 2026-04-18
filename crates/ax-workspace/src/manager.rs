@@ -1,8 +1,5 @@
-//! Workspace artifact + tmux lifecycle management.
-//!
-//! Mirrors the `EnsureArtifacts`, `CleanupWorkspaceState`, and
-//! `Manager::{Create,Restart,Destroy}` pieces of
-//! `internal/workspace/workspace.go`.
+//! Workspace artifact + tmux lifecycle management — `ensure_artifacts`,
+//! `cleanup_workspace_state`, and `Manager::{create,restart,destroy}`.
 
 use std::collections::BTreeMap;
 use std::fs;

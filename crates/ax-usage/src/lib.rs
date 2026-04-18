@@ -1,12 +1,11 @@
 //! Transcript parsing and usage aggregation.
 //!
-//! Rust port of `internal/usage`. Scope lands in slices:
-//! 1. Claude transcript line parser. ✅
-//! 2. Aggregator (request-level dedup + cumulative totals). ✅
-//! 3. Codex session parser. ✅
-//! 4. History scan (single-binding, Claude-only). ✅
-//! 5. Multi-binding attribution + Codex integration.
-//! 6. Trend query (public `WorkspaceTrend` shape).
+//! Surface:
+//! - Claude transcript line parser.
+//! - Aggregator (request-level dedup + cumulative totals).
+//! - Codex session parser.
+//! - History scan (Claude + Codex) with multi-binding attribution.
+//! - Trend query returning the public `WorkspaceTrend` shape.
 
 #![forbid(unsafe_code)]
 

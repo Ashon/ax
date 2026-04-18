@@ -4,7 +4,7 @@
 //! [`Aggregator::ingest`] takes a [`ParsedRecord`] and folds it into the
 //! running totals, deduping assistant requests by their `requestKey()` so
 //! revision edits to the same turn update — not double-count — the
-//! cumulative numbers. Port of `internal/usage/aggregator.go`.
+//! cumulative numbers.
 
 use std::collections::BTreeMap;
 
@@ -14,9 +14,9 @@ use ax_proto::usage::{MCPProxyMetrics, ModelTotals, Tokens};
 
 use crate::parse::{parse_line, ParseError, ParsedRecord};
 
-/// Snapshot of the aggregator's state. Mirrors Go's `WorkspaceUsage`; kept
-/// inside ax-usage for now because the daemon wire representation for
-/// live per-workspace usage hasn't been finalised.
+/// Snapshot of the aggregator's state. Kept inside ax-usage for now
+/// because the daemon wire representation for live per-workspace
+/// usage hasn't been finalised.
 #[derive(Debug, Clone, Default)]
 pub struct UsageSnapshot {
     pub session_id: String,

@@ -3,10 +3,8 @@ use serde_json::value::RawValue;
 
 /// Message types carried in the `type` field of an [`Envelope`].
 ///
-/// String values must match the constants in `internal/daemon/protocol.go`
-/// verbatim; any drift breaks Go ↔ Rust wire compatibility during the
-/// migration. The variants are listed in the same order as the Go file for
-/// easier side-by-side review.
+/// String values are part of the daemon's stable on-wire protocol and
+/// are pinned by the golden fixtures under `tests/fixtures/`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MessageType {
     #[serde(rename = "register")]

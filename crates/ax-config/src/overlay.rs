@@ -1,6 +1,5 @@
 //! Machine-managed overlay merged on top of the user-authored
 //! `config.yaml` when the experimental team-reconfigure feature is on.
-//! Mirrors `internal/config/managed_overlay.go`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -62,9 +61,9 @@ pub struct ManagedChildPatch {
     pub prefix: Option<String>,
 }
 
-/// Compute the path where the overlay for `config_path` lives. Matches
-/// `ManagedOverlayPath` in Go: always under `<project>/.ax/` regardless
-/// of whether the user picked the legacy flat layout.
+/// Compute the path where the overlay for `config_path` lives —
+/// always under `<project>/.ax/` regardless of whether the user
+/// picked the legacy flat layout.
 #[must_use]
 pub fn managed_overlay_path(config_path: impl AsRef<Path>) -> PathBuf {
     let abs = absolutize(config_path.as_ref());
@@ -76,7 +75,7 @@ pub fn managed_overlay_path(config_path: impl AsRef<Path>) -> PathBuf {
 
 impl ManagedOverlay {
     /// Read the overlay adjacent to `config_path`. Missing file is
-    /// silently returned as the empty overlay, matching Go.
+    /// silently returned as the empty overlay.
     pub fn load_for(config_path: impl AsRef<Path>) -> Result<Self, LoadError> {
         let path = managed_overlay_path(config_path);
         let data = match std::fs::read_to_string(&path) {
@@ -112,9 +111,9 @@ impl ManagedOverlay {
         })
     }
 
-    /// Patch `cfg` in place, matching `applyManagedOverlay` in Go.
-    /// Fields set to `Some(_)` win; `delete: true` or `enabled: Some(false)`
-    /// removes the entry entirely.
+    /// Patch `cfg` in place. Fields set to `Some(_)` win;
+    /// `delete: true` or `enabled: Some(false)` removes the entry
+    /// entirely.
     pub fn apply_to(&self, cfg: &mut Config) {
         if let Some(runtime) = &self.policies.orchestrator_runtime {
             cfg.orchestrator_runtime.clone_from(runtime);

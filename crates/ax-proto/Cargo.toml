@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Wire protocol types for the ax daemon (Rust port)"
+description = "Wire protocol types for the ax daemon"
 
 [dependencies]
 chrono.workspace = true

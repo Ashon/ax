@@ -1,5 +1,5 @@
 //! Per-workspace FIFO message queue with optional on-disk JSON
-//! snapshot. Mirrors `internal/daemon/msgqueue.go`:
+//! snapshot:
 //!
 //!   - In-memory `BTreeMap<workspace, VecDeque<Message>>` for
 //!     `send_message` → (push if connected) → `read_messages` drain.
@@ -7,9 +7,9 @@
 //!     entries are dropped when the cap is exceeded.
 //!   - Optional persistence via `<state>/queue.json`. Writes are
 //!     batched by the background flusher spawned from
-//!     [`MessageQueue::spawn_flusher`] (100ms interval, matching Go's
-//!     `defaultQueueFlushInterval`), so a perpetually-dirty queue
-//!     does not issue an fs write on every enqueue.
+//!     [`MessageQueue::spawn_flusher`] (100ms interval) so a
+//!     perpetually-dirty queue does not issue an fs write on every
+//!     enqueue.
 //!   - `remove_task_messages` / `has_task_message` for task-tagged
 //!     cleanup during cancel/remove/intervene.
 
@@ -84,7 +84,7 @@ impl MessageQueue {
         let by_workspace = match std::fs::read(&path) {
             Ok(bytes) if bytes.is_empty() => BTreeMap::new(),
             Ok(bytes) => {
-                // Go-era snapshots serialise workspaces with empty
+                // Legacy snapshots serialise workspaces with empty
                 // queues as JSON `null` instead of `[]`. Accept both
                 // shapes and treat null as "no pending messages".
                 let raw: BTreeMap<String, Option<VecDeque<Message>>> =
@@ -118,10 +118,10 @@ impl MessageQueue {
     }
 
     /// Append `msg` to `msg.to`'s inbox. Stamps a fresh id +
-    /// timestamp if they were left blank, matching Go's enqueue path,
-    /// and returns the finalised message so callers can forward the
-    /// same shape in push envelopes. Dirty bit is toggled so the
-    /// next flush picks up the change.
+    /// timestamp if they were left blank, and returns the finalised
+    /// message so callers can forward the same shape in push
+    /// envelopes. Dirty bit is toggled so the next flush picks up
+    /// the change.
     pub fn enqueue(&self, mut msg: Message) -> Message {
         if msg.id.is_empty() {
             msg.id = format!("msg-{}", Uuid::new_v4());
@@ -151,7 +151,7 @@ impl MessageQueue {
 
     /// Pop up to `limit` messages destined for `workspace`,
     /// optionally filtered by sender. `limit <= 0` is treated as the
-    /// Go default of 10 at the handler layer; this method takes an
+    /// default of 10 at the handler layer; this method takes an
     /// already-clamped count.
     pub fn dequeue(&self, workspace: &str, limit: usize, from: Option<&str>) -> Vec<Message> {
         let mut inner = self.inner.lock().expect("queue poisoned");
@@ -223,7 +223,7 @@ impl MessageQueue {
     /// Write the dirty snapshot to disk if the queue has a persistent
     /// path. Returns `Ok(())` when nothing needed to be written or
     /// when the write succeeded. On write failure the dirty flag is
-    /// re-set so the next flush retries, matching Go.
+    /// re-set so the next flush retries.
     pub fn flush(&self) -> Result<(), QueueError> {
         let Some(path) = self.file_path.as_ref() else {
             return Ok(());

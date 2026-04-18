@@ -169,7 +169,6 @@ ax/
 
 | 도구 | 버전 | 용도 |
 |------|------|------|
-| **Go** | 1.26.2+ | 빌드/테스트 |
 | **tmux** | 3.x+ | 세션 관리 |
 | **claude** (CLI) | 최신 | Claude 런타임 에이전트 |
 
@@ -207,36 +206,38 @@ cd /path/to/your/project
 ### Makefile 타겟
 
 ```bash
-make build      # 바이너리 빌드 (ldflags로 버전 주입)
-make test       # go test ./... 실행
-make clean      # 바이너리 삭제
-make snapshot   # goreleaser 스냅샷 (멀티 플랫폼)
+make build      # cargo build --release --bin ax
+make install    # ~/.cargo/bin/ax 에 설치 + ad-hoc codesign
+make test       # cargo test
+make clean      # 바이너리 + cargo clean
+make release {patch|minor|major|dev}   # git tag 기반 릴리스
 ```
 
-### 빌드 플래그
+### 직접 빌드
 
 ```bash
-go build -ldflags "-s -w -X github.com/ashon/ax/cmd.version=$(VERSION)" -o ax .
+cargo build --release --bin ax
+cargo build --workspace
 ```
 
-- `-s -w`: 심볼/디버그 정보 제거 (바이너리 크기 축소)
-- `-X`: `cmd.version` 변수에 버전 문자열 주입
+릴리스 프로파일은 `Cargo.toml`에서 thin LTO + single codegen unit으로 고정되어 있습니다.
 
 ### 테스트
 
 ```bash
-go test ./...                          # 전체 테스트
-go test ./internal/config/...          # config 패키지만
-go test ./internal/daemon/...          # daemon 패키지만
-go test -v -run TestLoadMerges ./...   # 특정 테스트
+cargo test --workspace                          # 전체 테스트
+cargo test -p ax-config                         # config 크레이트만
+cargo test -p ax-daemon                         # daemon 크레이트만
+cargo test -p ax-daemon task_store::tests::refresh   # 특정 테스트
 ```
 
-테스트 커버리지:
+테스트 커버리지(대표):
 
-- `internal/config/config_test.go`: 재귀적 자식 로딩, 순환 참조 방지
-- `internal/daemon/daemon_test.go`: 프로토콜 직렬화, 레지스트리, 메시지 큐, 공유 값
-- `internal/daemon/taskstore_test.go`: task 기본값, 권한, 상태 전이, 중복 no-op 로그 억제
-- `internal/daemon/task_observability_test.go`: stale/divergence/wake 상태 계산
+- `crates/ax-config/tests/*`, `crates/ax-config/src/tree.rs` 내 `#[cfg(test)]`: 재귀적 자식 로딩, 순환 참조 방지
+- `crates/ax-daemon/src/queue.rs`, `history.rs`, `shared_values.rs` 내 `#[cfg(test)]`: 프로토콜 직렬화, 레지스트리, 메시지 큐, 공유 값
+- `crates/ax-daemon/src/task_store.rs`: task 기본값, 권한, 상태 전이, 중복 no-op 로그 억제
+- `crates/ax-daemon/src/wake_scheduler.rs`, `task_helpers.rs`: stale/divergence/wake 상태 계산
+- `crates/ax-proto/tests/`: wire 포맷 golden JSON fixture roundtrip
 
 ---
 
@@ -288,40 +289,48 @@ children:                            # 자식 프로젝트 (계층 구조)
     prefix: sub                      # 워크스페이스 이름 접두사 (기본: 키 이름)
 ```
 
-### Config 구조체 (`internal/config/config.go`)
+### Config 구조체 (`crates/ax-config/src/schema.rs`)
 
-```go
-type Config struct {
-    Project             string               `yaml:"project"`
-    OrchestratorRuntime string               `yaml:"orchestrator_runtime,omitempty"`
-    Children            map[string]Child     `yaml:"children,omitempty"`
-    Workspaces          map[string]Workspace `yaml:"workspaces"`
+```rust
+pub struct Config {
+    pub project: String,
+    pub orchestrator_runtime: String,
+    pub disable_root_orchestrator: bool,
+    pub experimental_mcp_team_reconfigure: bool,
+    pub codex_model_reasoning_effort: String,
+    pub idle_timeout_minutes: i32,
+    pub max_orchestrator_depth: u32,
+    pub max_children_per_node: u32,
+    pub max_concurrent_agents: u32,
+    pub children: BTreeMap<String, Child>,
+    pub workspaces: BTreeMap<String, Workspace>,
 }
 
-type Workspace struct {
-    Dir          string            `yaml:"dir"`
-    Description  string            `yaml:"description,omitempty"`
-    Shell        string            `yaml:"shell,omitempty"`
-    Runtime      string            `yaml:"runtime,omitempty"`
-    Agent        string            `yaml:"agent,omitempty"`
-    Instructions string            `yaml:"instructions,omitempty"`
-    Env          map[string]string `yaml:"env,omitempty"`
+pub struct Workspace {
+    pub dir: String,
+    pub description: String,
+    pub shell: String,
+    pub runtime: String,
+    pub codex_model_reasoning_effort: String,
+    pub agent: String,
+    pub instructions: String,
+    pub env: BTreeMap<String, String>,
 }
 
-type Child struct {
-    Dir    string `yaml:"dir"`
-    Prefix string `yaml:"prefix,omitempty"`
+pub struct Child {
+    pub dir: String,
+    pub prefix: String,
 }
 ```
 
 ### 설정 로딩 과정
 
-1. `config.FindConfigFile()`: 현재 디렉터리부터 위로 올라가며 가장 상위 조상의 config를 찾음
-2. `config.Load(path)`: 재귀적으로 자식 config를 로드하여 워크스페이스를 병합
+1. `find_config_file()`: 현재 디렉터리부터 위로 올라가며 가장 상위 조상의 config를 찾음
+2. `Config::load(path)`: 재귀적으로 자식 config를 로드하여 워크스페이스를 병합
    - 자식 워크스페이스 이름은 `{prefix}.{name}` 형태로 병합
    - 순환 참조 감지 시 에러 반환
    - 누락된 자식은 경고 후 스킵
-3. `config.LoadTree(path)`: 병합 대신 계층 구조를 보존한 `ProjectNode` 트리 반환
+3. `load_tree(path)`: 병합 대신 계층 구조를 보존한 `ProjectNode` 트리 반환
 
 ---
 
@@ -439,7 +448,7 @@ type Child struct {
 
 ## MCP 도구
 
-에이전트가 사용할 수 있는 MCP 도구 목록이다. `internal/mcpserver/tools.go`에서 등록되며 현재 25개이다.
+에이전트가 사용할 수 있는 MCP 도구 목록이다. `crates/ax-mcp-server/src/server.rs`에서 등록된다.
 
 ### 통신 도구
 
@@ -507,25 +516,29 @@ type Child struct {
 
 ### TaskStore / WakeScheduler
 
-- `TaskStore` (`internal/daemon/taskstore.go`)는 daemon 상태 디렉터리의 `tasks.json`에 task를 저장한다. `Create`/`Update`/`Refresh`는 변경 사항을 즉시 persist하고, `Get`/`List`/`Snapshot`은 방어적 복사본을 반환한다.
-- `TaskStore.Update`는 assignee/creator 권한, monotonic status transition, assignee 전용 `result` 쓰기, 중복 no-op 로그 억제를 함께 검증한다.
-- `WakeScheduler` (`internal/daemon/wakescheduler.go`)는 workspace별 pending wake를 추적한다. `send_message`가 메시지를 enqueue하면 scheduler entry가 등록되고, `read_messages`로 inbox가 비워지면 cancel된다.
-- `WakeScheduler.State`는 top/diagnostics에서 볼 수 있는 현재 wake 재시도 상태(`sender`, `attempts`, `next_retry`)를 노출한다.
+- `TaskStore` (`crates/ax-daemon/src/task_store.rs`)는 daemon 상태 디렉터리의 `tasks.json`에 task를 저장한다. `create`/`update`/`refresh`는 변경 사항을 즉시 persist하고, `get`/`list`/`snapshot`은 방어적 복사본을 반환한다.
+- `TaskStore::update`는 assignee/creator 권한, monotonic status transition, assignee 전용 `result` 쓰기, 중복 no-op 로그 억제를 함께 검증한다.
+- `WakeScheduler` (`crates/ax-daemon/src/wake_scheduler.rs`)는 workspace별 pending wake를 추적한다. `send_message`가 메시지를 enqueue하면 scheduler entry가 등록되고, `read_messages`로 inbox가 비워지면 cancel된다.
+- `WakeScheduler::state`는 top/diagnostics에서 볼 수 있는 현재 wake 재시도 상태(`sender`, `attempts`, `next_retry`)를 노출한다.
 
 ---
 
 ## 에이전트 런타임
 
-### Runtime 인터페이스 (`internal/agent/runtime.go`)
+### Runtime enum (`crates/ax-agent/src/runtime.rs`)
 
-```go
-type Runtime interface {
-    Name() string
-    InstructionFile() string
-    Launch(dir, workspace, socketPath, axBin, configPath string, extraArgs []string) error
-    UserCommand(dir, workspace, socketPath, axBin, configPath string, extraArgs []string) (string, error)
+```rust
+pub enum Runtime { Claude, Codex }
+
+impl Runtime {
+    pub fn as_str(self) -> &'static str;           // "claude" | "codex"
+    pub fn normalize(name: &str) -> Option<Self>;  // 입력 문자열 정규화
+    pub fn instruction_file(self) -> &'static str; // "CLAUDE.md" | "AGENTS.md"
 }
 ```
+
+런타임 실행/세션 부트스트랩은 `crates/ax-agent/src/launch.rs`의 `run_with_options`가 담당하며,
+Codex 전용 `CODEX_HOME` 격리는 `crates/ax-agent/src/codex.rs`에서 관리한다.
 
 ### 지원 런타임
 
@@ -546,10 +559,10 @@ type Runtime interface {
 
 ### 새 런타임 추가 방법
 
-1. `internal/agent/` 에 새 런타임 구현 파일 추가
-2. `Runtime` 인터페이스 구현
-3. `runtime.go`의 `Get()` 함수에 케이스 추가
-4. `supportedRuntimeNames` 슬라이스에 이름 추가
+1. `crates/ax-agent/src/` 에 새 런타임 구현 파일 추가
+2. `Runtime` enum에 variant 추가 + `as_str`/`normalize`/`instruction_file` 케이스 등록
+3. `SUPPORTED_RUNTIMES` 배열에 이름 추가
+4. `crates/ax-agent/src/launch.rs`의 실행 경로에서 새 런타임을 디스패치하도록 갱신
 
 ---
 
@@ -606,18 +619,20 @@ orchestrator (루트)
     └── 직접 관리: web.frontend
 ```
 
-### ProjectNode (`internal/config/tree.go`)
+### ProjectNode (`crates/ax-config/src/tree.rs`)
 
-`LoadTree()`는 계층 구조를 보존한 트리를 반환한다:
+`Config::load_tree()`는 계층 구조를 보존한 트리를 반환한다:
 
-```go
-type ProjectNode struct {
-    Name                string
-    Prefix              string          // 완전한 접두사
-    Dir                 string
-    OrchestratorRuntime string
-    Workspaces          []WorkspaceRef  // 이 프로젝트의 워크스페이스
-    Children            []*ProjectNode  // 자식 프로젝트
+```rust
+pub struct ProjectNode {
+    pub name: String,
+    pub alias: String,                       // 부모 children 맵의 마운트 별칭
+    pub prefix: String,                      // 병합 시 사용할 완전 접두사(e.g. "team.sub")
+    pub dir: PathBuf,
+    pub orchestrator_runtime: String,
+    pub disable_root_orchestrator: bool,
+    pub workspaces: Vec<WorkspaceRef>,       // 이 프로젝트의 워크스페이스
+    pub children: Vec<ProjectNode>,          // 자식 프로젝트
 }
 ```
 

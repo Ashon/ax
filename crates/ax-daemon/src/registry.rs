@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 use ax_proto::types::{AgentStatus, WorkspaceInfo};
 use ax_proto::Envelope;
 
-/// Bounded outbox size; matches Go's `outboxCapacity = 256`.
+/// Bounded outbox size.
 pub(crate) const OUTBOX_CAPACITY: usize = 256;
 
 /// Per-registration identity. The u64 is handed out by the registry so
@@ -38,9 +38,8 @@ impl Entry {
     }
 }
 
-/// Immutable view used by the idle-sleep guard. Mirrors Go's
-/// `RegisteredWorkspace` — includes the knobs `should_sleep` reads
-/// without leaking the mpsc outbox.
+/// Immutable view used by the idle-sleep guard — includes the knobs
+/// `should_sleep` reads without leaking the mpsc outbox.
 #[derive(Debug, Clone)]
 pub struct RegisteredWorkspace {
     pub info: WorkspaceInfo,
@@ -184,7 +183,7 @@ impl Registry {
     }
 
     /// Snapshot of all currently-registered workspaces. Ordered by name
-    /// (`BTreeMap`) which also matches Go's JSON output.
+    /// (`BTreeMap`) so JSON rendering is stable.
     #[must_use]
     pub fn list(&self) -> Vec<WorkspaceInfo> {
         self.inner
@@ -210,7 +209,7 @@ impl Registry {
     }
 
     /// Bump the last-active watermark on outbound traffic. Mirrors
-    /// Go's `Touch`; `connected_at` stays pinned to the initial
+    /// `Touch`; `connected_at` stays pinned to the initial
     /// registration time so clients can tell "since when has this
     /// workspace been online" apart from "most recent activity".
     pub fn touch(&self, workspace: &str, now: DateTime<Utc>) {
