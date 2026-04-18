@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod daemon_client;
+mod init;
 mod refresh;
 mod status;
 mod tasks;
@@ -57,6 +58,7 @@ Usage:
   ax-rs tasks intervene <id> --action wake|interrupt|retry [--note STR] [--expected-version N] [--socket PATH]
   ax-rs tasks retry <id> [--note STR] [--expected-version N] [--socket PATH]
   ax-rs tasks activity [task-id] [--assignee N] [--created-by N] [--status S] [--stale] [--limit N] [--socket PATH]
+  ax-rs init [--global] [--no-setup] [--codex|--claude] [--socket PATH]
   ax-rs workspace create <name> [--dir PATH] [--socket PATH] [--config PATH] [--ax-bin PATH]
   ax-rs workspace destroy <name> [--socket PATH] [--config PATH] [--ax-bin PATH]
   ax-rs workspace list [--internal] [--socket PATH] [--config PATH]
@@ -161,6 +163,9 @@ enum ParsedCommand {
         socket_path: PathBuf,
         command: tasks::TasksCommand,
     },
+    Init {
+        options: init::InitOptions,
+    },
     WorkspaceCreate {
         name: String,
         dir: Option<PathBuf>,
@@ -199,6 +204,7 @@ enum CliError {
     Status(String),
     Refresh(refresh::RefreshError),
     Tasks(tasks::TasksError),
+    Init(init::InitError),
     Workspace(workspace::WorkspaceCliError),
 }
 
@@ -316,6 +322,7 @@ impl fmt::Display for CliError {
             Self::McpServer(source) | Self::Status(source) => write!(f, "{source}"),
             Self::Refresh(source) => write!(f, "{source}"),
             Self::Tasks(source) => write!(f, "{source}"),
+            Self::Init(source) => write!(f, "{source}"),
             Self::Workspace(source) => write!(f, "{source}"),
         }
     }
@@ -652,6 +659,11 @@ where
             print!("{body}");
             Ok(ExitCode::SUCCESS)
         }
+        ParsedCommand::Init { options } => {
+            let body = init::run(&options).map_err(CliError::Init)?;
+            print!("{body}");
+            Ok(ExitCode::SUCCESS)
+        }
         ParsedCommand::WorkspaceCreate { name, dir, options } => {
             let body = workspace::create_workspace(
                 &options.socket_path,
@@ -751,6 +763,9 @@ where
     }
     if command == "tasks" {
         return parse_tasks_args(&tail);
+    }
+    if command == "init" {
+        return parse_init_args(&tail);
     }
     if matches!(command.as_str(), "workspace" | "ws") {
         return parse_workspace_args(&tail, cwd, current_exe);
@@ -1403,6 +1418,52 @@ fn expect_single_name(argv: &[OsString], cmd_label: &str) -> Result<String, CliE
         }
     }
     name.ok_or_else(|| CliError::Usage(format!("{cmd_label} requires a name\n\n{USAGE}")))
+}
+
+fn parse_init_args(argv: &[OsString]) -> Result<ParsedCommand, CliError> {
+    let mut socket_path = expand_socket_path(DEFAULT_SOCKET_PATH);
+    let mut global = false;
+    let mut no_setup = false;
+    let mut want_codex = false;
+    let mut want_claude = false;
+
+    let mut i = 1;
+    while i < argv.len() {
+        let arg = &argv[i];
+        match arg.to_string_lossy().as_ref() {
+            "-h" | "--help" => return Ok(ParsedCommand::Help),
+            "-g" | "--global" => global = true,
+            "--no-setup" => no_setup = true,
+            "--codex" => want_codex = true,
+            "--claude" => want_claude = true,
+            "--socket" => {
+                i += 1;
+                socket_path = parse_socket_path(argv.get(i), "--socket")?;
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown flag {other:?}\n\n{USAGE}"
+                )));
+            }
+        }
+        i += 1;
+    }
+    if want_codex && want_claude {
+        return Err(CliError::Usage(
+            "--codex and --claude cannot be used together\n".to_owned(),
+        ));
+    }
+    let runtime = if want_codex { "codex" } else { "claude" }.to_owned();
+    let daemon_running = matches!(daemon_status(&socket_path)?, DaemonStatus::Running(_));
+    Ok(ParsedCommand::Init {
+        options: init::InitOptions {
+            global,
+            no_setup,
+            runtime,
+            socket_path,
+            daemon_running,
+        },
+    })
 }
 
 fn parse_tasks_args(argv: &[OsString]) -> Result<ParsedCommand, CliError> {
