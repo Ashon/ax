@@ -8,7 +8,7 @@ use ratatui::symbols;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
-    Sparkline, Tabs, Wrap,
+    Sparkline, Wrap,
 };
 use ratatui::Frame;
 use throbber_widgets_tui::{Throbber, WhichUse, BRAILLE_SIX};
@@ -35,27 +35,16 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
 
     let streaming = app.streamed_workspace.is_some();
     let agents_h = compute_agents_height(app, chunks[1].height, streaming);
-    let middle = if streaming {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(agents_h), Constraint::Min(1)])
-            .split(chunks[1])
-    } else {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(agents_h),
-                Constraint::Length(1),
-                Constraint::Min(1),
-            ])
-            .split(chunks[1])
-    };
+    // No standalone tab row — the body block embeds the tab strip
+    // inside its top border (see `tabs_title`), so the middle region
+    // splits cleanly into agents + body.
+    let middle = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(agents_h), Constraint::Min(1)])
+        .split(chunks[1]);
     let agents_area = middle[0];
-    let content_area = *middle.last().expect("layout produces >= 2 rows");
+    let content_area = middle[1];
     draw_agents(f, agents_area, app);
-    if !streaming {
-        draw_stream_tabs(f, middle[1], app);
-    }
     draw_body(f, content_area, app);
 
     if app.quick_actions.open {
@@ -66,10 +55,11 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
 }
 
 /// Clamp the agents pane so it shows every row when possible but
-/// never starves the tab+content pane below it. Overflow rows scroll
-/// within the pane; `+3` accounts for the border (2) and header (1).
-fn compute_agents_height(app: &App, middle_h: u16, streaming: bool) -> u16 {
-    let reserved = if streaming { 3 } else { 4 };
+/// never starves the content pane below it. Overflow rows scroll
+/// within the pane; the reserved budget accounts for the body
+/// block's border (2) so it never collapses to a single row.
+fn compute_agents_height(app: &App, middle_h: u16, _streaming: bool) -> u16 {
+    let reserved = 3;
     let desired = (app.agent_entries.len() as u16).saturating_add(3).max(5);
     let cap = middle_h.saturating_sub(reserved).max(3);
     desired.min(cap)
@@ -435,66 +425,57 @@ fn draw_body(f: &mut Frame, area: Rect, app: &mut App) {
         draw_stream_single(f, area, app, &workspace);
         return;
     }
+    // Outer body block. Tab strip sits on the top border so we don't
+    // burn a row on a standalone tab row. Sub-views render into the
+    // inner area without drawing their own outer border.
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(focus_border_style(app, Focus::Body))
+        .title(tabs_title(app));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
     match app.stream {
-        StreamView::Messages => draw_messages(f, area, app),
-        StreamView::Tasks => draw_tasks(f, area, app),
-        StreamView::Tokens => draw_tokens(f, area, app),
+        StreamView::Messages => draw_messages(f, inner, app),
+        StreamView::Tasks => draw_tasks(f, inner, app),
+        StreamView::Tokens => draw_tokens(f, inner, app),
     }
 }
 
-/// Tab strip above the stream pane. Tab/s and the number keys 1-3
-/// drive the switch.
-fn draw_stream_tabs(f: &mut Frame, area: Rect, app: &App) {
-    if area.height == 0 || area.width == 0 {
-        return;
-    }
+/// Build the body block's title as a tab strip. The line sits on the
+/// top border of whichever body sub-view is active, so we don't burn
+/// an extra row on a standalone tab strip above the pane. Styles
+/// follow the same focus/selection matrix as a dedicated Tabs
+/// widget: when Tabs focus is active, the highlighted tab turns
+/// cyan bold; otherwise it falls back to white bold with dim
+/// siblings. Dots between tabs imitate `symbols::DOT`.
+fn tabs_title(app: &App) -> Line<'static> {
     let focused = app.focus == Focus::Tabs;
-    // A leading batch glyph on the selected tab reads as "you're
-    // here" regardless of terminal-level colour support; pairing it
-    // with bold + color still works on monochrome ptys.
-    let titles: Vec<Line> = StreamView::ALL
-        .iter()
-        .enumerate()
-        .map(|(idx, view)| {
-            let label = format!("{}·{}", idx + 1, view.tab_label());
-            Line::from(label)
-        })
-        .collect();
-    let selected = StreamView::ALL
-        .iter()
-        .position(|view| *view == app.stream)
-        .unwrap_or(0);
-
-    let (base_style, highlight_style) = if focused {
-        // Focused strip: unselected tabs dim, selected tab bright
-        // cyan bold so the active tab jumps out of the row.
-        (
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM),
-            Style::default()
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (idx, view) in StreamView::ALL.iter().enumerate() {
+        if idx > 0 {
+            spans.push(Span::styled(
+                format!(" {} ", symbols::DOT),
+                Style::default().add_modifier(Modifier::DIM),
+            ));
+        }
+        let label = format!(" {}·{} ", idx + 1, view.tab_label());
+        let is_selected = *view == app.stream;
+        let style = match (is_selected, focused) {
+            (true, true) => Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
-        )
-    } else {
-        // Unfocused strip: everything reads as secondary chrome, but
-        // the selected tab still carries bold + its own colour so
-        // users can see which view the body is showing.
-        (
-            Style::default().add_modifier(Modifier::DIM),
-            Style::default()
+            (true, false) => Style::default()
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
-        )
-    };
-
-    let tabs = Tabs::new(titles)
-        .select(selected)
-        .divider(symbols::DOT)
-        .padding(" ", " ")
-        .style(base_style)
-        .highlight_style(highlight_style);
-    f.render_widget(tabs, area);
+            (false, true) => Style::default().fg(Color::DarkGray),
+            (false, false) => Style::default().add_modifier(Modifier::DIM),
+        };
+        spans.push(Span::styled(label, style));
+    }
+    Line::from(spans)
 }
 
 fn draw_stream_single(f: &mut Frame, area: Rect, app: &mut App, workspace: &str) {
@@ -576,41 +557,30 @@ fn focus_border_style(app: &App, panel: Focus) -> Style {
 }
 
 fn draw_messages(f: &mut Frame, area: Rect, app: &App) {
-    let inner_width = area.width.saturating_sub(2) as usize;
-    let inner_height = area.height.saturating_sub(2) as usize;
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(focus_border_style(app, Focus::Body))
-        .title(StreamView::Messages.title());
+    // `area` is the body block's inner rect — outer border + tab
+    // strip are already painted by `draw_body`. Render raw content
+    // into this area without stacking another block.
+    let inner_width = area.width as usize;
+    let inner_height = area.height as usize;
 
     if app.messages.is_empty() {
-        let para = Paragraph::new("  (no messages yet)")
-            .style(Style::default().add_modifier(Modifier::DIM))
-            .block(block);
+        let para =
+            Paragraph::new("  (no messages yet)").style(Style::default().add_modifier(Modifier::DIM));
         f.render_widget(para, area);
         return;
     }
 
-    // Show the tail that fits inside the pane.
     let start = app.messages.len().saturating_sub(inner_height.max(1));
     let lines: Vec<Line> = app.messages[start..]
         .iter()
         .map(|entry| Line::from(Span::raw(format_message_line(entry, inner_width.max(1)))))
         .collect();
-    let para = Paragraph::new(lines).block(block);
-    f.render_widget(para, area);
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 fn draw_tokens(f: &mut Frame, area: Rect, app: &App) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(focus_border_style(app, Focus::Body))
-        .title(StreamView::Tokens.title());
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
+    // `area` is the body block's inner rect — no additional border.
+    let inner = area;
 
     // Pull rolled-up totals from the daemon's `usage_trends` cache
     // (populated by `app::refresh_usage`). Unlike the live tmux-
@@ -801,15 +771,13 @@ fn format_last_activity(now: chrono::DateTime<chrono::Utc>, ts: chrono::DateTime
 }
 
 fn draw_tasks(f: &mut Frame, area: Rect, app: &App) {
+    // `area` is the body block's inner rect; `draw_body` already
+    // painted the outer border + tab-strip title. The list/detail
+    // split lives inside.
     let filtered = app.filtered_tasks();
     if app.tasks.is_empty() {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(focus_border_style(app, Focus::Body))
-            .title(StreamView::Tasks.title());
         let para = Paragraph::new("  (no tasks yet)")
-            .style(Style::default().add_modifier(Modifier::DIM))
-            .block(block);
+            .style(Style::default().add_modifier(Modifier::DIM));
         f.render_widget(para, area);
         return;
     }

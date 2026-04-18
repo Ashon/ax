@@ -20,14 +20,6 @@ pub(crate) enum StreamView {
 }
 
 impl StreamView {
-    pub(crate) fn title(self) -> &'static str {
-        match self {
-            Self::Messages => " messages ",
-            Self::Tasks => " tasks ",
-            Self::Tokens => " tokens ",
-        }
-    }
-
     pub(crate) fn tab_label(self) -> &'static str {
         match self {
             Self::Messages => "messages",
