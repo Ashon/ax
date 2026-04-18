@@ -1,0 +1,94 @@
+//! Main event loop — owns the state and drives render/input/refresh.
+//! Mirrors Bubbletea's `NewProgram(model).Run()` but stays sync +
+//! single-threaded since ratatui doesn't push messages through an
+//! async runtime.
+//!
+//! Refresh cadence matches the Go TUI's `watchDataRefreshInterval`
+//! (250ms): tmux sessions re-listed, daemon re-queried for workspace
+//! info, view redrawn.
+
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+use crossterm::event::{self, Event};
+
+use crate::daemon::Client;
+use crate::state::App;
+use crate::terminal::TerminalGuard;
+
+const REFRESH_INTERVAL: Duration = Duration::from_millis(250);
+const POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+#[derive(Debug, Clone)]
+pub struct RunOptions {
+    pub socket_path: PathBuf,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RunError {
+    #[error("terminal setup: {0}")]
+    Terminal(std::io::Error),
+    #[error("render: {0}")]
+    Render(std::io::Error),
+    #[error("input: {0}")]
+    Input(std::io::Error),
+    #[error("tmux: {0}")]
+    Tmux(ax_tmux::TmuxError),
+}
+
+pub fn run(opts: &RunOptions) -> Result<(), RunError> {
+    let mut guard = TerminalGuard::install().map_err(RunError::Terminal)?;
+    let mut app = App::new();
+    refresh(&mut app, opts);
+
+    loop {
+        guard
+            .terminal
+            .draw(|f| crate::render::draw(f, &app))
+            .map_err(RunError::Render)?;
+
+        if event::poll(POLL_INTERVAL).map_err(RunError::Input)? {
+            if let Event::Key(key) = event::read().map_err(RunError::Input)? {
+                crate::input::handle_key(&mut app, key);
+            }
+        }
+        if app.quit {
+            break;
+        }
+
+        let due = app
+            .last_refresh
+            .is_none_or(|t| t.elapsed() >= REFRESH_INTERVAL);
+        if due {
+            refresh(&mut app, opts);
+        }
+    }
+    Ok(())
+}
+
+fn refresh(app: &mut App, opts: &RunOptions) {
+    match ax_tmux::list_sessions() {
+        Ok(sessions) => app.sessions = sessions,
+        Err(e) => app.set_notice(format!("tmux list-sessions: {e}")),
+    }
+
+    if let Ok(mut client) = Client::connect(&opts.socket_path) {
+        app.daemon_running = true;
+        match client.list_workspaces() {
+            Ok(workspaces) => {
+                app.workspace_infos = workspaces
+                    .into_iter()
+                    .map(|ws| (ws.name.clone(), ws))
+                    .collect();
+            }
+            Err(e) => app.set_notice(format!("daemon: {e}")),
+        }
+    } else {
+        app.daemon_running = false;
+        app.workspace_infos.clear();
+    }
+    if app.selected >= app.sessions.len() {
+        app.selected = app.sessions.len().saturating_sub(1);
+    }
+    app.last_refresh = Some(Instant::now());
+}

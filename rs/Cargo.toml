@@ -8,6 +8,7 @@ members = [
     "crates/ax-mcp-server",
     "crates/ax-proto",
     "crates/ax-tmux",
+    "crates/ax-tui",
     "crates/ax-usage",
     "crates/ax-workspace",
 ]

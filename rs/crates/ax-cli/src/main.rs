@@ -59,6 +59,7 @@ Usage:
   ax-rs tasks retry <id> [--note STR] [--expected-version N] [--socket PATH]
   ax-rs tasks activity [task-id] [--assignee N] [--created-by N] [--status S] [--stale] [--limit N] [--socket PATH]
   ax-rs init [--global] [--no-setup] [--codex|--claude] [--socket PATH]
+  ax-rs watch [--socket PATH]
   ax-rs workspace create <name> [--dir PATH] [--socket PATH] [--config PATH] [--ax-bin PATH]
   ax-rs workspace destroy <name> [--socket PATH] [--config PATH] [--ax-bin PATH]
   ax-rs workspace list [--internal] [--socket PATH] [--config PATH]
@@ -166,6 +167,9 @@ enum ParsedCommand {
     Init {
         options: init::InitOptions,
     },
+    Watch {
+        socket_path: PathBuf,
+    },
     WorkspaceCreate {
         name: String,
         dir: Option<PathBuf>,
@@ -205,6 +209,7 @@ enum CliError {
     Refresh(refresh::RefreshError),
     Tasks(tasks::TasksError),
     Init(init::InitError),
+    Watch(ax_tui::RunError),
     Workspace(workspace::WorkspaceCliError),
 }
 
@@ -323,6 +328,7 @@ impl fmt::Display for CliError {
             Self::Refresh(source) => write!(f, "{source}"),
             Self::Tasks(source) => write!(f, "{source}"),
             Self::Init(source) => write!(f, "{source}"),
+            Self::Watch(source) => write!(f, "{source}"),
             Self::Workspace(source) => write!(f, "{source}"),
         }
     }
@@ -664,6 +670,10 @@ where
             print!("{body}");
             Ok(ExitCode::SUCCESS)
         }
+        ParsedCommand::Watch { socket_path } => {
+            ax_tui::run(&ax_tui::RunOptions { socket_path }).map_err(CliError::Watch)?;
+            Ok(ExitCode::SUCCESS)
+        }
         ParsedCommand::WorkspaceCreate { name, dir, options } => {
             let body = workspace::create_workspace(
                 &options.socket_path,
@@ -766,6 +776,9 @@ where
     }
     if command == "init" {
         return parse_init_args(&tail);
+    }
+    if matches!(command.as_str(), "watch" | "top") {
+        return parse_watch_args(&tail);
     }
     if matches!(command.as_str(), "workspace" | "ws") {
         return parse_workspace_args(&tail, cwd, current_exe);
@@ -1418,6 +1431,28 @@ fn expect_single_name(argv: &[OsString], cmd_label: &str) -> Result<String, CliE
         }
     }
     name.ok_or_else(|| CliError::Usage(format!("{cmd_label} requires a name\n\n{USAGE}")))
+}
+
+fn parse_watch_args(argv: &[OsString]) -> Result<ParsedCommand, CliError> {
+    let mut socket_path = expand_socket_path(DEFAULT_SOCKET_PATH);
+    let mut i = 0;
+    while i < argv.len() {
+        let arg = &argv[i];
+        match arg.to_string_lossy().as_ref() {
+            "-h" | "--help" => return Ok(ParsedCommand::Help),
+            "--socket" => {
+                i += 1;
+                socket_path = parse_socket_path(argv.get(i), "--socket")?;
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown flag {other:?}\n\n{USAGE}"
+                )));
+            }
+        }
+        i += 1;
+    }
+    Ok(ParsedCommand::Watch { socket_path })
 }
 
 fn parse_init_args(argv: &[OsString]) -> Result<ParsedCommand, CliError> {
