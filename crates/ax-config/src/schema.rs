@@ -9,8 +9,25 @@ use serde::{Deserialize, Serialize};
 pub const DEFAULT_CODEX_REASONING_EFFORT: &str = "xhigh";
 pub const DEFAULT_IDLE_TIMEOUT_MINUTES: i32 = 15;
 
+/// Cap on how deep the child-orchestrator tree can recurse. Root is
+/// depth 0; a child loaded from root is depth 1. Zero means
+/// unbounded — use only when you actively want that risk.
+pub const DEFAULT_MAX_ORCHESTRATOR_DEPTH: u32 = 3;
+
+/// Cap on how many children one config node may declare. Zero means
+/// unbounded.
+pub const DEFAULT_MAX_CHILDREN_PER_NODE: u32 = 6;
+
 pub fn default_idle_timeout_minutes() -> i32 {
     DEFAULT_IDLE_TIMEOUT_MINUTES
+}
+
+pub(crate) fn default_max_orchestrator_depth() -> u32 {
+    DEFAULT_MAX_ORCHESTRATOR_DEPTH
+}
+
+pub(crate) fn default_max_children_per_node() -> u32 {
+    DEFAULT_MAX_CHILDREN_PER_NODE
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -38,7 +55,7 @@ pub enum LoadError {
 }
 
 /// Root ax config file schema.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub project: String,
@@ -52,6 +69,20 @@ pub struct Config {
     pub codex_model_reasoning_effort: String,
     #[serde(default, skip_serializing_if = "is_zero_i32")]
     pub idle_timeout_minutes: i32,
+    /// Max recursion depth for child orchestrators; only honoured on
+    /// the root config. Zero disables the check.
+    #[serde(
+        default = "default_max_orchestrator_depth",
+        skip_serializing_if = "is_default_orchestrator_depth"
+    )]
+    pub max_orchestrator_depth: u32,
+    /// Max number of `children:` entries a single config may declare.
+    /// Zero disables the check.
+    #[serde(
+        default = "default_max_children_per_node",
+        skip_serializing_if = "is_default_children_per_node"
+    )]
+    pub max_children_per_node: u32,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub children: BTreeMap<String, Child>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -85,6 +116,23 @@ pub struct Workspace {
     pub instructions: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            project: String::new(),
+            orchestrator_runtime: String::new(),
+            disable_root_orchestrator: false,
+            experimental_mcp_team_reconfigure: false,
+            codex_model_reasoning_effort: String::new(),
+            idle_timeout_minutes: 0,
+            max_orchestrator_depth: DEFAULT_MAX_ORCHESTRATOR_DEPTH,
+            max_children_per_node: DEFAULT_MAX_CHILDREN_PER_NODE,
+            children: BTreeMap::new(),
+            workspaces: BTreeMap::new(),
+        }
+    }
 }
 
 impl Config {
@@ -169,4 +217,14 @@ fn is_false(v: &bool) -> bool {
 #[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_zero_i32(v: &i32) -> bool {
     *v == 0
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_default_orchestrator_depth(v: &u32) -> bool {
+    *v == DEFAULT_MAX_ORCHESTRATOR_DEPTH
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_default_children_per_node(v: &u32) -> bool {
+    *v == DEFAULT_MAX_CHILDREN_PER_NODE
 }

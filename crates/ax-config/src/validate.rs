@@ -61,6 +61,22 @@ pub enum ValidationError {
         ws_name: String,
         ws_path: String,
     },
+    #[error(
+        "ax orchestrator tree depth {depth} at {path} exceeds max_orchestrator_depth {cap}; raise the cap or split the project"
+    )]
+    OrchestratorDepthExceeded {
+        depth: u32,
+        cap: u32,
+        path: String,
+    },
+    #[error(
+        "ax config at {path} declares {count} children, exceeding max_children_per_node {cap}; raise the cap or collapse children"
+    )]
+    ChildrenPerNodeExceeded {
+        count: u32,
+        cap: u32,
+        path: String,
+    },
 }
 
 /// Run the validation pre-pass that `Config::load` / `Config::load_tree`
@@ -69,7 +85,11 @@ pub fn validate_tree(path: impl AsRef<Path>) -> Result<(), TreeError> {
     let abs = absolutize(path.as_ref())?;
     let root_cfg = load_validated_config(&abs)?;
 
-    let mut state = ValidationState::default();
+    let mut state = ValidationState {
+        max_depth: root_cfg.max_orchestrator_depth,
+        max_children: root_cfg.max_children_per_node,
+        ..ValidationState::default()
+    };
     if !root_cfg.disable_root_orchestrator {
         state.orchestrators.insert(
             orchestrator_session_name(""),
@@ -84,12 +104,13 @@ pub fn validate_tree(path: impl AsRef<Path>) -> Result<(), TreeError> {
     }
 
     let mut seen = BTreeSet::new();
-    validate_recursive(&abs, "", &mut seen, &mut state)
+    validate_recursive(&abs, "", 0, &mut seen, &mut state)
 }
 
 fn validate_recursive(
     path: &Path,
     prefix: &str,
+    depth: u32,
     seen: &mut BTreeSet<PathBuf>,
     state: &mut ValidationState,
 ) -> Result<(), TreeError> {
@@ -98,8 +119,28 @@ fn validate_recursive(
         return Err(TreeError::Cycle(abs));
     }
 
+    if state.max_depth != 0 && depth > state.max_depth {
+        return Err(TreeError::Validation(Box::new(
+            ValidationError::OrchestratorDepthExceeded {
+                depth,
+                cap: state.max_depth,
+                path: abs.display().to_string(),
+            },
+        )));
+    }
+
     let cfg = load_validated_config(&abs)?;
     let project_dir = crate::paths::ConfigRoot::from_config_path(&abs).0;
+
+    if state.max_children != 0 && cfg.children.len() as u32 > state.max_children {
+        return Err(TreeError::Validation(Box::new(
+            ValidationError::ChildrenPerNodeExceeded {
+                count: cfg.children.len() as u32,
+                cap: state.max_children,
+                path: abs.display().to_string(),
+            },
+        )));
+    }
 
     let mut ws_names: Vec<_> = cfg.workspaces.keys().cloned().collect();
     ws_names.sort();
@@ -211,7 +252,8 @@ fn validate_recursive(
             .orchestrators
             .insert(orch_claim.session_name.clone(), orch_claim.clone());
 
-        if let Err(err) = validate_recursive(&child_cfg_path, &claim_prefix, seen, state) {
+        if let Err(err) = validate_recursive(&child_cfg_path, &claim_prefix, depth + 1, seen, state)
+        {
             if is_missing_file(&err) {
                 // Roll back claims — matches Go's behaviour for stale
                 // descendents.
@@ -239,6 +281,9 @@ struct ValidationState {
     workspace_dirs: BTreeMap<String, WorkspaceDirClaim>,
     workspaces: BTreeMap<String, WorkspaceClaim>,
     orchestrators: BTreeMap<String, OrchestratorClaim>,
+    /// Root-config caps; zero disables the corresponding check.
+    max_depth: u32,
+    max_children: u32,
 }
 
 #[derive(Debug, Clone)]

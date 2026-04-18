@@ -11,11 +11,17 @@ fn write(path: &Path, body: &str) {
     fs::write(path, body).unwrap();
 }
 
-/// Unwrap the boxed `ValidationError` out of a failed `Config::load`.
+/// Unwrap the boxed `ValidationError` out of a failed `Config::load`,
+/// peeling `TreeError::Child` chains so deeply-nested validation
+/// failures surface the original error kind.
 fn validation_err(err: TreeError) -> ValidationError {
-    match err {
-        TreeError::Validation(boxed) => *boxed,
-        other => panic!("expected TreeError::Validation, got {other:?}"),
+    let mut cur = err;
+    loop {
+        cur = match cur {
+            TreeError::Validation(boxed) => return *boxed,
+            TreeError::Child { source, .. } => *source,
+            other => panic!("expected TreeError::Validation, got {other:?}"),
+        };
     }
 }
 
@@ -154,6 +160,103 @@ workspaces:
             assert_eq!(session, "team.orchestrator");
         }
         other => panic!("expected ReservedNameForChild, got {other:?}"),
+    }
+}
+
+#[test]
+fn orchestrator_depth_cap_rejects_trees_past_the_default() {
+    // 4 nested configs = depth 0/1/2/3/4; the depth-4 node should
+    // trip the default cap of 3.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let l1 = root.join("l1");
+    let l2 = l1.join("l2");
+    let l3 = l2.join("l3");
+    let l4 = l3.join("l4");
+    write(
+        &default_config_path(root),
+        "project: r\nchildren:\n  a:\n    dir: ./l1\nworkspaces:\n  w:\n    dir: .\n    runtime: claude\n",
+    );
+    write(
+        &default_config_path(&l1),
+        "project: l1\nchildren:\n  b:\n    dir: ./l2\nworkspaces:\n  w:\n    dir: .\n    runtime: claude\n",
+    );
+    write(
+        &default_config_path(&l2),
+        "project: l2\nchildren:\n  c:\n    dir: ./l3\nworkspaces:\n  w:\n    dir: .\n    runtime: claude\n",
+    );
+    write(
+        &default_config_path(&l3),
+        "project: l3\nchildren:\n  d:\n    dir: ./l4\nworkspaces:\n  w:\n    dir: .\n    runtime: claude\n",
+    );
+    write(
+        &default_config_path(&l4),
+        "project: l4\nworkspaces:\n  w:\n    dir: .\n    runtime: claude\n",
+    );
+    let err = validation_err(Config::load(default_config_path(root)).unwrap_err());
+    match err {
+        ValidationError::OrchestratorDepthExceeded { depth, cap, .. } => {
+            assert_eq!(depth, 4);
+            assert_eq!(cap, 3);
+        }
+        other => panic!("expected OrchestratorDepthExceeded, got {other:?}"),
+    }
+}
+
+#[test]
+fn orchestrator_depth_cap_of_zero_disables_the_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let l1 = root.join("l1");
+    let l2 = l1.join("l2");
+    let l3 = l2.join("l3");
+    let l4 = l3.join("l4");
+    write(
+        &default_config_path(root),
+        "project: r\nmax_orchestrator_depth: 0\nchildren:\n  a:\n    dir: ./l1\nworkspaces:\n  w:\n    dir: .\n    runtime: claude\n",
+    );
+    write(
+        &default_config_path(&l1),
+        "project: l1\nchildren:\n  b:\n    dir: ./l2\nworkspaces:\n  w:\n    dir: .\n    runtime: claude\n",
+    );
+    write(
+        &default_config_path(&l2),
+        "project: l2\nchildren:\n  c:\n    dir: ./l3\nworkspaces:\n  w:\n    dir: .\n    runtime: claude\n",
+    );
+    write(
+        &default_config_path(&l3),
+        "project: l3\nchildren:\n  d:\n    dir: ./l4\nworkspaces:\n  w:\n    dir: .\n    runtime: claude\n",
+    );
+    write(
+        &default_config_path(&l4),
+        "project: l4\nworkspaces:\n  w:\n    dir: .\n    runtime: claude\n",
+    );
+    let cfg = Config::load(default_config_path(root)).expect("unbounded depth loads");
+    assert!(cfg.workspaces.contains_key("a.b.c.d.w"));
+}
+
+#[test]
+fn children_per_node_cap_rejects_oversized_siblings() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let mut yaml = String::from("project: r\nmax_children_per_node: 2\nchildren:\n");
+    for name in ["k1", "k2", "k3"] {
+        use std::fmt::Write as _;
+        writeln!(yaml, "  {name}:\n    dir: ./{name}").unwrap();
+        write(
+            &default_config_path(root.join(name).as_path()),
+            &format!("project: {name}\nworkspaces:\n  w:\n    dir: .\n    runtime: claude\n"),
+        );
+    }
+    yaml.push_str("workspaces:\n  main:\n    dir: .\n    runtime: claude\n");
+    write(&default_config_path(root), &yaml);
+    let err = validation_err(Config::load(default_config_path(root)).unwrap_err());
+    match err {
+        ValidationError::ChildrenPerNodeExceeded { count, cap, .. } => {
+            assert_eq!(count, 3);
+            assert_eq!(cap, 2);
+        }
+        other => panic!("expected ChildrenPerNodeExceeded, got {other:?}"),
     }
 }
 
