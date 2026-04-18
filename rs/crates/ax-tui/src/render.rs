@@ -240,6 +240,7 @@ fn draw_stub_view(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_tasks(f: &mut Frame, area: Rect, app: &App) {
+    let filtered = app.filtered_tasks();
     if app.tasks.is_empty() {
         let block = Block::default()
             .borders(Borders::ALL)
@@ -262,17 +263,18 @@ fn draw_tasks(f: &mut Frame, area: Rect, app: &App) {
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(list_width), Constraint::Min(24)])
         .split(area);
-    draw_tasks_list(f, chunks[0], app);
-    draw_task_detail(f, chunks[1], app);
+    draw_tasks_list(f, chunks[0], app, &filtered);
+    draw_task_detail(f, chunks[1], app, &filtered);
 }
 
-fn draw_tasks_list(f: &mut Frame, area: Rect, app: &App) {
+fn draw_tasks_list(f: &mut Frame, area: Rect, app: &App, filtered: &[ax_proto::types::Task]) {
     let inner_width = area.width.saturating_sub(2) as usize;
     let inner_height = area.height.saturating_sub(2) as usize;
     let block = Block::default().borders(Borders::ALL).title(format!(
-        " tasks {}/{} ",
-        app.task_selected.saturating_add(1),
-        app.tasks.len()
+        " tasks {} {}/{} ",
+        app.task_filter.label(),
+        filtered.len().min(app.task_selected.saturating_add(1)),
+        filtered.len(),
     ));
 
     let summary = crate::tasks::summarize_tasks(&app.tasks);
@@ -292,9 +294,19 @@ fn draw_tasks_list(f: &mut Frame, area: Rect, app: &App) {
         Style::default().add_modifier(Modifier::DIM),
     )));
 
+    if filtered.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  (no tasks match current filter — press f to cycle)",
+            Style::default().add_modifier(Modifier::DIM),
+        )));
+        let para = Paragraph::new(lines).block(block);
+        f.render_widget(para, area);
+        return;
+    }
+
     let body_budget = inner_height.saturating_sub(lines.len());
-    let (start, end) = viewport_range(app.tasks.len(), app.task_selected, body_budget);
-    for (idx, task) in app.tasks[start..end].iter().enumerate() {
+    let (start, end) = viewport_range(filtered.len(), app.task_selected, body_budget);
+    for (idx, task) in filtered[start..end].iter().enumerate() {
         let absolute = start + idx;
         let style = if absolute == app.task_selected {
             Style::default().add_modifier(Modifier::REVERSED)
@@ -310,12 +322,12 @@ fn draw_tasks_list(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(para, area);
 }
 
-fn draw_task_detail(f: &mut Frame, area: Rect, app: &App) {
+fn draw_task_detail(f: &mut Frame, area: Rect, app: &App, filtered: &[ax_proto::types::Task]) {
     let inner_width = area.width.saturating_sub(2) as usize;
     let inner_height = area.height.saturating_sub(2) as usize;
     let block = Block::default().borders(Borders::ALL).title(" detail ");
 
-    let Some(task) = app.tasks.get(app.task_selected) else {
+    let Some(task) = filtered.get(app.task_selected) else {
         let para = Paragraph::new("  (no task selected)")
             .style(Style::default().add_modifier(Modifier::DIM))
             .block(block);
@@ -323,7 +335,7 @@ fn draw_task_detail(f: &mut Frame, area: Rect, app: &App) {
         return;
     };
 
-    let lines = build_detail_lines(task, inner_width, inner_height);
+    let lines = build_detail_lines(task, &app.messages, inner_width, inner_height);
     let para = Paragraph::new(lines).block(block);
     f.render_widget(para, area);
 }
@@ -363,6 +375,7 @@ fn format_task_row(task: &ax_proto::types::Task, width: usize) -> String {
 /// so the paragraph widget never clips mid-line.
 fn build_detail_lines<'a>(
     task: &'a ax_proto::types::Task,
+    history: &[ax_daemon::HistoryEntry],
     width: usize,
     height: usize,
 ) -> Vec<Line<'a>> {
@@ -483,6 +496,24 @@ fn build_detail_lines<'a>(
         }
     }
 
+    let activity = crate::tasks::build_task_activity(task, history, 4);
+    if !activity.is_empty() {
+        out.push(Line::from(""));
+        push(&mut out, "activity:".to_owned(), false);
+        for entry in &activity {
+            push(
+                &mut out,
+                format!(
+                    "  {} {:<9} {}",
+                    entry.timestamp.format("%H:%M:%S"),
+                    entry.kind.label(),
+                    entry.summary,
+                ),
+                true,
+            );
+        }
+    }
+
     if out.len() > height {
         out.truncate(height);
     }
@@ -548,7 +579,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         )
     } else {
         (
-            "j/k sidebar · [/] tasks · Tab/s view · esc actions · q quit".to_owned(),
+            "j/k sidebar · [/] tasks · f filter · Tab/s view · esc actions · q quit".to_owned(),
             Style::default().add_modifier(Modifier::DIM),
         )
     };

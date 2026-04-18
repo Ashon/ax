@@ -11,6 +11,7 @@ use ax_proto::types::{Task, WorkspaceInfo};
 use ax_tmux::SessionInfo;
 
 use crate::actions::{Notice, QuickActionId, QuickActionState};
+use crate::tasks::TaskFilterMode;
 
 #[derive(Debug, Clone)]
 pub(crate) struct PendingLifecycle {
@@ -44,6 +45,7 @@ pub(crate) struct App {
     pub(crate) messages: Vec<HistoryEntry>,
     pub(crate) tasks: Vec<Task>,
     pub(crate) task_selected: usize,
+    pub(crate) task_filter: TaskFilterMode,
     pub(crate) quick_actions: QuickActionState,
     pub(crate) quick_notice: Option<Notice>,
     /// Lifecycle action queued by the input handler; executed by the
@@ -70,6 +72,7 @@ impl App {
             messages: Vec::new(),
             tasks: Vec::new(),
             task_selected: 0,
+            task_filter: TaskFilterMode::Active,
             quick_actions: QuickActionState::default(),
             quick_notice: None,
             pending_lifecycle: None,
@@ -84,28 +87,44 @@ impl App {
         self.stream = self.stream.next();
     }
 
-    /// Move the task-list cursor inside the Tasks stream view. No-op
-    /// when there are no tasks; clamps to valid bounds otherwise.
+    /// Filtered view of `self.tasks` using the current filter
+    /// setting. The sidebar / detail pane both derive their state
+    /// from this so cursor + render stay consistent.
+    pub(crate) fn filtered_tasks(&self) -> Vec<Task> {
+        crate::tasks::filter_tasks(&self.tasks, self.task_filter)
+    }
+
+    /// Move the task-list cursor inside the Tasks stream view. Uses
+    /// the filtered list so arrow keys advance by visible rows only.
     pub(crate) fn move_task_selection(&mut self, delta: i32) {
-        if self.tasks.is_empty() {
+        let filtered = self.filtered_tasks();
+        if filtered.is_empty() {
             self.task_selected = 0;
             return;
         }
-        let n = self.tasks.len() as i32;
+        let n = filtered.len() as i32;
         let next = (self.task_selected as i32 + delta).clamp(0, n - 1) as usize;
         self.task_selected = next;
     }
 
+    /// Cycle the filter and snap the cursor so it stays valid in
+    /// the new view.
+    pub(crate) fn cycle_task_filter(&mut self) {
+        self.task_filter = self.task_filter.next();
+        self.clamp_task_selection();
+    }
+
     /// Called after each refresh so an out-of-range selection (tasks
-    /// removed underneath the cursor) snaps back to the last live
-    /// row instead of rendering nothing.
+    /// removed underneath the cursor, or filter change shrank the
+    /// visible list) snaps back to the last live row.
     pub(crate) fn clamp_task_selection(&mut self) {
-        if self.tasks.is_empty() {
+        let n = self.filtered_tasks().len();
+        if n == 0 {
             self.task_selected = 0;
             return;
         }
-        if self.task_selected >= self.tasks.len() {
-            self.task_selected = self.tasks.len() - 1;
+        if self.task_selected >= n {
+            self.task_selected = n - 1;
         }
     }
 

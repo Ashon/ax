@@ -12,11 +12,64 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use ax_daemon::expand_socket_path;
+use ax_daemon::{expand_socket_path, HistoryEntry};
 use ax_proto::types::{Task, TaskPriority, TaskStatus};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 
 const TASKS_FILE_NAME: &str = "tasks.json";
+
+/// Cycle order for the `f` key: active → stale → done → all →
+/// active. Matches `cmd/task_helpers.go::nextTaskFilterMode` so a
+/// muscle-memory user gets the same ordering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TaskFilterMode {
+    Active,
+    Stale,
+    Done,
+    All,
+}
+
+impl TaskFilterMode {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Stale => "stale",
+            Self::Done => "done",
+            Self::All => "all",
+        }
+    }
+
+    pub(crate) fn next(self) -> Self {
+        match self {
+            Self::Active => Self::Stale,
+            Self::Stale => Self::Done,
+            Self::Done => Self::All,
+            Self::All => Self::Active,
+        }
+    }
+}
+
+/// Filter `tasks` according to `mode` + re-sort the result so the
+/// caller gets a display-ready slice. Non-allocating for `All`.
+pub(crate) fn filter_tasks(tasks: &[Task], mode: TaskFilterMode) -> Vec<Task> {
+    let mut out: Vec<Task> = tasks
+        .iter()
+        .filter(|task| match mode {
+            TaskFilterMode::Active => {
+                matches!(task.status, TaskStatus::Pending | TaskStatus::InProgress)
+            }
+            TaskFilterMode::Stale => task_is_stale(task),
+            TaskFilterMode::Done => matches!(
+                task.status,
+                TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
+            ),
+            TaskFilterMode::All => true,
+        })
+        .cloned()
+        .collect();
+    sort_tasks_for_display(&mut out);
+    out
+}
 
 /// Resolve the tasks snapshot path from whatever the user passed
 /// for `--socket`.
@@ -219,6 +272,151 @@ pub(crate) fn format_task_age(task: &Task) -> String {
     }
 }
 
+/// One entry in the task-detail activity timeline. Ordering is by
+/// timestamp ascending, then kind (lifecycle < log < message) —
+/// matches `cmd/task_helpers.go::buildTaskActivity`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TaskActivityEntry {
+    pub timestamp: DateTime<Utc>,
+    pub kind: TaskActivityKind,
+    pub actor: String,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum TaskActivityKind {
+    Lifecycle,
+    Log,
+    Message,
+}
+
+impl TaskActivityKind {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Lifecycle => "lifecycle",
+            Self::Log => "log",
+            Self::Message => "message",
+        }
+    }
+}
+
+/// Build the activity timeline for a task: lifecycle events
+/// derived from the task's own state, its log entries, and any
+/// related history messages. Caller may pass `limit=0` to skip
+/// trimming; otherwise the oldest entries drop out first so the
+/// tail (most recent) fits.
+pub(crate) fn build_task_activity(
+    task: &Task,
+    history: &[HistoryEntry],
+    limit: usize,
+) -> Vec<TaskActivityEntry> {
+    let mut entries: Vec<TaskActivityEntry> = Vec::new();
+    entries.push(TaskActivityEntry {
+        timestamp: task.created_at,
+        kind: TaskActivityKind::Lifecycle,
+        actor: task.created_by.clone(),
+        summary: format!("created task for {}", task.assignee),
+    });
+
+    match task.status {
+        TaskStatus::Completed if !task.result.is_empty() => {
+            entries.push(TaskActivityEntry {
+                timestamp: task.updated_at,
+                kind: TaskActivityKind::Lifecycle,
+                actor: task.assignee.clone(),
+                summary: "completed task".into(),
+            });
+        }
+        TaskStatus::Failed if !task.result.is_empty() => {
+            entries.push(TaskActivityEntry {
+                timestamp: task.updated_at,
+                kind: TaskActivityKind::Lifecycle,
+                actor: task.assignee.clone(),
+                summary: "failed task".into(),
+            });
+        }
+        TaskStatus::Cancelled if !task.result.is_empty() => {
+            entries.push(TaskActivityEntry {
+                timestamp: task.updated_at,
+                kind: TaskActivityKind::Lifecycle,
+                actor: task.assignee.clone(),
+                summary: "cancelled task".into(),
+            });
+        }
+        TaskStatus::InProgress => {
+            entries.push(TaskActivityEntry {
+                timestamp: task.updated_at,
+                kind: TaskActivityKind::Lifecycle,
+                actor: task.assignee.clone(),
+                summary: "task in progress".into(),
+            });
+        }
+        _ => {}
+    }
+
+    if let Some(ts) = task.removed_at {
+        let actor = if task.removed_by.is_empty() {
+            task.created_by.clone()
+        } else {
+            task.removed_by.clone()
+        };
+        entries.push(TaskActivityEntry {
+            timestamp: ts,
+            kind: TaskActivityKind::Lifecycle,
+            actor,
+            summary: "removed task".into(),
+        });
+    }
+
+    for log in &task.logs {
+        entries.push(TaskActivityEntry {
+            timestamp: log.timestamp,
+            kind: TaskActivityKind::Log,
+            actor: log.workspace.clone(),
+            summary: log.message.clone(),
+        });
+    }
+
+    for msg in related_task_messages(task, history) {
+        let mut summary = msg.content.replace('\n', " ");
+        if summary.contains(&task.id) {
+            let short = short_task_id(&task.id);
+            summary = summary.replace(&task.id, &short);
+        }
+        entries.push(TaskActivityEntry {
+            timestamp: msg.timestamp,
+            kind: TaskActivityKind::Message,
+            actor: format!("{}->{}", msg.from, msg.to),
+            summary,
+        });
+    }
+
+    entries.sort_by(|a, b| {
+        a.timestamp
+            .cmp(&b.timestamp)
+            .then_with(|| a.kind.cmp(&b.kind))
+    });
+    if limit > 0 && entries.len() > limit {
+        let drop = entries.len() - limit;
+        entries.drain(..drop);
+    }
+    entries
+}
+
+fn related_task_messages<'a>(task: &Task, history: &'a [HistoryEntry]) -> Vec<&'a HistoryEntry> {
+    history
+        .iter()
+        .filter(|entry| {
+            entry.task_id == task.id
+                || entry.content.contains(&task.id)
+                || entry.from == task.assignee
+                || entry.to == task.assignee
+                || entry.from == task.created_by
+                || entry.to == task.created_by
+        })
+        .collect()
+}
+
 pub(crate) fn truncate(s: &str, limit: usize) -> String {
     if limit == 0 {
         return String::new();
@@ -346,5 +544,91 @@ mod tests {
     fn short_task_id_clips_at_8_chars() {
         assert_eq!(short_task_id("01234567"), "01234567");
         assert_eq!(short_task_id("0123456789"), "01234567");
+    }
+
+    #[test]
+    fn filter_mode_cycles_active_stale_done_all() {
+        assert_eq!(TaskFilterMode::Active.next(), TaskFilterMode::Stale);
+        assert_eq!(TaskFilterMode::Stale.next(), TaskFilterMode::Done);
+        assert_eq!(TaskFilterMode::Done.next(), TaskFilterMode::All);
+        assert_eq!(TaskFilterMode::All.next(), TaskFilterMode::Active);
+    }
+
+    #[test]
+    fn filter_tasks_returns_only_active_by_default() {
+        let tasks = vec![
+            task("a", TaskStatus::Pending, None),
+            task("b", TaskStatus::Completed, None),
+            task("c", TaskStatus::Failed, None),
+        ];
+        assert_eq!(
+            filter_tasks(&tasks, TaskFilterMode::Active)
+                .iter()
+                .map(|t| t.id.clone())
+                .collect::<Vec<_>>(),
+            vec!["a".to_owned()]
+        );
+        assert_eq!(
+            filter_tasks(&tasks, TaskFilterMode::Done)
+                .iter()
+                .map(|t| t.id.clone())
+                .collect::<Vec<_>>(),
+            vec!["c".to_owned(), "b".to_owned()]
+        );
+        assert_eq!(filter_tasks(&tasks, TaskFilterMode::All).len(), 3);
+    }
+
+    #[test]
+    fn build_task_activity_joins_logs_and_related_messages() {
+        let mut t = task("abc", TaskStatus::InProgress, None);
+        t.logs.push(ax_proto::types::TaskLog {
+            timestamp: Utc.timestamp_opt(1_700_000_500, 0).single().unwrap(),
+            workspace: "alpha".into(),
+            message: "started".into(),
+        });
+        let history = vec![
+            HistoryEntry {
+                timestamp: Utc.timestamp_opt(1_700_000_600, 0).single().unwrap(),
+                from: "orch".into(),
+                to: "alpha".into(),
+                content: "please do abc".into(),
+                task_id: String::new(),
+            },
+            HistoryEntry {
+                timestamp: Utc.timestamp_opt(1_700_000_700, 0).single().unwrap(),
+                from: "unrelated".into(),
+                to: "other".into(),
+                content: "nothing here".into(),
+                task_id: String::new(),
+            },
+        ];
+        let entries = build_task_activity(&t, &history, 0);
+        // created_task + log(started) + in-progress lifecycle + 1 related msg
+        assert_eq!(entries.len(), 4);
+        // sorted ascending by timestamp
+        for pair in entries.windows(2) {
+            assert!(pair[0].timestamp <= pair[1].timestamp);
+        }
+        assert!(entries.iter().any(|e| e.kind == TaskActivityKind::Message));
+    }
+
+    #[test]
+    fn build_task_activity_limit_drops_oldest_entries_first() {
+        // Pending status has no extra lifecycle entry beyond "created
+        // task", so we can assert that the limited tail preserves the
+        // newest logs without racing against `updated_at = Utc::now()`.
+        let mut t = task("abc", TaskStatus::Pending, None);
+        t.created_at = Utc.timestamp_opt(1_699_999_900, 0).single().unwrap();
+        t.updated_at = t.created_at;
+        for i in 0..5 {
+            t.logs.push(ax_proto::types::TaskLog {
+                timestamp: Utc.timestamp_opt(1_700_000_000 + i, 0).single().unwrap(),
+                workspace: "alpha".into(),
+                message: format!("log {i}"),
+            });
+        }
+        let entries = build_task_activity(&t, &[], 3);
+        assert_eq!(entries.len(), 3);
+        assert!(entries.last().unwrap().summary.contains("log 4"));
     }
 }

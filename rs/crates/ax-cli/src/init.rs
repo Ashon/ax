@@ -305,6 +305,17 @@ fn register_as_child(
     name: &str,
     log: &mut String,
 ) -> Result<Option<PathBuf>, InitError> {
+    register_as_child_with_home(child_dir, name, home_dir(), log)
+}
+
+/// Extracted form that takes an explicit `home` override. Tests
+/// drive this directly instead of racing against `env::set_var`.
+fn register_as_child_with_home(
+    child_dir: &Path,
+    name: &str,
+    home: Option<PathBuf>,
+    log: &mut String,
+) -> Result<Option<PathBuf>, InitError> {
     let mut top: Option<(PathBuf, PathBuf)> = None; // (config_path, parent_dir)
 
     let mut cur = child_dir.parent().map(Path::to_path_buf);
@@ -318,7 +329,7 @@ fn register_as_child(
         }
         cur = next;
     }
-    if let Some(home) = home_dir() {
+    if let Some(home) = home {
         if let Some(path) = find_config_in_dir(&home) {
             top = Some((path, home));
         }
@@ -619,9 +630,12 @@ mod tests {
             .save(&child_cfg)
             .unwrap();
 
-        std::env::set_var("HOME", "/tmp/definitely-not-an-ax-home-path");
+        // Pass an explicit home override so the test never touches
+        // the process-global HOME env — `std::env::set_var` races
+        // with parallel tests on macOS.
         let mut log = String::new();
-        let added = register_as_child(&child, "child", &mut log)
+        let fake_home = tmp.path().join("no-home-here");
+        let added = register_as_child_with_home(&child, "child", Some(fake_home), &mut log)
             .expect("register_as_child")
             .expect("parent path");
         assert_eq!(added, parent_cfg);
