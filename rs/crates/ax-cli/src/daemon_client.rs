@@ -5,11 +5,14 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ax_proto::payloads::{ReadMessagesPayload, RegisterPayload, SendMessagePayload};
-use ax_proto::responses::{
-    ListWorkspacesResponse, ReadMessagesResponse, SendMessageResponse, StatusResponse,
+use ax_proto::payloads::{
+    ListTasksPayload, ReadMessagesPayload, RegisterPayload, SendMessagePayload,
 };
-use ax_proto::types::{Message, WorkspaceInfo};
+use ax_proto::responses::{
+    ListTasksResponse, ListWorkspacesResponse, ReadMessagesResponse, SendMessageResponse,
+    StatusResponse,
+};
+use ax_proto::types::{Message, Task, TaskStatus, WorkspaceInfo};
 use ax_proto::{Envelope, ErrorPayload, MessageType, ResponsePayload};
 use serde::de::DeserializeOwned;
 
@@ -128,11 +131,27 @@ impl DaemonClient {
         Ok(response.messages)
     }
 
-    #[allow(dead_code)]
     pub(crate) fn list_workspaces(&mut self) -> Result<Vec<WorkspaceInfo>, DaemonClientError> {
         let response: ListWorkspacesResponse =
             self.request(MessageType::ListWorkspaces, &serde_json::json!({}))?;
         Ok(response.workspaces)
+    }
+
+    pub(crate) fn list_tasks(
+        &mut self,
+        assignee: &str,
+        created_by: &str,
+        status: Option<TaskStatus>,
+    ) -> Result<Vec<Task>, DaemonClientError> {
+        let response: ListTasksResponse = self.request(
+            MessageType::ListTasks,
+            &ListTasksPayload {
+                assignee: assignee.to_owned(),
+                created_by: created_by.to_owned(),
+                status,
+            },
+        )?;
+        Ok(response.tasks)
     }
 
     fn request<P, R>(&mut self, kind: MessageType, payload: &P) -> Result<R, DaemonClientError>

@@ -22,6 +22,7 @@ ax-mcp-server = { path = "../ax-mcp-server" }
 ax-proto = { path = "../ax-proto" }
 ax-tmux = { path = "../ax-tmux" }
 ax-workspace = { path = "../ax-workspace" }
+chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { version = "1", features = ["rt-multi-thread", "signal", "io-std"] }

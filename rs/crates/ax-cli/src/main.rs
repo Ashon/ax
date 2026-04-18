@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod daemon_client;
+mod status;
 
 use std::env;
 use std::ffi::OsString;
@@ -43,6 +44,7 @@ Usage:
   ax-rs dispatch <target> --sender NAME [--fresh] [--config PATH] [--socket PATH] [--ax-bin PATH]
   ax-rs run-agent --workspace NAME [--runtime RUNTIME] [--socket PATH] [--config PATH] [--fresh] [-- ...]
   ax-rs mcp-server --workspace NAME [--socket PATH] [--config PATH]
+  ax-rs status [--socket PATH] [--config PATH]
 
 Notes:
   --config defaults to the discovered ax config (.ax/config.yaml or ax.yaml)
@@ -130,6 +132,10 @@ enum ParsedCommand {
         socket_path: PathBuf,
         config_path: Option<PathBuf>,
     },
+    Status {
+        socket_path: PathBuf,
+        config_path: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug)]
@@ -145,6 +151,7 @@ enum CliError {
     Dispatch(ax_workspace::DispatchError),
     RunAgent(ax_agent::LaunchError),
     McpServer(String),
+    Status(String),
 }
 
 #[derive(Debug)]
@@ -258,7 +265,7 @@ impl fmt::Display for CliError {
             Self::Lifecycle(source) => write!(f, "{source}"),
             Self::Dispatch(source) => write!(f, "{source}"),
             Self::RunAgent(source) => write!(f, "{source}"),
-            Self::McpServer(source) => write!(f, "{source}"),
+            Self::McpServer(source) | Self::Status(source) => write!(f, "{source}"),
         }
     }
 }
@@ -581,6 +588,10 @@ where
             socket_path,
             config_path,
         } => run_mcp_server(&workspace, &socket_path, config_path.as_deref()),
+        ParsedCommand::Status {
+            socket_path,
+            config_path,
+        } => run_status(&socket_path, config_path.as_deref()),
     }
 }
 
@@ -623,6 +634,9 @@ where
     }
     if command == "mcp-server" {
         return parse_mcp_server_args(&tail, cwd);
+    }
+    if command == "status" {
+        return parse_status_args(&tail, cwd);
     }
 
     let action = match command.as_str() {
@@ -1064,6 +1078,38 @@ fn parse_run_agent_args(argv: &[OsString], cwd: &Path) -> Result<ParsedCommand, 
         config_path,
         fresh,
         extra_args,
+    })
+}
+
+fn parse_status_args(argv: &[OsString], cwd: &Path) -> Result<ParsedCommand, CliError> {
+    let mut socket_path = expand_socket_path(DEFAULT_SOCKET_PATH);
+    let mut config_path: Option<PathBuf> = None;
+
+    let mut i = 1;
+    while i < argv.len() {
+        let arg = &argv[i];
+        match arg.to_string_lossy().as_ref() {
+            "-h" | "--help" => return Ok(ParsedCommand::Help),
+            "--socket" => {
+                i += 1;
+                socket_path = parse_socket_path(argv.get(i), "--socket")?;
+            }
+            "--config" => {
+                i += 1;
+                config_path = Some(parse_path_arg(argv.get(i), "--config", cwd)?);
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown flag {other:?}\n\n{USAGE}"
+                )));
+            }
+        }
+        i += 1;
+    }
+
+    Ok(ParsedCommand::Status {
+        socket_path,
+        config_path,
     })
 }
 
@@ -1650,6 +1696,14 @@ fn send_signal(pid: i32, signal: &'static str) -> Result<bool, CliError> {
         stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
     }
     .into())
+}
+
+fn run_status(socket_path: &Path, config_path: Option<&Path>) -> Result<ExitCode, CliError> {
+    let running = matches!(daemon_status(socket_path)?, DaemonStatus::Running(_));
+    let body = status::render_status(socket_path, config_path, running)
+        .map_err(|e| CliError::Status(e.to_string()))?;
+    print!("{body}");
+    Ok(ExitCode::SUCCESS)
 }
 
 fn run_mcp_server(
