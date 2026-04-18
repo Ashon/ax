@@ -13,6 +13,7 @@ mod input;
 mod render;
 mod sidebar;
 mod state;
+mod stream;
 mod terminal;
 
 pub use app::{run, RunError, RunOptions};

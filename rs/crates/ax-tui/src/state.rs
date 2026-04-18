@@ -6,10 +6,12 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 
 use ax_config::ProjectNode;
+use ax_daemon::HistoryEntry;
 use ax_proto::types::WorkspaceInfo;
 use ax_tmux::SessionInfo;
 
 use crate::sidebar::SidebarEntry;
+use crate::stream::StreamView;
 
 /// Which full-pane view is active. Currently only `Grid` is
 /// implemented; `Stream` follows in the next slice.
@@ -31,6 +33,8 @@ pub(crate) struct App {
     pub(crate) desired: BTreeMap<String, bool>,
     pub(crate) sidebar_entries: Vec<SidebarEntry>,
     pub(crate) selected_entry: usize,
+    pub(crate) stream: StreamView,
+    pub(crate) messages: Vec<HistoryEntry>,
     pub(crate) last_refresh: Option<Instant>,
     pub(crate) daemon_running: bool,
     pub(crate) notice: Option<String>,
@@ -48,11 +52,17 @@ impl App {
             desired: BTreeMap::new(),
             sidebar_entries: Vec::new(),
             selected_entry: 0,
+            stream: StreamView::Messages,
+            messages: Vec::new(),
             last_refresh: None,
             daemon_running: false,
             notice: None,
             quit: false,
         }
+    }
+
+    pub(crate) fn cycle_stream(&mut self) {
+        self.stream = self.stream.next();
     }
 
     /// Regenerate sidebar entries from the current session + tree

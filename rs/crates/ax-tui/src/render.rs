@@ -13,6 +13,7 @@ use ax_proto::types::AgentStatus;
 
 use crate::sidebar::SidebarEntry;
 use crate::state::App;
+use crate::stream::{format_message_line, StreamView};
 
 const SIDEBAR_WIDTH: u16 = 34;
 
@@ -128,34 +129,81 @@ fn sidebar_item<'a>(idx: usize, entry: &'a SidebarEntry, app: &'a App) -> ListIt
 }
 
 fn draw_body(f: &mut Frame, area: Rect, app: &App) {
-    let (title, body): (&str, String) = match current_entry(app) {
+    match app.stream {
+        StreamView::Messages => draw_messages(f, area, app),
+        StreamView::Tasks | StreamView::Tokens => draw_stub_view(f, area, app),
+        StreamView::Hidden => draw_selection_summary(f, area, app),
+    }
+}
+
+fn draw_messages(f: &mut Frame, area: Rect, app: &App) {
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let inner_height = area.height.saturating_sub(2) as usize;
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(StreamView::Messages.title());
+
+    if app.messages.is_empty() {
+        let para = Paragraph::new("  (no messages yet)")
+            .style(Style::default().add_modifier(Modifier::DIM))
+            .block(block);
+        f.render_widget(para, area);
+        return;
+    }
+
+    // Show the tail that fits inside the pane.
+    let start = app.messages.len().saturating_sub(inner_height.max(1));
+    let lines: Vec<Line> = app.messages[start..]
+        .iter()
+        .map(|entry| Line::from(Span::raw(format_message_line(entry, inner_width.max(1)))))
+        .collect();
+    let para = Paragraph::new(lines).block(block);
+    f.render_widget(para, area);
+}
+
+fn draw_stub_view(f: &mut Frame, area: Rect, app: &App) {
+    let text = format!(
+        "{} view lands in a follow-up slice — press Tab / s to cycle back to messages",
+        match app.stream {
+            StreamView::Tasks => "tasks",
+            StreamView::Tokens => "tokens",
+            _ => "stream",
+        }
+    );
+    let para = Paragraph::new(text)
+        .wrap(Wrap { trim: true })
+        .style(Style::default().add_modifier(Modifier::DIM))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(app.stream.title()),
+        );
+    f.render_widget(para, area);
+}
+
+fn draw_selection_summary(f: &mut Frame, area: Rect, app: &App) {
+    let body = match current_entry(app) {
         Some(entry) => {
             let ws = &entry.workspace;
             let info = app
                 .workspace_infos
                 .get(ws)
                 .map_or_else(|| "(offline)".to_owned(), workspace_info_summary);
-            (
-                "selection",
-                format!(
-                    "workspace: {ws}\nsession: {}\nagent:    {}",
-                    entry
-                        .session_index
-                        .and_then(|idx| app.sessions.get(idx))
-                        .map_or_else(|| "none".to_owned(), |s| s.name.clone()),
-                    info,
-                ),
+            format!(
+                "workspace: {ws}\nsession: {}\nagent:    {}",
+                entry
+                    .session_index
+                    .and_then(|idx| app.sessions.get(idx))
+                    .map_or_else(|| "none".to_owned(), |s| s.name.clone()),
+                info,
             )
         }
-        None => (
-            "body",
-            "stream view lands in the next slice — pick a workspace on the left".to_owned(),
-        ),
+        None => "pick a workspace on the left".to_owned(),
     };
     let para = Paragraph::new(body).wrap(Wrap { trim: false }).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(format!(" {title} ")),
+            .title(app.stream.title()),
     );
     f.render_widget(para, area);
 }
@@ -178,7 +226,7 @@ fn workspace_info_summary(info: &ax_proto::types::WorkspaceInfo) -> String {
 fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     let text = match &app.notice {
         Some(msg) => msg.clone(),
-        None => "j/k: move · q: quit · sidebar shows project tree + live sessions".to_owned(),
+        None => "j/k: move · Tab/s: cycle view · q: quit".to_owned(),
     };
     let footer = Paragraph::new(text).style(Style::default().add_modifier(Modifier::DIM));
     f.render_widget(footer, area);
