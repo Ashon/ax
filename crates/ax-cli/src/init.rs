@@ -27,9 +27,15 @@ use ax_workspace::{ensure_orchestrator_tree, orchestrator_name, RealTmux};
 use crate::daemon_client::DaemonClient;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)] // independent opt-in flags
 pub(crate) struct InitOptions {
     pub global: bool,
     pub no_setup: bool,
+    /// When `true`, skip walking the ancestor/global orchestrator
+    /// tree after scaffolding. Useful for throwaway `ax init` runs
+    /// where the user doesn't want every ancestor orchestrator
+    /// session waking up.
+    pub no_refresh: bool,
     pub runtime: String,
     pub socket_path: PathBuf,
     pub daemon_running: bool,
@@ -70,7 +76,9 @@ pub(crate) fn run(opts: &InitOptions) -> Result<String, InitError> {
         if let Some(parent_path) = register_as_child(&dir, &project_name, &mut out)? {
             let _ = writeln!(out, "Registered as child of {}", parent_path.display());
         }
-        if let Err(e) = refresh_orchestrator_tree(opts, &project_name) {
+        if opts.no_refresh {
+            out.push_str("note: orchestrator tree refresh skipped (--no-refresh)\n");
+        } else if let Err(e) = refresh_orchestrator_tree(opts, &project_name) {
             let _ = writeln!(out, "note: orchestrator tree refresh skipped: {e}");
         }
     }

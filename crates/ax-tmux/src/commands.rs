@@ -3,7 +3,7 @@
 //! failures into [`TmuxError::Command`].
 
 use std::collections::BTreeMap;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::Duration;
 
@@ -142,12 +142,16 @@ pub fn list_sessions() -> Result<Vec<SessionInfo>, TmuxError> {
     parse_list_sessions_result(&output)
 }
 
-/// `tmux has-session -t <name>`. Returns true on exit 0.
+/// `tmux has-session -t <name>`. Returns true on exit 0. Stderr is
+/// silenced — tmux prints `can't find session: <name>` to stderr on
+/// a missing session, and callers only care about the exit status.
 #[must_use]
 pub fn session_exists(workspace: &str) -> bool {
     let name = session_name(workspace);
     Command::new("tmux")
         .args(["has-session", "-t", &name])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .map(|s| s.success())
         .unwrap_or(false)

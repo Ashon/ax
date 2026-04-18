@@ -30,7 +30,7 @@ use ax_workspace::{
 use daemon_client::{DaemonClient, DaemonClientError};
 
 const USAGE: &str = "\
-ax - thin Rust entrypoint for migrated workspace control
+ax — multi-agent LLM workspace manager built on tmux
 
 Usage:
   ax daemon start [--socket PATH]
@@ -58,7 +58,7 @@ Usage:
   ax tasks intervene <id> --action wake|interrupt|retry [--note STR] [--expected-version N] [--socket PATH]
   ax tasks retry <id> [--note STR] [--expected-version N] [--socket PATH]
   ax tasks activity [task-id] [--assignee N] [--created-by N] [--status S] [--stale] [--limit N] [--socket PATH]
-  ax init [--global] [--no-setup] [--codex|--claude] [--socket PATH]
+  ax init [--global] [--no-setup] [--no-refresh] [--codex|--claude] [--socket PATH]
   ax watch [--socket PATH]
   ax workspace create <name> [--dir PATH] [--socket PATH] [--config PATH] [--ax-bin PATH]
   ax workspace destroy <name> [--socket PATH] [--config PATH] [--ax-bin PATH]
@@ -1459,6 +1459,7 @@ fn parse_init_args(argv: &[OsString]) -> Result<ParsedCommand, CliError> {
     let mut socket_path = expand_socket_path(DEFAULT_SOCKET_PATH);
     let mut global = false;
     let mut no_setup = false;
+    let mut no_refresh = false;
     let mut want_codex = false;
     let mut want_claude = false;
 
@@ -1469,6 +1470,7 @@ fn parse_init_args(argv: &[OsString]) -> Result<ParsedCommand, CliError> {
             "-h" | "--help" => return Ok(ParsedCommand::Help),
             "-g" | "--global" => global = true,
             "--no-setup" => no_setup = true,
+            "--no-refresh" => no_refresh = true,
             "--codex" => want_codex = true,
             "--claude" => want_claude = true,
             "--socket" => {
@@ -1494,6 +1496,7 @@ fn parse_init_args(argv: &[OsString]) -> Result<ParsedCommand, CliError> {
         options: init::InitOptions {
             global,
             no_setup,
+            no_refresh,
             runtime,
             socket_path,
             daemon_running,
