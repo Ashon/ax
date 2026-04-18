@@ -21,7 +21,7 @@ pub(crate) struct PendingLifecycle {
     pub action: QuickActionId,
     pub workspace: String,
 }
-use crate::sidebar::SidebarEntry;
+use crate::agents::AgentEntry;
 use crate::stream::StreamView;
 
 /// Which full-pane view is active. Currently only `Grid` is
@@ -42,7 +42,7 @@ pub(crate) struct App {
     pub(crate) tree: Option<ProjectNode>,
     pub(crate) reconfigure_enabled: bool,
     pub(crate) desired: BTreeMap<String, bool>,
-    pub(crate) sidebar_entries: Vec<SidebarEntry>,
+    pub(crate) agent_entries: Vec<AgentEntry>,
     pub(crate) selected_entry: usize,
     pub(crate) stream: StreamView,
     pub(crate) messages: Vec<HistoryEntry>,
@@ -88,7 +88,7 @@ impl App {
             tree: None,
             reconfigure_enabled: false,
             desired: BTreeMap::new(),
-            sidebar_entries: Vec::new(),
+            agent_entries: Vec::new(),
             selected_entry: 0,
             stream: StreamView::Messages,
             messages: Vec::new(),
@@ -125,7 +125,7 @@ impl App {
     }
 
     /// Filtered view of `self.tasks` using the current filter
-    /// setting. The sidebar / detail pane both derive their state
+    /// setting. The agents panel / detail pane both derive their state
     /// from this so cursor + render stay consistent.
     pub(crate) fn filtered_tasks(&self) -> Vec<Task> {
         crate::tasks::filter_tasks(&self.tasks, self.task_filter)
@@ -165,17 +165,17 @@ impl App {
         }
     }
 
-    /// Regenerate sidebar entries from the current session + tree
+    /// Regenerate agents-panel entries from the current session + tree
     /// state. Callers trigger this after a refresh tick so selection
     /// stays in sync.
-    pub(crate) fn rebuild_sidebar(&mut self) {
-        self.sidebar_entries = crate::sidebar::build_entries(
+    pub(crate) fn rebuild_agents(&mut self) {
+        self.agent_entries = crate::agents::build_entries(
             &self.sessions,
             self.tree.as_ref(),
             self.reconfigure_enabled,
             &self.desired,
         );
-        let selectable = selectable_entry_positions(&self.sidebar_entries);
+        let selectable = selectable_entry_positions(&self.agent_entries);
         if selectable.is_empty() {
             self.selected_entry = 0;
             return;
@@ -186,7 +186,7 @@ impl App {
     }
 
     pub(crate) fn move_selection(&mut self, delta: i32) {
-        let selectable = selectable_entry_positions(&self.sidebar_entries);
+        let selectable = selectable_entry_positions(&self.agent_entries);
         if selectable.is_empty() {
             self.selected_entry = 0;
             return;
@@ -203,10 +203,10 @@ impl App {
         self.notice = Some(text.into());
     }
 
-    /// Workspace name under the sidebar cursor, if any. Returns
-    /// `None` for group rows or empty sidebars.
+    /// Workspace name under the agents-panel cursor, if any. Returns
+    /// `None` for group rows or empty panels.
     pub(crate) fn selected_workspace(&self) -> Option<&str> {
-        self.sidebar_entries
+        self.agent_entries
             .get(self.selected_entry)
             .filter(|e| !e.group)
             .map(|e| e.workspace.as_str())
@@ -227,10 +227,10 @@ impl App {
     }
 }
 
-/// Indexes of sidebar entries that accept the selection cursor.
+/// Indexes of agents-panel entries that accept the selection cursor.
 /// Group headers are skipped; offline workspace rows stay selectable
 /// so the overlay (restart/stop/stream) can still target them.
-fn selectable_entry_positions(entries: &[SidebarEntry]) -> Vec<usize> {
+fn selectable_entry_positions(entries: &[AgentEntry]) -> Vec<usize> {
     entries
         .iter()
         .enumerate()
@@ -304,11 +304,11 @@ mod tests {
     }
 
     #[test]
-    fn move_selection_clamps_to_selectable_sidebar_entries() {
+    fn move_selection_clamps_to_selectable_agent_entries() {
         let mut app = App::new();
         app.sessions = vec![mock_session("a"), mock_session("b"), mock_session("c")];
-        app.rebuild_sidebar();
-        let selectable = selectable_entry_positions(&app.sidebar_entries);
+        app.rebuild_agents();
+        let selectable = selectable_entry_positions(&app.agent_entries);
         assert!(!selectable.is_empty());
         app.selected_entry = selectable[0];
         app.move_selection(10);

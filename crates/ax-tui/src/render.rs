@@ -1,7 +1,6 @@
-//! ratatui draw routine. Splits the screen into a sidebar (project
-//! tree + live sessions) and a body pane. The body still shows a
-//! selection summary; the stream view / tmux captures land in later
-//! slices.
+//! ratatui draw routine. Splits the screen into a top `agents` panel
+//! (project tree + live sessions) and a body pane underneath for
+//! messages / tasks / tokens or a full-screen tmux capture mirror.
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -16,7 +15,7 @@ use throbber_widgets_tui::{Throbber, WhichUse, BRAILLE_SIX};
 use ax_proto::types::AgentStatus;
 
 use crate::actions::QuickActionId;
-use crate::sidebar::SidebarEntry;
+use crate::agents::AgentEntry;
 use crate::state::App;
 use crate::stream::{format_message_line, StreamView};
 
@@ -52,7 +51,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
     };
     let agents_area = middle[0];
     let content_area = *middle.last().expect("layout produces >= 2 rows");
-    draw_sidebar(f, agents_area, app);
+    draw_agents(f, agents_area, app);
     if !streaming {
         draw_stream_tabs(f, middle[1], app);
     }
@@ -70,7 +69,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
 /// within the pane; `+3` accounts for the border (2) and header (1).
 fn compute_agents_height(app: &App, middle_h: u16, streaming: bool) -> u16 {
     let reserved = if streaming { 3 } else { 4 };
-    let desired = (app.sidebar_entries.len() as u16).saturating_add(3).max(5);
+    let desired = (app.agent_entries.len() as u16).saturating_add(3).max(5);
     let cap = middle_h.saturating_sub(reserved).max(3);
     desired.min(cap)
 }
@@ -78,7 +77,7 @@ fn compute_agents_height(app: &App, middle_h: u16, streaming: bool) -> u16 {
 /// Context-menu style overlay: drops down from the selected agent
 /// row with a small indent so it reads as a popup on that row.
 /// Clamps into the frame so it never runs off the edge.
-fn draw_quick_actions(f: &mut Frame, frame: Rect, sidebar: Rect, app: &App) {
+fn draw_quick_actions(f: &mut Frame, frame: Rect, agents_area: Rect, app: &App) {
     let workspace = app.selected_workspace().unwrap_or("");
     let action_count = app.quick_actions.actions.len() as u16;
     // Content rows: confirm mode is a two-line prompt, normal mode
@@ -95,21 +94,21 @@ fn draw_quick_actions(f: &mut Frame, frame: Rect, sidebar: Rect, app: &App) {
     let width: u16 = 42;
     let width = width.min(frame.width.saturating_sub(2));
 
-    // Reproduce the sidebar layout so the popup appears *below* the
-    // row under the cursor (even when the list has scrolled off the
-    // top). The sidebar block contributes a 1-row top border plus a
+    // Reproduce the agents-panel layout so the popup appears *below*
+    // the row under the cursor (even when the list has scrolled off
+    // the top). The panel block contributes a 1-row top border plus a
     // 1-row column header before the list starts.
-    let list_area_height = sidebar.height.saturating_sub(3);
+    let list_area_height = agents_area.height.saturating_sub(3);
     let viewport = compute_viewport(
-        app.sidebar_entries.len(),
+        app.agent_entries.len(),
         app.selected_entry,
         list_area_height as usize,
     );
-    let list_y = sidebar.y.saturating_add(2);
+    let list_y = agents_area.y.saturating_add(2);
     let rel = (app.selected_entry.saturating_sub(viewport.start)) as u16;
     let selected_row = list_y.saturating_add(rel);
 
-    let anchor_x = sidebar.x + 2;
+    let anchor_x = agents_area.x + 2;
     let below = selected_row.saturating_add(1);
     let max_x = frame.right().saturating_sub(width);
     let max_y = frame.bottom().saturating_sub(height);
@@ -190,7 +189,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-fn draw_sidebar(f: &mut Frame, area: Rect, app: &App) {
+fn draw_agents(f: &mut Frame, area: Rect, app: &App) {
     let block = Block::default().borders(Borders::ALL).title(" agents ");
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -198,7 +197,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    if app.sidebar_entries.is_empty() {
+    if app.agent_entries.is_empty() {
         let empty = Paragraph::new(
             "No active agents. Run `ax up` in a project directory with .ax/config.yaml.",
         )
@@ -207,9 +206,9 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let cols = SidebarColumns::fit(inner.width);
+    let cols = AgentColumns::fit(inner.width);
     let header_area = Rect::new(inner.x, inner.y, inner.width, 1);
-    draw_sidebar_header(f, header_area, &cols);
+    draw_agents_header(f, header_area, &cols);
 
     let list_area = Rect::new(
         inner.x,
@@ -224,15 +223,15 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &App) {
     // rows. A scrollbar makes off-screen overflow visible instead of
     // relying on inline hint markers alone.
     let viewport = compute_viewport(
-        app.sidebar_entries.len(),
+        app.agent_entries.len(),
         app.selected_entry,
         list_area.height as usize,
     );
     let rows_area = viewport.content_area(list_area);
-    let items: Vec<ListItem> = app.sidebar_entries[viewport.start..viewport.end]
+    let items: Vec<ListItem> = app.agent_entries[viewport.start..viewport.end]
         .iter()
         .enumerate()
-        .map(|(rel, entry)| sidebar_row(viewport.start + rel, entry, app, &cols))
+        .map(|(rel, entry)| agent_row(viewport.start + rel, entry, app, &cols))
         .collect();
     f.render_widget(List::new(items), rows_area);
     render_scrollbar(f, list_area, viewport);
@@ -240,7 +239,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &App) {
 
 /// Column widths for the agents table. `name` flexes to fill the
 /// remainder; the rest are fixed so rows line up across refreshes.
-struct SidebarColumns {
+struct AgentColumns {
     name: usize,
     state: usize,
     up: usize,
@@ -249,7 +248,7 @@ struct SidebarColumns {
     info: usize,
 }
 
-impl SidebarColumns {
+impl AgentColumns {
     fn fit(width: u16) -> Self {
         // NAME is fixed-compact; INFO absorbs the remaining width so
         // operator hints / reconcile notes get the room they need.
@@ -272,7 +271,7 @@ impl SidebarColumns {
     }
 }
 
-fn draw_sidebar_header(f: &mut Frame, area: Rect, cols: &SidebarColumns) {
+fn draw_agents_header(f: &mut Frame, area: Rect, cols: &AgentColumns) {
     let text = format!(
         "{:<w1$} {:<w2$} {:<w3$} {:<w4$} {:<w5$} {:<w6$}",
         "NAME",
@@ -295,11 +294,11 @@ fn draw_sidebar_header(f: &mut Frame, area: Rect, cols: &SidebarColumns) {
     f.render_widget(para, area);
 }
 
-fn sidebar_row<'a>(
+fn agent_row<'a>(
     idx: usize,
-    entry: &'a SidebarEntry,
+    entry: &'a AgentEntry,
     app: &'a App,
-    cols: &SidebarColumns,
+    cols: &AgentColumns,
 ) -> ListItem<'a> {
     // Two-column indent per depth level, starting from zero at the
     // top-level project so the tree reads "L1 → 0, L2 → 2, …". Leaves
@@ -1183,7 +1182,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         )
     } else {
         (
-            "j/k sidebar · 1-3/Tab view · [/] tasks · f filter · enter actions · q quit".to_owned(),
+            "j/k agents · 1-3/Tab view · [/] tasks · f filter · enter actions · q quit".to_owned(),
             Style::default().add_modifier(Modifier::DIM),
         )
     };

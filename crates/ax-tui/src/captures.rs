@@ -28,13 +28,13 @@ pub(crate) struct CaptureEntry {
     pub captured_at: Instant,
     /// Last moment the captured content actually *changed* compared to
     /// the prior snapshot. Unchanged refreshes only bump `captured_at`.
-    /// Used by the sidebar to flip a workspace from "running" to
+    /// Used by the agents panel to flip a workspace from "running" to
     /// "idle" after a few quiet seconds.
     pub last_changed_at: Instant,
 }
 
 /// Window during which a workspace stays labelled "running" after its
-/// last content change. Past this threshold the sidebar shows "idle"
+/// last content change. Past this threshold the agents panel shows "idle"
 /// so operators can tell the agent has stopped producing output even
 /// when the tmux session is still attached.
 pub(crate) const RUNNING_WINDOW: Duration = Duration::from_secs(3);

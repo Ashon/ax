@@ -33,7 +33,7 @@ pub(crate) fn handle_key(app: &mut App, event: KeyEvent) {
     }
 
     // In streaming mode, `esc` exits back to the grid/stream layout
-    // first. All other keys still steer the sidebar + stream view so
+    // first. All other keys still steer the agents panel + stream view so
     // you can e.g. swap to the tasks table while a capture is open.
     if app.streamed_workspace.is_some() && matches!(event.code, KeyCode::Esc) {
         app.streamed_workspace = None;
@@ -127,11 +127,11 @@ mod tests {
     #[test]
     fn enter_opens_overlay_when_workspace_selected() {
         let mut app = App::new();
-        // No sidebar = no workspace → enter is a no-op.
+        // No agents panel = no workspace → enter is a no-op.
         handle_key(&mut app, press(KeyCode::Enter));
         assert!(!app.quick_actions.open);
 
-        app.sidebar_entries = vec![crate::sidebar::SidebarEntry {
+        app.agent_entries = vec![crate::agents::AgentEntry {
             label: "alpha".into(),
             workspace: "alpha".into(),
             session_index: Some(0),
@@ -148,7 +148,7 @@ mod tests {
     #[test]
     fn overlay_enter_on_restart_sets_needs_confirm_then_queues_lifecycle() {
         let mut app = App::new();
-        app.sidebar_entries = vec![crate::sidebar::SidebarEntry {
+        app.agent_entries = vec![crate::agents::AgentEntry {
             label: "alpha".into(),
             workspace: "alpha".into(),
             session_index: Some(0),

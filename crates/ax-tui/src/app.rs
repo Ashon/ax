@@ -134,7 +134,7 @@ fn refresh(app: &mut App, opts: &RunOptions) {
     // silent — a missing config just falls back to the name-split
     // fallback tree.
     refresh_tree(app);
-    app.rebuild_sidebar();
+    app.rebuild_agents();
     refresh_messages(app, opts);
     refresh_tasks(app, opts);
     refresh_captures(app);
@@ -178,7 +178,7 @@ fn refresh_usage(app: &mut App, opts: &RunOptions) {
 
 fn refresh_captures(app: &mut App) {
     // Streaming mode pins the focused workspace so the mirrored
-    // pane updates every tick. Otherwise fall back to the sidebar
+    // pane updates every tick. Otherwise fall back to the agents-panel
     // cursor's workspace.
     let focused = app
         .streamed_workspace

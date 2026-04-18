@@ -1,4 +1,4 @@
-//! Sidebar entry builder — turns the active sessions + optional
+//! Agents-panel entry builder — turns the active sessions + optional
 //! config tree into a flat list of renderable rows.
 //!
 //! Split out from rendering so tests can assert the tree expansion
@@ -9,11 +9,11 @@ use std::collections::BTreeMap;
 use ax_config::ProjectNode;
 use ax_tmux::SessionInfo;
 
-/// One row in the sidebar. Group entries carry only a label; session
-/// entries carry a workspace + session index so the selection
+/// One row in the agents panel. Group entries carry only a label;
+/// session entries carry a workspace + session index so the selection
 /// pointer can move across them.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SidebarEntry {
+pub(crate) struct AgentEntry {
     pub label: String,
     pub workspace: String,
     pub session_index: Option<usize>,
@@ -22,7 +22,7 @@ pub(crate) struct SidebarEntry {
     pub reconcile: String,
 }
 
-impl SidebarEntry {
+impl AgentEntry {
     fn group(label: impl Into<String>, level: usize) -> Self {
         Self {
             label: label.into(),
@@ -52,7 +52,7 @@ impl SidebarEntry {
     }
 }
 
-/// Build sidebar entries from active tmux sessions + an optional
+/// Build agents-panel entries from active tmux sessions + an optional
 /// project tree + an optional reconfigure-desired set. When no tree
 /// is available the fallback splits workspace names on `.` / `_`
 /// into nested groups.
@@ -61,7 +61,7 @@ pub(crate) fn build_entries(
     tree: Option<&ProjectNode>,
     reconfigure_enabled: bool,
     desired: &BTreeMap<String, bool>,
-) -> Vec<SidebarEntry> {
+) -> Vec<AgentEntry> {
     if let Some(node) = tree {
         return build_from_tree(node, sessions, reconfigure_enabled, desired);
     }
@@ -73,7 +73,7 @@ fn build_from_tree(
     sessions: &[SessionInfo],
     reconfigure_enabled: bool,
     desired: &BTreeMap<String, bool>,
-) -> Vec<SidebarEntry> {
+) -> Vec<AgentEntry> {
     let session_by_workspace: BTreeMap<&str, usize> = sessions
         .iter()
         .enumerate()
@@ -92,18 +92,18 @@ fn build_from_tree(
         .filter_map(|(i, s)| (!known.contains_key(&s.workspace)).then_some(i))
         .collect();
     if !unregistered.is_empty() {
-        entries.push(SidebarEntry::group(
+        entries.push(AgentEntry::group(
             runtime_only_group_label(reconfigure_enabled),
             0,
         ));
         for idx in unregistered {
             let name = &sessions[idx].workspace;
-            entries.push(SidebarEntry::leaf(
+            entries.push(AgentEntry::leaf(
                 name.clone(),
                 name.clone(),
                 Some(idx),
                 1,
-                reconfigure_sidebar_state(name, desired, true, false),
+                reconfigure_agent_state(name, desired, true, false),
             ));
         }
     }
@@ -126,10 +126,10 @@ fn append_project(
     node: &ProjectNode,
     level: usize,
     session_by_workspace: &BTreeMap<&str, usize>,
-    entries: &mut Vec<SidebarEntry>,
+    entries: &mut Vec<AgentEntry>,
     desired: &BTreeMap<String, bool>,
 ) {
-    entries.push(SidebarEntry::group(
+    entries.push(AgentEntry::group(
         format!("▾ {}", node.display_name()),
         level,
     ));
@@ -141,14 +141,14 @@ fn append_project(
         let reconcile_offline = if is_root_orch {
             String::new()
         } else {
-            reconfigure_sidebar_state(&orch_name, desired, false, false)
+            reconfigure_agent_state(&orch_name, desired, false, false)
         };
         let reconcile = if session_idx.is_some() {
-            reconfigure_sidebar_state(&orch_name, desired, true, false)
+            reconfigure_agent_state(&orch_name, desired, true, false)
         } else {
             reconcile_offline
         };
-        entries.push(SidebarEntry::leaf(
+        entries.push(AgentEntry::leaf(
             "◆ orchestrator",
             orch_name,
             session_idx,
@@ -160,8 +160,8 @@ fn append_project(
     for ws in &node.workspaces {
         let session_idx = session_by_workspace.get(ws.merged_name.as_str()).copied();
         let reconcile =
-            reconfigure_sidebar_state(&ws.merged_name, desired, session_idx.is_some(), false);
-        entries.push(SidebarEntry::leaf(
+            reconfigure_agent_state(&ws.merged_name, desired, session_idx.is_some(), false);
+        entries.push(AgentEntry::leaf(
             ws.name.clone(),
             ws.merged_name.clone(),
             session_idx,
@@ -175,7 +175,7 @@ fn append_project(
     }
 }
 
-fn build_fallback(sessions: &[SessionInfo]) -> Vec<SidebarEntry> {
+fn build_fallback(sessions: &[SessionInfo]) -> Vec<AgentEntry> {
     // No config available — split workspace names by "." or "_" and
     // render as a nested tree so sibling workspaces share a header.
     let mut root = Node::default();
@@ -200,13 +200,13 @@ fn build_fallback(sessions: &[SessionInfo]) -> Vec<SidebarEntry> {
     entries
 }
 
-fn walk_fallback(node: &Node, level: usize, entries: &mut Vec<SidebarEntry>) {
+fn walk_fallback(node: &Node, level: usize, entries: &mut Vec<AgentEntry>) {
     for child in node.children.values() {
         if !child.children.is_empty() {
-            entries.push(SidebarEntry::group(format!("▾ {}", child.name), level));
+            entries.push(AgentEntry::group(format!("▾ {}", child.name), level));
         }
         if let Some(idx) = child.session_index {
-            entries.push(SidebarEntry::leaf(
+            entries.push(AgentEntry::leaf(
                 child.name.clone(),
                 child.name.clone(),
                 Some(idx),
@@ -257,9 +257,9 @@ fn runtime_only_group_label(enabled: bool) -> &'static str {
     }
 }
 
-/// Reconcile state label used by the sidebar: desired-only /
+/// Reconcile state label used by the agents panel: desired-only /
 /// runtime-only / (empty).
-fn reconfigure_sidebar_state(
+fn reconfigure_agent_state(
     name: &str,
     desired: &BTreeMap<String, bool>,
     has_session: bool,
@@ -373,17 +373,17 @@ mod tests {
         desired.insert("alpha".to_owned(), true);
         desired.insert("beta".to_owned(), true);
         assert_eq!(
-            reconfigure_sidebar_state("alpha", &desired, false, false),
+            reconfigure_agent_state("alpha", &desired, false, false),
             "desired"
         );
         assert_eq!(
-            reconfigure_sidebar_state("alpha", &desired, true, false),
+            reconfigure_agent_state("alpha", &desired, true, false),
             ""
         );
         assert_eq!(
-            reconfigure_sidebar_state("ghost", &desired, true, false),
+            reconfigure_agent_state("ghost", &desired, true, false),
             "runtime-only"
         );
-        assert_eq!(reconfigure_sidebar_state("_cli", &desired, true, false), "");
+        assert_eq!(reconfigure_agent_state("_cli", &desired, true, false), "");
     }
 }

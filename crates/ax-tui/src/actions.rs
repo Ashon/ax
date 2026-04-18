@@ -1,6 +1,6 @@
 //! Quick-action overlay. When open, the overlay takes over key input
 //! and lets operators run lifecycle controls against the workspace
-//! under the sidebar cursor: interrupt (Escape via tmux) and
+//! under the agents-panel cursor: interrupt (Escape via tmux) and
 //! restart/stop (goes through
 //! `ax_workspace::{restart,stop}_named_target`). Flow-switching
 //! actions (show messages / tasks) just flip the stream view.
