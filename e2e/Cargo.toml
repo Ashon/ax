@@ -12,6 +12,8 @@ description = "End-to-end / integration tests that span multiple ax crates (daem
 workspace = true
 
 [dependencies]
+tempfile = "3"
+thiserror = { workspace = true }
 
 [dev-dependencies]
 ax-config = { path = "../crates/ax-config" }

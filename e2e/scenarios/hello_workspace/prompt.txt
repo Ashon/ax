@@ -1,0 +1,1 @@
+Delegate to the worker workspace via start_task: create worker/hello.txt containing exactly the line `hello, world` with no trailing whitespace and no extra lines. Finish the run only after the file exists and the task is marked complete.

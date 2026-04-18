@@ -1,0 +1,15 @@
+project: hello-workspace
+orchestrator_runtime: codex
+idle_timeout_minutes: 1
+
+workspaces:
+  worker:
+    dir: ./worker
+    description: "Owns the worker/ subdirectory. Writes hello.txt on request."
+    runtime: codex
+    instructions: |
+      You own only the worker/ subdirectory.
+      Do not create files outside worker/.
+      When asked to produce hello.txt, write exactly the single line
+      `hello, world` (no trailing whitespace, no extra lines).
+      Mark your task complete as soon as the file exists.

@@ -1,0 +1,26 @@
+project: delegated-split
+orchestrator_runtime: codex
+idle_timeout_minutes: 1
+
+workspaces:
+  alpha:
+    dir: ./alpha
+    description: "Owns the alpha/ subdirectory."
+    runtime: codex
+    instructions: |
+      You own only the alpha/ subdirectory.
+      Do not edit ../beta or any other top-level directory.
+      When assigned a task that names alpha/result.txt, write exactly
+      the single word `alpha` (no trailing whitespace, no extra
+      lines). Mark the task complete once the file exists.
+
+  beta:
+    dir: ./beta
+    description: "Owns the beta/ subdirectory."
+    runtime: codex
+    instructions: |
+      You own only the beta/ subdirectory.
+      Do not edit ../alpha or any other top-level directory.
+      When assigned a task that names beta/result.txt, write exactly
+      the single word `beta` (no trailing whitespace, no extra
+      lines). Mark the task complete once the file exists.
