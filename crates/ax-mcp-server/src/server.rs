@@ -457,6 +457,22 @@ pub struct UsageTrendsRequest {
 }
 
 #[derive(Debug, Default, schemars::JsonSchema, Deserialize)]
+pub struct PlanInitialTeamRequest {
+    /// Absolute path to the project root to survey. Defaults to the
+    /// MCP server's current working directory.
+    #[serde(default)]
+    pub project_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, schemars::JsonSchema, Deserialize)]
+pub struct PlanTeamReconfigureRequest {
+    /// Absolute path to the project root. Defaults to the parent
+    /// of the server's effective config path (`.ax/` parent).
+    #[serde(default)]
+    pub project_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, schemars::JsonSchema, Deserialize)]
 pub struct TeamReconfigureRequest {
     /// Optional optimistic-lock revision.
     #[serde(default)]
@@ -1401,6 +1417,53 @@ impl Server {
         )]))
     }
 
+    /// `plan_initial_team` — read-only project survey for teams
+    /// that haven't been initialised yet. Returns an axis suggestion,
+    /// the top-level directory layout, and a README excerpt so a
+    /// calling agent can compose a workspace plan without scanning
+    /// the filesystem itself. Does not write anything.
+    #[tool(
+        description = "Survey a project directory and return the signals (axis suggestion, top-level dirs, README excerpt) an agent needs to propose an initial ax team. Read-only; does not write any config."
+    )]
+    pub async fn plan_initial_team(
+        &self,
+        Parameters(req): Parameters<PlanInitialTeamRequest>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let project_dir = resolve_project_dir(req.project_dir.as_deref(), None)
+            .map_err(|e| rmcp::ErrorData::invalid_params(e, None))?;
+        let plan = crate::planner::plan_initial_team(&project_dir).map_err(|e| {
+            rmcp::ErrorData::internal_error(format!("plan_initial_team: {e}"), None)
+        })?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&plan).unwrap_or_default(),
+        )]))
+    }
+
+    /// `plan_team_reconfigure` — compare the current ax config
+    /// against the project on disk and surface drift (orphan
+    /// directories, empty workspaces, axis headers). Complements
+    /// `apply_team_reconfigure`: call this first to see what
+    /// actually changed, then hand the curated changes to apply.
+    #[tool(
+        description = "Compare the existing ax config at the server's effective config path against the project on disk. Returns current axis, per-workspace exists/non-empty flags, orphan top-level dirs, and empty workspaces. Read-only; does not write or reconcile."
+    )]
+    pub async fn plan_team_reconfigure(
+        &self,
+        Parameters(req): Parameters<PlanTeamReconfigureRequest>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let cfg_path = self
+            .resolve_base_config_path()
+            .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
+        let project_dir = resolve_project_dir(req.project_dir.as_deref(), Some(&cfg_path))
+            .map_err(|e| rmcp::ErrorData::invalid_params(e, None))?;
+        let plan = crate::planner::plan_team_reconfigure(&project_dir, &cfg_path).map_err(|e| {
+            rmcp::ErrorData::internal_error(format!("plan_team_reconfigure: {e}"), None)
+        })?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&plan).unwrap_or_default(),
+        )]))
+    }
+
     /// `dry_run_team_reconfigure` — validate a planned overlay diff
     /// without mutating the runtime.
     #[tool(
@@ -1967,6 +2030,29 @@ impl ServerHandler for Server {
 #[allow(clippy::needless_pass_by_value)]
 fn tool_error(err: DaemonClientError) -> rmcp::ErrorData {
     rmcp::ErrorData::internal_error(err.to_string(), None)
+}
+
+/// Resolve the project root that a planner tool should scan.
+///
+/// 1. Explicit `project_dir` arg wins; must be absolute.
+/// 2. Otherwise, the parent of `config_hint` (expected `<root>/.ax/config.yaml`).
+/// 3. Otherwise, the MCP server's current working directory.
+fn resolve_project_dir(project_dir: Option<&str>, config_hint: Option<&Path>) -> Result<PathBuf, String> {
+    if let Some(raw) = project_dir {
+        let p = PathBuf::from(raw);
+        if !p.is_absolute() {
+            return Err(format!("project_dir must be absolute, got {raw:?}"));
+        }
+        return Ok(p);
+    }
+    if let Some(cfg) = config_hint {
+        // Walk up from `.ax/config.yaml` twice: once to `.ax/`, once to the project root.
+        if let Some(parent) = cfg.parent().and_then(Path::parent) {
+            return Ok(parent.to_path_buf());
+        }
+    }
+    std::env::current_dir()
+        .map_err(|e| format!("resolve current_dir: {e}"))
 }
 
 fn validate_lifecycle_options(
