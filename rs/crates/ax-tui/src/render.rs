@@ -521,6 +521,13 @@ fn build_detail_lines<'a>(
 }
 
 fn draw_selection_summary(f: &mut Frame, area: Rect, app: &App) {
+    // Draw the tmux capture grid when there are live sessions to
+    // preview; fall back to the selection summary when the daemon
+    // is idle.
+    if !app.sessions.is_empty() {
+        draw_capture_grid(f, area, app);
+        return;
+    }
     let body = match current_entry(app) {
         Some(entry) => {
             let ws = &entry.workspace;
@@ -545,6 +552,109 @@ fn draw_selection_summary(f: &mut Frame, area: Rect, app: &App) {
             .title(app.stream.title()),
     );
     f.render_widget(para, area);
+}
+
+const CAPTURE_CARD_WIDTH: u16 = 36;
+const CAPTURE_CARD_HEIGHT: u16 = 8;
+
+fn draw_capture_grid(f: &mut Frame, area: Rect, app: &App) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(StreamView::Hidden.title());
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let columns = (inner.width / CAPTURE_CARD_WIDTH.max(1)).max(1) as usize;
+    let card_w = CAPTURE_CARD_WIDTH.min(inner.width);
+    let card_h = CAPTURE_CARD_HEIGHT.min(inner.height);
+    let rows = (inner.height / card_h.max(1)).max(1) as usize;
+    let budget = columns.saturating_mul(rows);
+
+    // Show every workspace that's running a tmux session, cut at
+    // the grid capacity; extras simply don't render (operator can
+    // enlarge the window or pick another view).
+    let focused = app.selected_workspace();
+    for (idx, session) in app.sessions.iter().take(budget).enumerate() {
+        let col = (idx % columns) as u16;
+        let row = (idx / columns) as u16;
+        let x = inner.x + col * card_w;
+        let y = inner.y + row * card_h;
+        let card_area = Rect::new(x, y, card_w, card_h);
+        draw_capture_card(f, card_area, session, app, focused);
+    }
+}
+
+fn draw_capture_card(
+    f: &mut Frame,
+    area: Rect,
+    session: &ax_tmux::SessionInfo,
+    app: &App,
+    focused: Option<&str>,
+) {
+    let selected = focused == Some(session.workspace.as_str());
+    let border_style = if selected {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let title = format!(" {} ", session.workspace);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(title);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    let capture = app
+        .captures
+        .entries
+        .get(&session.workspace)
+        .map_or("", |entry| entry.content.as_str());
+    if capture.is_empty() {
+        let para =
+            Paragraph::new("(capturing…)").style(Style::default().add_modifier(Modifier::DIM));
+        f.render_widget(para, inner);
+        return;
+    }
+    let rows = inner.height as usize;
+    let width = inner.width as usize;
+    let lines: Vec<Line> = crate::captures::recent_lines(capture, rows)
+        .into_iter()
+        .map(|line| Line::from(Span::raw(sanitize_capture_line(line, width))))
+        .collect();
+    let para = Paragraph::new(lines);
+    f.render_widget(para, inner);
+}
+
+/// Strip ANSI escape sequences + truncate to the given width so
+/// capture previews don't break the grid border. We capture
+/// without `-e` (no escapes) so this is just a width clamp today;
+/// keeping the hook for when colour passthrough lands.
+fn sanitize_capture_line(line: &str, width: usize) -> String {
+    let mut clean: String = line
+        .chars()
+        .filter(|c| !c.is_control() || matches!(c, '\t'))
+        .collect();
+    // Replace tabs with spaces so we keep single-row alignment.
+    clean = clean.replace('\t', "  ");
+    if clean.chars().count() <= width {
+        return clean;
+    }
+    if width == 0 {
+        return String::new();
+    }
+    if width == 1 {
+        return "…".to_owned();
+    }
+    let mut truncated: String = clean.chars().take(width - 1).collect();
+    truncated.push('…');
+    truncated
 }
 
 fn current_entry(app: &App) -> Option<&SidebarEntry> {

@@ -11,6 +11,7 @@ use ax_proto::types::{Task, WorkspaceInfo};
 use ax_tmux::SessionInfo;
 
 use crate::actions::{Notice, QuickActionId, QuickActionState};
+use crate::captures::CaptureCache;
 use crate::tasks::TaskFilterMode;
 
 #[derive(Debug, Clone)]
@@ -51,6 +52,7 @@ pub(crate) struct App {
     /// Lifecycle action queued by the input handler; executed by the
     /// app loop (where paths are available) and cleared.
     pub(crate) pending_lifecycle: Option<PendingLifecycle>,
+    pub(crate) captures: CaptureCache,
     pub(crate) last_refresh: Option<Instant>,
     pub(crate) daemon_running: bool,
     pub(crate) notice: Option<String>,
@@ -76,6 +78,7 @@ impl App {
             quick_actions: QuickActionState::default(),
             quick_notice: None,
             pending_lifecycle: None,
+            captures: CaptureCache::default(),
             last_refresh: None,
             daemon_running: false,
             notice: None,

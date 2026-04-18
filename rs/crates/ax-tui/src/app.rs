@@ -128,7 +128,15 @@ fn refresh(app: &mut App, opts: &RunOptions) {
     app.rebuild_sidebar();
     refresh_messages(app, opts);
     refresh_tasks(app, opts);
+    refresh_captures(app);
     app.last_refresh = Some(Instant::now());
+}
+
+fn refresh_captures(app: &mut App) {
+    let focused = app.selected_workspace().map(str::to_owned);
+    app.captures
+        .refresh(&app.sessions, focused.as_deref(), Instant::now());
+    app.captures.prune(&app.sessions);
 }
 
 const MESSAGE_HISTORY_BUFFER: usize = 500;

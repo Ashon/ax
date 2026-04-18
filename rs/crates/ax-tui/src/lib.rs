@@ -9,6 +9,7 @@
 
 mod actions;
 mod app;
+mod captures;
 mod daemon;
 mod input;
 mod render;
