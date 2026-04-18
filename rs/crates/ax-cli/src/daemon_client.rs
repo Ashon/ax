@@ -6,11 +6,12 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ax_proto::payloads::{
-    ListTasksPayload, ReadMessagesPayload, RegisterPayload, SendMessagePayload,
+    CancelTaskPayload, GetTaskPayload, InterveneTaskPayload, ListTasksPayload, ReadMessagesPayload,
+    RegisterPayload, RemoveTaskPayload, SendMessagePayload,
 };
 use ax_proto::responses::{
-    ListTasksResponse, ListWorkspacesResponse, ReadMessagesResponse, SendMessageResponse,
-    StatusResponse,
+    InterveneTaskResponse, ListTasksResponse, ListWorkspacesResponse, ReadMessagesResponse,
+    SendMessageResponse, StatusResponse, TaskResponse,
 };
 use ax_proto::types::{Message, Task, TaskStatus, WorkspaceInfo};
 use ax_proto::{Envelope, ErrorPayload, MessageType, ResponsePayload};
@@ -152,6 +153,64 @@ impl DaemonClient {
             },
         )?;
         Ok(response.tasks)
+    }
+
+    pub(crate) fn get_task(&mut self, id: &str) -> Result<Task, DaemonClientError> {
+        let response: TaskResponse =
+            self.request(MessageType::GetTask, &GetTaskPayload { id: id.to_owned() })?;
+        Ok(response.task)
+    }
+
+    pub(crate) fn cancel_task(
+        &mut self,
+        id: &str,
+        reason: &str,
+        expected_version: Option<i64>,
+    ) -> Result<Task, DaemonClientError> {
+        let response: TaskResponse = self.request(
+            MessageType::CancelTask,
+            &CancelTaskPayload {
+                id: id.to_owned(),
+                reason: reason.to_owned(),
+                expected_version,
+            },
+        )?;
+        Ok(response.task)
+    }
+
+    pub(crate) fn remove_task(
+        &mut self,
+        id: &str,
+        reason: &str,
+        expected_version: Option<i64>,
+    ) -> Result<Task, DaemonClientError> {
+        let response: TaskResponse = self.request(
+            MessageType::RemoveTask,
+            &RemoveTaskPayload {
+                id: id.to_owned(),
+                reason: reason.to_owned(),
+                expected_version,
+            },
+        )?;
+        Ok(response.task)
+    }
+
+    pub(crate) fn intervene_task(
+        &mut self,
+        id: &str,
+        action: &str,
+        note: &str,
+        expected_version: Option<i64>,
+    ) -> Result<InterveneTaskResponse, DaemonClientError> {
+        self.request(
+            MessageType::InterveneTask,
+            &InterveneTaskPayload {
+                id: id.to_owned(),
+                action: action.to_owned(),
+                note: note.to_owned(),
+                expected_version,
+            },
+        )
     }
 
     fn request<P, R>(&mut self, kind: MessageType, payload: &P) -> Result<R, DaemonClientError>

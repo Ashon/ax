@@ -3,6 +3,7 @@
 mod daemon_client;
 mod refresh;
 mod status;
+mod tasks;
 mod workspace;
 
 use std::env;
@@ -48,6 +49,14 @@ Usage:
   ax-rs mcp-server --workspace NAME [--socket PATH] [--config PATH]
   ax-rs status [--socket PATH] [--config PATH]
   ax-rs refresh [--restart] [--start-missing] [--socket PATH] [--config PATH] [--ax-bin PATH]
+  ax-rs tasks [--assignee N] [--created-by N] [--status S] [--stale] [--socket PATH]
+  ax-rs tasks show <id> [--logs N] [--socket PATH]
+  ax-rs tasks cancel <id> [--reason STR] [--expected-version N] [--socket PATH]
+  ax-rs tasks remove <id> [--reason STR] [--expected-version N] [--socket PATH]
+  ax-rs tasks recover <id> [--socket PATH]
+  ax-rs tasks intervene <id> --action wake|interrupt|retry [--note STR] [--expected-version N] [--socket PATH]
+  ax-rs tasks retry <id> [--note STR] [--expected-version N] [--socket PATH]
+  ax-rs tasks activity [task-id] [--assignee N] [--created-by N] [--status S] [--stale] [--limit N] [--socket PATH]
   ax-rs workspace create <name> [--dir PATH] [--socket PATH] [--config PATH] [--ax-bin PATH]
   ax-rs workspace destroy <name> [--socket PATH] [--config PATH] [--ax-bin PATH]
   ax-rs workspace list [--internal] [--socket PATH] [--config PATH]
@@ -148,6 +157,10 @@ enum ParsedCommand {
         options: CommonOptions,
         refresh: refresh::RefreshOptions,
     },
+    Tasks {
+        socket_path: PathBuf,
+        command: tasks::TasksCommand,
+    },
     WorkspaceCreate {
         name: String,
         dir: Option<PathBuf>,
@@ -185,6 +198,7 @@ enum CliError {
     McpServer(String),
     Status(String),
     Refresh(refresh::RefreshError),
+    Tasks(tasks::TasksError),
     Workspace(workspace::WorkspaceCliError),
 }
 
@@ -301,6 +315,7 @@ impl fmt::Display for CliError {
             Self::RunAgent(source) => write!(f, "{source}"),
             Self::McpServer(source) | Self::Status(source) => write!(f, "{source}"),
             Self::Refresh(source) => write!(f, "{source}"),
+            Self::Tasks(source) => write!(f, "{source}"),
             Self::Workspace(source) => write!(f, "{source}"),
         }
     }
@@ -629,6 +644,14 @@ where
             config_path,
         } => run_status(&socket_path, config_path.as_deref()),
         ParsedCommand::Refresh { options, refresh } => run_refresh(&options, refresh),
+        ParsedCommand::Tasks {
+            socket_path,
+            command,
+        } => {
+            let body = tasks::run(&socket_path, command).map_err(CliError::Tasks)?;
+            print!("{body}");
+            Ok(ExitCode::SUCCESS)
+        }
         ParsedCommand::WorkspaceCreate { name, dir, options } => {
             let body = workspace::create_workspace(
                 &options.socket_path,
@@ -725,6 +748,9 @@ where
     }
     if command == "refresh" {
         return parse_refresh_args(&tail, cwd, current_exe);
+    }
+    if command == "tasks" {
+        return parse_tasks_args(&tail);
     }
     if matches!(command.as_str(), "workspace" | "ws") {
         return parse_workspace_args(&tail, cwd, current_exe);
@@ -1377,6 +1403,397 @@ fn expect_single_name(argv: &[OsString], cmd_label: &str) -> Result<String, CliE
         }
     }
     name.ok_or_else(|| CliError::Usage(format!("{cmd_label} requires a name\n\n{USAGE}")))
+}
+
+fn parse_tasks_args(argv: &[OsString]) -> Result<ParsedCommand, CliError> {
+    // Peek at argv[1] to pick the subcommand. Anything starting with
+    // `-` or absent falls back to `list`.
+    let sub = argv
+        .get(1)
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let has_subcommand = sub == "list" || (!sub.is_empty() && !sub.starts_with('-'));
+    let tail_start = if has_subcommand { 2 } else { 1 };
+    let tail: Vec<OsString> = argv.iter().skip(tail_start).cloned().collect();
+
+    match sub.as_str() {
+        "show" => parse_tasks_show(&tail),
+        "cancel" => parse_tasks_control(&tail, ControlKind::Cancel),
+        "remove" => parse_tasks_control(&tail, ControlKind::Remove),
+        "recover" => parse_tasks_recover(&tail),
+        "intervene" => parse_tasks_intervene(&tail),
+        "retry" => parse_tasks_retry(&tail),
+        "activity" => parse_tasks_activity(&tail),
+        "" | "list" => parse_tasks_list(&tail),
+        other if other.starts_with('-') => parse_tasks_list(argv.get(1..).unwrap_or(&[])),
+        other => Err(CliError::Usage(format!(
+            "unknown tasks subcommand {other:?}\n\n{USAGE}"
+        ))),
+    }
+}
+
+fn pop_single_positional(
+    argv: &[OsString],
+    label: &str,
+) -> Result<(String, Vec<OsString>), CliError> {
+    let mut positional: Option<String> = None;
+    let mut flags: Vec<OsString> = Vec::with_capacity(argv.len());
+    let mut iter = argv.iter().cloned();
+    while let Some(arg) = iter.next() {
+        match arg.to_string_lossy().as_ref() {
+            "-h" | "--help" => {
+                return Err(CliError::Usage(format!(
+                    "{label} requires a task ID\n\n{USAGE}"
+                )))
+            }
+            other if other.starts_with('-') => {
+                flags.push(arg);
+                if let Some(next) = iter.next() {
+                    flags.push(next);
+                }
+            }
+            _ => {
+                if positional.is_some() {
+                    return Err(CliError::Usage(format!(
+                        "{label} accepts a single task ID\n\n{USAGE}"
+                    )));
+                }
+                positional = Some(arg.to_string_lossy().into_owned());
+            }
+        }
+    }
+    let id = positional
+        .ok_or_else(|| CliError::Usage(format!("{label} requires a task ID\n\n{USAGE}")))?;
+    Ok((id, flags))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ControlKind {
+    Cancel,
+    Remove,
+}
+
+fn parse_tasks_list(argv: &[OsString]) -> Result<ParsedCommand, CliError> {
+    let mut socket_path = expand_socket_path(DEFAULT_SOCKET_PATH);
+    let mut assignee = String::new();
+    let mut created_by = String::new();
+    let mut status_raw: Option<String> = None;
+    let mut only_stale = false;
+
+    let mut i = 0;
+    while i < argv.len() {
+        let arg = &argv[i];
+        match arg.to_string_lossy().as_ref() {
+            "-h" | "--help" => return Ok(ParsedCommand::Help),
+            "--assignee" => {
+                i += 1;
+                assignee = parse_string_arg(argv.get(i), "--assignee")?;
+            }
+            "--created-by" => {
+                i += 1;
+                created_by = parse_string_arg(argv.get(i), "--created-by")?;
+            }
+            "--status" => {
+                i += 1;
+                status_raw = Some(parse_string_arg(argv.get(i), "--status")?);
+            }
+            "--stale" => only_stale = true,
+            "--socket" => {
+                i += 1;
+                socket_path = parse_socket_path(argv.get(i), "--socket")?;
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown flag {other:?}\n\n{USAGE}"
+                )));
+            }
+        }
+        i += 1;
+    }
+
+    let status =
+        tasks::parse_task_status_flag(&status_raw.unwrap_or_default()).map_err(CliError::Tasks)?;
+    Ok(ParsedCommand::Tasks {
+        socket_path,
+        command: tasks::TasksCommand::List {
+            assignee,
+            created_by,
+            status,
+            only_stale,
+        },
+    })
+}
+
+fn parse_tasks_show(argv: &[OsString]) -> Result<ParsedCommand, CliError> {
+    let (id, flags) = pop_single_positional(argv, "tasks show")?;
+    let mut socket_path = expand_socket_path(DEFAULT_SOCKET_PATH);
+    let mut log_limit = 8usize;
+    let mut i = 0;
+    while i < flags.len() {
+        let arg = &flags[i];
+        match arg.to_string_lossy().as_ref() {
+            "--logs" => {
+                i += 1;
+                log_limit = parse_usize_arg(flags.get(i), "--logs")?;
+            }
+            "--socket" => {
+                i += 1;
+                socket_path = parse_socket_path(flags.get(i), "--socket")?;
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown flag {other:?}\n\n{USAGE}"
+                )));
+            }
+        }
+        i += 1;
+    }
+    Ok(ParsedCommand::Tasks {
+        socket_path,
+        command: tasks::TasksCommand::Show { id, log_limit },
+    })
+}
+
+fn parse_tasks_control(argv: &[OsString], kind: ControlKind) -> Result<ParsedCommand, CliError> {
+    let label = match kind {
+        ControlKind::Cancel => "tasks cancel",
+        ControlKind::Remove => "tasks remove",
+    };
+    let (id, flags) = pop_single_positional(argv, label)?;
+    let mut socket_path = expand_socket_path(DEFAULT_SOCKET_PATH);
+    let mut reason = String::new();
+    let mut expected_version: Option<i64> = None;
+
+    let mut i = 0;
+    while i < flags.len() {
+        let arg = &flags[i];
+        match arg.to_string_lossy().as_ref() {
+            "--reason" => {
+                i += 1;
+                reason = parse_string_arg(flags.get(i), "--reason")?;
+            }
+            "--expected-version" => {
+                i += 1;
+                expected_version = Some(parse_i64_arg(flags.get(i), "--expected-version")?);
+            }
+            "--socket" => {
+                i += 1;
+                socket_path = parse_socket_path(flags.get(i), "--socket")?;
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown flag {other:?}\n\n{USAGE}"
+                )));
+            }
+        }
+        i += 1;
+    }
+
+    let command = match kind {
+        ControlKind::Cancel => tasks::TasksCommand::Cancel {
+            id,
+            reason,
+            expected_version,
+        },
+        ControlKind::Remove => tasks::TasksCommand::Remove {
+            id,
+            reason,
+            expected_version,
+        },
+    };
+    Ok(ParsedCommand::Tasks {
+        socket_path,
+        command,
+    })
+}
+
+fn parse_tasks_recover(argv: &[OsString]) -> Result<ParsedCommand, CliError> {
+    let (id, flags) = pop_single_positional(argv, "tasks recover")?;
+    let mut socket_path = expand_socket_path(DEFAULT_SOCKET_PATH);
+    let mut i = 0;
+    while i < flags.len() {
+        let arg = &flags[i];
+        match arg.to_string_lossy().as_ref() {
+            "--socket" => {
+                i += 1;
+                socket_path = parse_socket_path(flags.get(i), "--socket")?;
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown flag {other:?}\n\n{USAGE}"
+                )));
+            }
+        }
+        i += 1;
+    }
+    Ok(ParsedCommand::Tasks {
+        socket_path,
+        command: tasks::TasksCommand::Recover { id },
+    })
+}
+
+fn parse_tasks_intervene(argv: &[OsString]) -> Result<ParsedCommand, CliError> {
+    let (id, flags) = pop_single_positional(argv, "tasks intervene")?;
+    let mut socket_path = expand_socket_path(DEFAULT_SOCKET_PATH);
+    let mut action = String::new();
+    let mut note = String::new();
+    let mut expected_version: Option<i64> = None;
+
+    let mut i = 0;
+    while i < flags.len() {
+        let arg = &flags[i];
+        match arg.to_string_lossy().as_ref() {
+            "--action" => {
+                i += 1;
+                action = parse_string_arg(flags.get(i), "--action")?;
+            }
+            "--note" => {
+                i += 1;
+                note = parse_string_arg(flags.get(i), "--note")?;
+            }
+            "--expected-version" => {
+                i += 1;
+                expected_version = Some(parse_i64_arg(flags.get(i), "--expected-version")?);
+            }
+            "--socket" => {
+                i += 1;
+                socket_path = parse_socket_path(flags.get(i), "--socket")?;
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown flag {other:?}\n\n{USAGE}"
+                )));
+            }
+        }
+        i += 1;
+    }
+    if action.trim().is_empty() {
+        return Err(CliError::Usage(format!(
+            "tasks intervene requires --action\n\n{USAGE}"
+        )));
+    }
+    Ok(ParsedCommand::Tasks {
+        socket_path,
+        command: tasks::TasksCommand::Intervene {
+            id,
+            action,
+            note,
+            expected_version,
+        },
+    })
+}
+
+fn parse_tasks_retry(argv: &[OsString]) -> Result<ParsedCommand, CliError> {
+    let (id, flags) = pop_single_positional(argv, "tasks retry")?;
+    let mut socket_path = expand_socket_path(DEFAULT_SOCKET_PATH);
+    let mut note = String::new();
+    let mut expected_version: Option<i64> = None;
+
+    let mut i = 0;
+    while i < flags.len() {
+        let arg = &flags[i];
+        match arg.to_string_lossy().as_ref() {
+            "--note" => {
+                i += 1;
+                note = parse_string_arg(flags.get(i), "--note")?;
+            }
+            "--expected-version" => {
+                i += 1;
+                expected_version = Some(parse_i64_arg(flags.get(i), "--expected-version")?);
+            }
+            "--socket" => {
+                i += 1;
+                socket_path = parse_socket_path(flags.get(i), "--socket")?;
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown flag {other:?}\n\n{USAGE}"
+                )));
+            }
+        }
+        i += 1;
+    }
+    Ok(ParsedCommand::Tasks {
+        socket_path,
+        command: tasks::TasksCommand::Retry {
+            id,
+            note,
+            expected_version,
+        },
+    })
+}
+
+fn parse_tasks_activity(argv: &[OsString]) -> Result<ParsedCommand, CliError> {
+    let mut socket_path = expand_socket_path(DEFAULT_SOCKET_PATH);
+    let mut positional: Option<String> = None;
+    let mut assignee = String::new();
+    let mut created_by = String::new();
+    let mut status_raw: Option<String> = None;
+    let mut only_stale = false;
+    let mut limit = 20usize;
+
+    let mut i = 0;
+    while i < argv.len() {
+        let arg = &argv[i];
+        match arg.to_string_lossy().as_ref() {
+            "-h" | "--help" => return Ok(ParsedCommand::Help),
+            "--assignee" => {
+                i += 1;
+                assignee = parse_string_arg(argv.get(i), "--assignee")?;
+            }
+            "--created-by" => {
+                i += 1;
+                created_by = parse_string_arg(argv.get(i), "--created-by")?;
+            }
+            "--status" => {
+                i += 1;
+                status_raw = Some(parse_string_arg(argv.get(i), "--status")?);
+            }
+            "--stale" => only_stale = true,
+            "--limit" => {
+                i += 1;
+                limit = parse_usize_arg(argv.get(i), "--limit")?;
+            }
+            "--socket" => {
+                i += 1;
+                socket_path = parse_socket_path(argv.get(i), "--socket")?;
+            }
+            other if other.starts_with('-') => {
+                return Err(CliError::Usage(format!(
+                    "unknown flag {other:?}\n\n{USAGE}"
+                )));
+            }
+            _ => {
+                if positional.is_some() {
+                    return Err(CliError::Usage(format!(
+                        "tasks activity accepts at most one task ID\n\n{USAGE}"
+                    )));
+                }
+                positional = Some(arg.to_string_lossy().into_owned());
+            }
+        }
+        i += 1;
+    }
+
+    let status =
+        tasks::parse_task_status_flag(&status_raw.unwrap_or_default()).map_err(CliError::Tasks)?;
+    Ok(ParsedCommand::Tasks {
+        socket_path,
+        command: tasks::TasksCommand::Activity {
+            id: positional,
+            assignee,
+            created_by,
+            status,
+            only_stale,
+            limit,
+        },
+    })
+}
+
+fn parse_usize_arg(value: Option<&OsString>, flag: &str) -> Result<usize, CliError> {
+    let text = parse_string_arg(value, flag)?;
+    text.parse::<usize>()
+        .map_err(|_| CliError::Usage(format!("{flag} expects a non-negative integer")))
 }
 
 fn parse_refresh_args(
