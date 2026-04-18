@@ -2,6 +2,7 @@
 
 mod daemon_client;
 mod status;
+mod workspace;
 
 use std::env;
 use std::ffi::OsString;
@@ -45,6 +46,11 @@ Usage:
   ax-rs run-agent --workspace NAME [--runtime RUNTIME] [--socket PATH] [--config PATH] [--fresh] [-- ...]
   ax-rs mcp-server --workspace NAME [--socket PATH] [--config PATH]
   ax-rs status [--socket PATH] [--config PATH]
+  ax-rs workspace create <name> [--dir PATH] [--socket PATH] [--config PATH] [--ax-bin PATH]
+  ax-rs workspace destroy <name> [--socket PATH] [--config PATH] [--ax-bin PATH]
+  ax-rs workspace list [--internal] [--socket PATH] [--config PATH]
+  ax-rs workspace attach <name>
+  ax-rs workspace interrupt <name>
 
 Notes:
   --config defaults to the discovered ax config (.ax/config.yaml or ax.yaml)
@@ -136,6 +142,26 @@ enum ParsedCommand {
         socket_path: PathBuf,
         config_path: Option<PathBuf>,
     },
+    WorkspaceCreate {
+        name: String,
+        dir: Option<PathBuf>,
+        options: CommonOptions,
+    },
+    WorkspaceDestroy {
+        name: String,
+        options: CommonOptions,
+    },
+    WorkspaceList {
+        socket_path: PathBuf,
+        config_path: Option<PathBuf>,
+        include_internal: bool,
+    },
+    WorkspaceAttach {
+        name: String,
+    },
+    WorkspaceInterrupt {
+        name: String,
+    },
 }
 
 #[derive(Debug)]
@@ -152,6 +178,7 @@ enum CliError {
     RunAgent(ax_agent::LaunchError),
     McpServer(String),
     Status(String),
+    Workspace(workspace::WorkspaceCliError),
 }
 
 #[derive(Debug)]
@@ -266,6 +293,7 @@ impl fmt::Display for CliError {
             Self::Dispatch(source) => write!(f, "{source}"),
             Self::RunAgent(source) => write!(f, "{source}"),
             Self::McpServer(source) | Self::Status(source) => write!(f, "{source}"),
+            Self::Workspace(source) => write!(f, "{source}"),
         }
     }
 }
@@ -592,6 +620,54 @@ where
             socket_path,
             config_path,
         } => run_status(&socket_path, config_path.as_deref()),
+        ParsedCommand::WorkspaceCreate { name, dir, options } => {
+            let body = workspace::create_workspace(
+                &options.socket_path,
+                Some(&options.config_path),
+                &options.ax_bin,
+                &name,
+                dir,
+            )
+            .map_err(CliError::Workspace)?;
+            print!("{body}");
+            Ok(ExitCode::SUCCESS)
+        }
+        ParsedCommand::WorkspaceDestroy { name, options } => {
+            let body = workspace::destroy_workspace(
+                &options.socket_path,
+                Some(&options.config_path),
+                &options.ax_bin,
+                &name,
+            )
+            .map_err(CliError::Workspace)?;
+            print!("{body}");
+            Ok(ExitCode::SUCCESS)
+        }
+        ParsedCommand::WorkspaceList {
+            socket_path,
+            config_path,
+            include_internal,
+        } => {
+            let running = matches!(daemon_status(&socket_path)?, DaemonStatus::Running(_));
+            let body = workspace::render_list(
+                &socket_path,
+                config_path.as_deref(),
+                running,
+                &workspace::ListOptions { include_internal },
+            )
+            .map_err(CliError::Workspace)?;
+            print!("{body}");
+            Ok(ExitCode::SUCCESS)
+        }
+        ParsedCommand::WorkspaceAttach { name } => {
+            workspace::attach(&name).map_err(CliError::Workspace)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        ParsedCommand::WorkspaceInterrupt { name } => {
+            let body = workspace::interrupt(&name).map_err(CliError::Workspace)?;
+            print!("{body}");
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }
 
@@ -637,6 +713,9 @@ where
     }
     if command == "status" {
         return parse_status_args(&tail, cwd);
+    }
+    if matches!(command.as_str(), "workspace" | "ws") {
+        return parse_workspace_args(&tail, cwd, current_exe);
     }
 
     let action = match command.as_str() {
@@ -1079,6 +1158,213 @@ fn parse_run_agent_args(argv: &[OsString], cwd: &Path) -> Result<ParsedCommand, 
         fresh,
         extra_args,
     })
+}
+
+fn parse_workspace_args(
+    argv: &[OsString],
+    cwd: &Path,
+    current_exe: &Path,
+) -> Result<ParsedCommand, CliError> {
+    let mut iter = argv.iter().skip(1);
+    let Some(sub) = iter.next() else {
+        return Err(CliError::Usage(format!(
+            "workspace requires a subcommand\n\n{USAGE}"
+        )));
+    };
+    let rest: Vec<OsString> = iter.cloned().collect();
+    match sub.to_string_lossy().as_ref() {
+        "list" => parse_workspace_list(&rest, cwd),
+        "attach" => parse_workspace_attach(&rest),
+        "interrupt" => parse_workspace_interrupt(&rest),
+        "create" => parse_workspace_create(&rest, cwd, current_exe),
+        "destroy" => parse_workspace_destroy(&rest, cwd, current_exe),
+        other => Err(CliError::Usage(format!(
+            "unknown workspace subcommand {other:?}\n\n{USAGE}"
+        ))),
+    }
+}
+
+fn parse_workspace_list(argv: &[OsString], cwd: &Path) -> Result<ParsedCommand, CliError> {
+    let mut socket_path = expand_socket_path(DEFAULT_SOCKET_PATH);
+    let mut config_path: Option<PathBuf> = None;
+    let mut include_internal = false;
+
+    let mut i = 0;
+    while i < argv.len() {
+        let arg = &argv[i];
+        match arg.to_string_lossy().as_ref() {
+            "-h" | "--help" => return Ok(ParsedCommand::Help),
+            "--internal" => include_internal = true,
+            "--socket" => {
+                i += 1;
+                socket_path = parse_socket_path(argv.get(i), "--socket")?;
+            }
+            "--config" => {
+                i += 1;
+                config_path = Some(parse_path_arg(argv.get(i), "--config", cwd)?);
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown flag {other:?}\n\n{USAGE}"
+                )));
+            }
+        }
+        i += 1;
+    }
+
+    Ok(ParsedCommand::WorkspaceList {
+        socket_path,
+        config_path,
+        include_internal,
+    })
+}
+
+fn parse_workspace_attach(argv: &[OsString]) -> Result<ParsedCommand, CliError> {
+    let name = expect_single_name(argv, "workspace attach")?;
+    Ok(ParsedCommand::WorkspaceAttach { name })
+}
+
+fn parse_workspace_interrupt(argv: &[OsString]) -> Result<ParsedCommand, CliError> {
+    let name = expect_single_name(argv, "workspace interrupt")?;
+    Ok(ParsedCommand::WorkspaceInterrupt { name })
+}
+
+fn parse_workspace_create(
+    argv: &[OsString],
+    cwd: &Path,
+    current_exe: &Path,
+) -> Result<ParsedCommand, CliError> {
+    let mut name: Option<String> = None;
+    let mut dir: Option<PathBuf> = None;
+    let mut socket_override: Option<PathBuf> = None;
+    let mut config_override: Option<PathBuf> = None;
+    let mut ax_bin_override: Option<PathBuf> = None;
+
+    let mut i = 0;
+    while i < argv.len() {
+        let arg = &argv[i];
+        match arg.to_string_lossy().as_ref() {
+            "-h" | "--help" => return Ok(ParsedCommand::Help),
+            "--dir" => {
+                i += 1;
+                dir = Some(parse_path_arg(argv.get(i), "--dir", cwd)?);
+            }
+            "--socket" => {
+                i += 1;
+                socket_override = Some(parse_socket_path(argv.get(i), "--socket")?);
+            }
+            "--config" => {
+                i += 1;
+                config_override = Some(parse_path_arg(argv.get(i), "--config", cwd)?);
+            }
+            "--ax-bin" => {
+                i += 1;
+                ax_bin_override = Some(parse_path_arg(argv.get(i), "--ax-bin", cwd)?);
+            }
+            other if other.starts_with('-') => {
+                return Err(CliError::Usage(format!(
+                    "unknown flag {other:?}\n\n{USAGE}"
+                )));
+            }
+            _ => {
+                if name.is_some() {
+                    return Err(CliError::Usage(format!(
+                        "workspace create accepts a single name\n\n{USAGE}"
+                    )));
+                }
+                name = Some(arg.to_string_lossy().into_owned());
+            }
+        }
+        i += 1;
+    }
+
+    let name = name.ok_or_else(|| CliError::Usage(format!("name is required\n\n{USAGE}")))?;
+    let options = CommonOptions {
+        socket_path: socket_override.unwrap_or_else(|| expand_socket_path(DEFAULT_SOCKET_PATH)),
+        config_path: resolve_config_path(config_override, cwd)?,
+        ax_bin: ax_bin_override.unwrap_or_else(|| current_exe.to_path_buf()),
+    };
+    Ok(ParsedCommand::WorkspaceCreate { name, dir, options })
+}
+
+fn parse_workspace_destroy(
+    argv: &[OsString],
+    cwd: &Path,
+    current_exe: &Path,
+) -> Result<ParsedCommand, CliError> {
+    let mut name: Option<String> = None;
+    let mut socket_override: Option<PathBuf> = None;
+    let mut config_override: Option<PathBuf> = None;
+    let mut ax_bin_override: Option<PathBuf> = None;
+
+    let mut i = 0;
+    while i < argv.len() {
+        let arg = &argv[i];
+        match arg.to_string_lossy().as_ref() {
+            "-h" | "--help" => return Ok(ParsedCommand::Help),
+            "--socket" => {
+                i += 1;
+                socket_override = Some(parse_socket_path(argv.get(i), "--socket")?);
+            }
+            "--config" => {
+                i += 1;
+                config_override = Some(parse_path_arg(argv.get(i), "--config", cwd)?);
+            }
+            "--ax-bin" => {
+                i += 1;
+                ax_bin_override = Some(parse_path_arg(argv.get(i), "--ax-bin", cwd)?);
+            }
+            other if other.starts_with('-') => {
+                return Err(CliError::Usage(format!(
+                    "unknown flag {other:?}\n\n{USAGE}"
+                )));
+            }
+            _ => {
+                if name.is_some() {
+                    return Err(CliError::Usage(format!(
+                        "workspace destroy accepts a single name\n\n{USAGE}"
+                    )));
+                }
+                name = Some(arg.to_string_lossy().into_owned());
+            }
+        }
+        i += 1;
+    }
+
+    let name = name.ok_or_else(|| CliError::Usage(format!("name is required\n\n{USAGE}")))?;
+    let options = CommonOptions {
+        socket_path: socket_override.unwrap_or_else(|| expand_socket_path(DEFAULT_SOCKET_PATH)),
+        config_path: resolve_config_path(config_override, cwd)?,
+        ax_bin: ax_bin_override.unwrap_or_else(|| current_exe.to_path_buf()),
+    };
+    Ok(ParsedCommand::WorkspaceDestroy { name, options })
+}
+
+fn expect_single_name(argv: &[OsString], cmd_label: &str) -> Result<String, CliError> {
+    let mut name: Option<String> = None;
+    for arg in argv {
+        match arg.to_string_lossy().as_ref() {
+            "-h" | "--help" => {
+                return Err(CliError::Usage(format!(
+                    "{cmd_label} requires a name\n\n{USAGE}"
+                )))
+            }
+            other if other.starts_with('-') => {
+                return Err(CliError::Usage(format!(
+                    "unknown flag {other:?}\n\n{USAGE}"
+                )));
+            }
+            _ => {
+                if name.is_some() {
+                    return Err(CliError::Usage(format!(
+                        "{cmd_label} accepts a single name\n\n{USAGE}"
+                    )));
+                }
+                name = Some(arg.to_string_lossy().into_owned());
+            }
+        }
+    }
+    name.ok_or_else(|| CliError::Usage(format!("{cmd_label} requires a name\n\n{USAGE}")))
 }
 
 fn parse_status_args(argv: &[OsString], cwd: &Path) -> Result<ParsedCommand, CliError> {
