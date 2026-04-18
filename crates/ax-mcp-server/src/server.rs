@@ -11,6 +11,8 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Instant;
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -48,6 +50,7 @@ use ax_workspace::{build_desired_state_with_tree, ReconcileOptions, ReconcileRep
 
 use crate::daemon_client::{DaemonClient, DaemonClientError};
 use crate::memory_scope;
+use crate::telemetry::{TelemetryEvent, TelemetrySink};
 
 /// Entry point for `ax-cli mcp-server`: connect the daemon client,
 /// hand it to the MCP server, and run the stdio transport loop. The
@@ -69,6 +72,7 @@ pub struct Server {
     daemon: DaemonClient,
     config_path: Option<PathBuf>,
     tool_router: ToolRouter<Self>,
+    telemetry: Option<Arc<TelemetrySink>>,
 }
 
 impl std::fmt::Debug for Server {
@@ -87,7 +91,40 @@ impl Server {
             daemon,
             config_path: None,
             tool_router: Self::tool_router(),
+            telemetry: None,
         }
+    }
+
+    /// Attach a telemetry sink. Every tool call routed through the
+    /// MCP transport emits one append-only record; direct method
+    /// calls (used by unit tests) bypass telemetry by design.
+    #[must_use]
+    pub fn with_telemetry(mut self, sink: TelemetrySink) -> Self {
+        self.telemetry = Some(Arc::new(sink));
+        self
+    }
+
+    /// Write one tool-call record to the attached sink, if any. Kept
+    /// crate-visible so the `call_tool` override and future harness
+    /// tests can share the same recording path.
+    pub(crate) fn record_tool_call(
+        &self,
+        tool: &str,
+        ok: bool,
+        duration_ms: u64,
+        err_kind: &str,
+    ) {
+        let Some(sink) = self.telemetry.as_ref() else {
+            return;
+        };
+        sink.record(&TelemetryEvent {
+            ts: chrono::Utc::now(),
+            workspace: self.daemon.workspace().to_owned(),
+            tool: tool.to_owned(),
+            ok,
+            duration_ms,
+            err_kind: err_kind.to_owned(),
+        });
     }
 
     /// Record the base `.ax/config.yaml` the peer is operating
@@ -1905,6 +1942,25 @@ impl ServerHandler for Server {
             .with_protocol_version(ProtocolVersion::LATEST)
             .with_server_info(server_info)
             .with_instructions(self.instructions())
+    }
+
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let tool_name = request.name.to_string();
+        let started = Instant::now();
+        let tcc =
+            rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        let result = self.tool_router.call(tcc).await;
+        let duration_ms = started.elapsed().as_millis() as u64;
+        let (ok, err_kind) = match &result {
+            Ok(_) => (true, String::new()),
+            Err(e) => (false, e.message.to_string()),
+        };
+        self.record_tool_call(&tool_name, ok, duration_ms, &err_kind);
+        result
     }
 }
 

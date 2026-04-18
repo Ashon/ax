@@ -2648,11 +2648,32 @@ fn run_mcp_server(
             Some(path) => ax_mcp_server::Server::new(client).with_config_path(path),
             None => ax_mcp_server::Server::new(client),
         };
+        let server = match resolve_mcp_telemetry_path(socket_path) {
+            Some(path) => server.with_telemetry(ax_mcp_server::TelemetrySink::new(path)),
+            None => server,
+        };
         ax_mcp_server::run_stdio(server)
             .await
             .map_err(|e| CliError::McpServer(format!("mcp stdio: {e}")))?;
         Ok::<ExitCode, CliError>(ExitCode::SUCCESS)
     })
+}
+
+/// Choose where the MCP server should write tool-call telemetry.
+/// Default: alongside the daemon socket under `telemetry/tool_calls.jsonl`.
+/// Override with `AX_TELEMETRY_DIR` (absolute path to a directory), or
+/// disable entirely with `AX_TELEMETRY_DISABLED=1`.
+fn resolve_mcp_telemetry_path(socket_path: &Path) -> Option<PathBuf> {
+    if env::var("AX_TELEMETRY_DISABLED")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let dir = env::var_os("AX_TELEMETRY_DIR")
+        .map(PathBuf::from)
+        .or_else(|| socket_path.parent().map(|p| p.join("telemetry")))?;
+    Some(dir.join("tool_calls.jsonl"))
 }
 
 fn format_messages_output(

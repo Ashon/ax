@@ -27,5 +27,6 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+rmcp = { version = "1", default-features = false, features = ["client", "server", "macros", "schemars", "transport-io"] }
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "fs", "test-util"] }
