@@ -58,7 +58,7 @@ Usage:
   ax tasks intervene <id> --action wake|interrupt|retry [--note STR] [--expected-version N] [--socket PATH]
   ax tasks retry <id> [--note STR] [--expected-version N] [--socket PATH]
   ax tasks activity [task-id] [--assignee N] [--created-by N] [--status S] [--stale] [--limit N] [--socket PATH]
-  ax init [--global] [--no-setup] [--no-refresh] [--codex|--claude] [--socket PATH]
+  ax init [--global] [--no-setup] [--no-refresh] [--axis auto|role|domain] [--codex|--claude] [--socket PATH]
   ax watch [--socket PATH]
   ax workspace create <name> [--dir PATH] [--socket PATH] [--config PATH] [--ax-bin PATH]
   ax workspace destroy <name> [--socket PATH] [--config PATH] [--ax-bin PATH]
@@ -1463,6 +1463,7 @@ fn parse_init_args(argv: &[OsString]) -> Result<ParsedCommand, CliError> {
     let mut no_refresh = false;
     let mut want_codex = false;
     let mut want_claude = false;
+    let mut axis = init::Axis::Auto;
 
     let mut i = 1;
     while i < argv.len() {
@@ -1477,6 +1478,18 @@ fn parse_init_args(argv: &[OsString]) -> Result<ParsedCommand, CliError> {
             "--socket" => {
                 i += 1;
                 socket_path = parse_socket_path(argv.get(i), "--socket")?;
+            }
+            "--axis" => {
+                i += 1;
+                let raw = argv.get(i).ok_or_else(|| {
+                    CliError::Usage("--axis requires a value: auto|role|domain\n".to_owned())
+                })?;
+                axis = init::Axis::parse(&raw.to_string_lossy()).ok_or_else(|| {
+                    CliError::Usage(format!(
+                        "invalid --axis value {:?} (expected auto|role|domain)\n",
+                        raw.to_string_lossy()
+                    ))
+                })?;
             }
             other => {
                 return Err(CliError::Usage(format!(
@@ -1501,6 +1514,7 @@ fn parse_init_args(argv: &[OsString]) -> Result<ParsedCommand, CliError> {
             runtime,
             socket_path,
             daemon_running,
+            axis,
         },
     })
 }

@@ -26,6 +26,29 @@ use ax_workspace::{ensure_orchestrator_tree, orchestrator_name, RealTmux};
 
 use crate::daemon_client::DaemonClient;
 
+/// Team-partitioning axis the setup agent should use when writing
+/// workspaces. `Auto` is the default: the agent inspects the
+/// project and picks role- or domain-centric based on observed
+/// boundaries plus a Conway's Law prompt. `Role` / `Domain` force
+/// the choice when the user already knows what they want.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Axis {
+    Auto,
+    Role,
+    Domain,
+}
+
+impl Axis {
+    pub(crate) fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "role" | "role-first" => Some(Self::Role),
+            "domain" | "domain-first" => Some(Self::Domain),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::struct_excessive_bools)] // independent opt-in flags
 pub(crate) struct InitOptions {
@@ -39,6 +62,7 @@ pub(crate) struct InitOptions {
     pub runtime: String,
     pub socket_path: PathBuf,
     pub daemon_running: bool,
+    pub axis: Axis,
 }
 
 pub(crate) fn run(opts: &InitOptions) -> Result<String, InitError> {
@@ -101,12 +125,12 @@ pub(crate) fn run(opts: &InitOptions) -> Result<String, InitError> {
     print!("{out}");
     std::io::Write::flush(&mut std::io::stdout()).ok();
 
-    run_setup_agent(&dir, &path, &opts.runtime)?;
+    run_setup_agent(&dir, &path, &opts.runtime, opts.axis)?;
     Ok(String::new())
 }
 
-fn run_setup_agent(project_dir: &Path, config_path: &Path, runtime: &str) -> Result<(), InitError> {
-    let system_prompt = build_setup_system_prompt(config_path, runtime);
+fn run_setup_agent(project_dir: &Path, config_path: &Path, runtime: &str, axis: Axis) -> Result<(), InitError> {
+    let system_prompt = build_setup_system_prompt(config_path, runtime, axis);
     let user_prompt = "프로젝트 구조를 파악해서 워크스페이스 구성을 결정하고 config.yaml에 작성해주세요. 작성 완료 후 어떤 워크스페이스를 만들었는지 요약해주세요.";
 
     if runtime == "codex" {
@@ -279,34 +303,65 @@ fn short_path(p: &str) -> String {
     }
 }
 
-fn build_setup_system_prompt(config_path: &Path, runtime: &str) -> String {
+fn build_setup_system_prompt(config_path: &Path, runtime: &str, axis: Axis) -> String {
     let cp = config_path.display();
+    let axis_directive = match axis {
+        Axis::Auto => AXIS_AUTO_DIRECTIVE,
+        Axis::Role => AXIS_ROLE_DIRECTIVE,
+        Axis::Domain => AXIS_DOMAIN_DIRECTIVE,
+    };
     format!(
         "당신은 ax 프로젝트 셋업 에이전트입니다. 사용자가 요청하면 현재 디렉토리의 프로젝트를 분석해서 멀티 에이전트 워크스페이스 구성을 제안하고 {cp} 파일을 편집하세요.\n\n\
+## Conway's Law — 축 선택이 가장 중요합니다\n\
+지금 당신이 팀을 어떻게 쪼개느냐가 **앞으로 3~6개월 동안 이 코드베이스의 경계**가 됩니다. 한 번 정해진 축은 디렉토리 구조·모듈 인터페이스·커밋 경계를 따라가며 굳어지고, 재분할은 큰 비용이 들어요. 그래서 관찰 기반으로 신중히 고르되, 결정했으면 주저하지 마세요.\n\n\
+### 축 기준\n\
+- **도메인 중심** (예: `users`, `billing`, `inventory`) — 비즈니스 경계가 안정적이고, 각 도메인이 풀스택으로 독립 배포될 수 있고, 교차 기능 변경이 드물 때. 대부분 확장 지향 프로젝트에 적합.\n\
+- **역할 중심** (예: `frontend`, `backend`, `infra`, `docs`) — 도메인 경계가 아직 미성숙하거나, 단일 코드베이스에서 역할별 전문성(보안·접근성·인프라)이 품질을 가르는 경우. 프로토타입·초기 단계에 자연스러움.\n\
+- **하이브리드** — 도메인 팀 여러 개 + 얇은 횡단 팀 1~2개(platform/docs)로 혼합. 큰 조직에서 현실적.\n\n\
+{axis_directive}\n\n\
 ## 절차\n\
-1. 프로젝트 구조를 파악하세요 (Glob으로 디렉토리 구조, README/package.json/go.mod/pyproject.toml 등 주요 파일 확인).\n\
-2. 모노레포인지, 어떤 도메인들이 있는지, 어떤 역할의 에이전트가 필요한지 판단하세요.\n\
-3. **사용자에게 확인을 묻지 말고** 바로 {cp} 파일을 편집하세요.\n\
-4. 편집 후 최종 구성을 요약해서 보여주고, 사용자가 조정을 요청하면 반영하세요.\n\n\
+1. **관찰**: 프로젝트 구조를 파악하세요 (Glob으로 디렉토리 구조, README/package.json/go.mod/pyproject.toml 등 주요 파일 확인). 기존에 이미 어떤 경계가 보이는지 — `app/` + `api/` 식 역할 분리인지, `users/` + `billing/` 식 도메인 분리인지, 아직 미분화인지 — 를 먼저 읽어내세요.\n\
+2. **축 결정**: 위 기준과 관찰 결과를 바탕으로 축을 정하세요. 위 '축 지시' 섹션을 따릅니다.\n\
+3. **근거 기록**: {cp} 파일 최상단에 다음 주석을 넣으세요.\n   \
+```\n   \
+# axis: role | domain | hybrid\n   \
+# rationale: <왜 이 축을 골랐는지 1~2문장>\n   \
+```\n\
+4. **사용자에게 확인을 묻지 말고** 바로 {cp}의 `workspaces` 섹션을 채우세요.\n\
+5. 편집 후 최종 구성과 축 선택 근거를 요약해서 보여주고, 사용자가 조정을 요청하면 반영하세요.\n\n\
 ## config.yaml 형식\n\
 ```yaml\n\
+# axis: <선택한 축>\n\
+# rationale: <1~2문장 근거>\n\
 project: <프로젝트 이름>\n\
 workspaces:\n  \
 <name>:\n    \
 dir: <프로젝트 루트 기준 상대 경로>\n    \
-description: <해당 에이전트의 역할 한 문장>\n    \
+description: <해당 에이전트의 역할 한 문장; 왜 이 경계를 그었는지 포함>\n    \
 runtime: {runtime}\n    \
 instructions: |\n      \
-<해당 워크스페이스 에이전트가 받을 지침 — 무엇을 해야 하는지, 어떤 파일을 건드려야 하는지 등>\n\
+<해당 워크스페이스 에이전트가 받을 지침 — 무엇을 해야 하는지, 어떤 파일을 건드려야 하는지, 어떤 경계를 넘지 말아야 하는지>\n\
 ```\n\n\
 ## 주의사항\n\
-- 워크스페이스 이름은 kebab-case 또는 snake_case로 짧고 명확하게 (예: backend, frontend, infra, docs).\n\
-- description은 한 문장으로 역할을 명확히 설명.\n\
+- 워크스페이스 이름은 선택한 축을 그대로 반영하세요 (도메인이면 도메인명, 역할이면 역할명). 축을 흐리는 중립적 이름(`worker1`, `module2`)은 피하세요.\n\
+- description은 한 문장으로 **왜** 이 경계가 존재하는지 명확히 설명. 단순히 \"이 디렉토리를 담당\"이 아니라 \"결제 플로우 전반 담당\" / \"프론트엔드 UI와 상태관리 담당\" 같은 식으로.\n\
 - 이 초기화에서는 기본 런타임을 {runtime}로 사용하세요.\n\
-- instructions는 구체적으로 작성 — 그 에이전트가 어떤 디렉토리에서 작업하고, 어떤 원칙을 따라야 하는지.\n\
-- 기존 {cp} 파일은 최소 stub만 있는 상태입니다. workspaces 섹션을 채워주세요."
+- instructions는 구체적으로 작성 — 그 에이전트가 어떤 디렉토리에서 작업하고, 어떤 파일·디렉토리를 건드리면 안 되는지까지.\n\
+- 기존 {cp} 파일은 최소 stub만 있는 상태입니다. workspaces 섹션과 최상단 축 주석을 채워주세요."
     )
 }
+
+const AXIS_AUTO_DIRECTIVE: &str = "\
+### 축 지시: `auto`\n\
+관찰 결과를 바탕으로 에이전트(당신)가 직접 축을 결정하세요. 애매할 때 기본 선호는 **도메인 > 하이브리드 > 역할** 순서. 다만 프로젝트가 단일 언어·단일 배포이고 디렉토리가 이미 역할로 쪼개져 있다면(`frontend/` + `backend/`, `src/` + `infra/` 등) 역할 축이 자연스러울 수 있습니다. 선택한 축과 근거를 명시적으로 설명하세요.";
+
+const AXIS_ROLE_DIRECTIVE: &str = "\
+### 축 지시: `--axis role`\n\
+사용자가 **역할 중심**을 지정했습니다. 관찰 결과와 무관하게 역할 축으로 구성하세요 (frontend/backend/infra/docs/qa 등 필요한 것만). 다만 rationale에는 관찰 결과와 왜 역할 축이 이 프로젝트에 맞는지(또는 사용자가 왜 이 축을 선택했을지)를 1~2문장으로 적어주세요.";
+
+const AXIS_DOMAIN_DIRECTIVE: &str = "\
+### 축 지시: `--axis domain`\n\
+사용자가 **도메인 중심**을 지정했습니다. 관찰 결과에서 비즈니스 도메인을 추출해 도메인 이름(users, billing, inventory, ...)으로 팀을 구성하세요. 관찰에서 도메인이 뚜렷하지 않으면 가장 그럴듯한 도메인 분할을 제안하고 rationale에 \"현재 도메인 경계가 덜 명확하니 이후 재검토 권장\"을 명시하세요.";
 
 fn register_as_child(
     child_dir: &Path,
@@ -595,6 +650,42 @@ impl std::fmt::Display for InitError {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn axis_parse_accepts_canonical_and_alias_forms() {
+        assert_eq!(Axis::parse("auto"), Some(Axis::Auto));
+        assert_eq!(Axis::parse("  ROLE  "), Some(Axis::Role));
+        assert_eq!(Axis::parse("role-first"), Some(Axis::Role));
+        assert_eq!(Axis::parse("domain"), Some(Axis::Domain));
+        assert_eq!(Axis::parse("domain-first"), Some(Axis::Domain));
+        assert_eq!(Axis::parse("nonsense"), None);
+    }
+
+    #[test]
+    fn setup_prompt_embeds_conway_framing_and_axis_directive_for_auto() {
+        let p = build_setup_system_prompt(Path::new("/tmp/.ax/config.yaml"), "codex", Axis::Auto);
+        assert!(p.contains("Conway's Law"));
+        assert!(p.contains("3~6개월"));
+        assert!(p.contains("`auto`"));
+        assert!(!p.contains("--axis role"));
+        assert!(!p.contains("--axis domain"));
+        assert!(p.contains("# axis:"));
+    }
+
+    #[test]
+    fn setup_prompt_forces_role_when_role_axis_requested() {
+        let p = build_setup_system_prompt(Path::new("/tmp/.ax/config.yaml"), "codex", Axis::Role);
+        assert!(p.contains("--axis role"));
+        assert!(!p.contains("`auto`\n관찰"));
+        assert!(p.contains("역할 축으로 구성하세요"));
+    }
+
+    #[test]
+    fn setup_prompt_forces_domain_when_domain_axis_requested() {
+        let p = build_setup_system_prompt(Path::new("/tmp/.ax/config.yaml"), "codex", Axis::Domain);
+        assert!(p.contains("--axis domain"));
+        assert!(p.contains("도메인 이름"));
+    }
 
     #[test]
     fn ensure_gitignore_creates_entry_when_git_dir_present() {
