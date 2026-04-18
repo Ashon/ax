@@ -34,11 +34,22 @@ scenarios/<name>/
 └── <workspace dirs>/   # seeded fixture tree copied into the sandbox
 ```
 
-Current scenarios:
+Current orchestration scenarios (`tests/orchestration_live.rs`):
 
 - `hello_workspace` — L1, single workspace, trivial file-write task.
 - `delegated_split` — L2, orchestrator fans out two parallel tasks
   to `alpha` + `beta` via `start_task`.
+
+Current init scenarios (`tests/init_live.rs`) — exercise the
+Conway's-Law axis-selection prompt from `ax init`:
+
+- `init_role_auto` — role-shaped project (frontend/backend/infra)
+  with `--axis auto`; expects a role- or hybrid-axis config.
+- `init_domain_auto` — domain-shaped project (users/orders/inventory)
+  with `--axis auto`; expects a domain- or hybrid-axis config.
+- `init_domain_force_role` — domain-shaped project with `--axis role`
+  forced; expects the agent to override the observed shape and
+  produce a role-axis config.
 
 Add a new scenario by dropping a directory under `scenarios/` and
 registering a test function in `tests/orchestration_live.rs` that
@@ -53,8 +64,11 @@ cargo test
 # Just this crate
 cargo test -p ax-e2e
 
-# Live codex scenarios (requires host codex auth + tmux)
+# Live codex orchestration scenarios (requires host codex auth + tmux)
 AX_E2E_LIVE=1 cargo test -p ax-e2e --test orchestration_live -- --nocapture
+
+# Live init axis scenarios (requires host codex auth; no tmux needed)
+AX_E2E_LIVE=1 cargo test -p ax-e2e --test init_live -- --nocapture
 ```
 
 Live scenarios require:

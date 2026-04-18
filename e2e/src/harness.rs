@@ -248,6 +248,21 @@ pub fn start_daemon(sandbox: &Sandbox, ax: &Path) -> Result<DaemonProc, HarnessE
     Ok(DaemonProc { child, socket: sock })
 }
 
+/// Drive `ax init` blocking inside the sandbox. The subprocess runs
+/// codex/claude as a child, so this call takes as long as the
+/// setup agent needs. Stdout/stderr are captured so a failure
+/// surfaces whatever the setup agent printed.
+pub fn run_ax_init(sandbox: &Sandbox, ax: &Path, extra_args: &[&str]) -> Result<(), HarnessError> {
+    let mut args: Vec<&str> = vec!["init"];
+    args.extend_from_slice(extra_args);
+    run_logged(
+        ax.to_string_lossy().as_ref(),
+        args,
+        Some(sandbox.project()),
+        sandbox.env(),
+    )
+}
+
 pub fn ax_up(sandbox: &Sandbox, ax: &Path) -> Result<(), HarnessError> {
     run_logged(
         ax.to_string_lossy().as_ref(),
