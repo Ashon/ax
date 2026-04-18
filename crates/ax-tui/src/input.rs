@@ -32,6 +32,14 @@ pub(crate) fn handle_key(app: &mut App, event: KeyEvent) {
         return;
     }
 
+    // In streaming mode, `esc` exits back to the grid/stream layout
+    // first. All other keys still steer the sidebar + stream view so
+    // you can e.g. swap to the tasks table while a capture is open.
+    if app.streamed_workspace.is_some() && matches!(event.code, KeyCode::Esc) {
+        app.streamed_workspace = None;
+        return;
+    }
+
     match event.code {
         KeyCode::Esc => open_overlay(app),
         KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),

@@ -19,6 +19,7 @@ pub(crate) const NOTICE_TTL: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum QuickActionId {
+    StreamTmux,
     ShowTasks,
     ShowMessages,
     Interrupt,
@@ -29,6 +30,7 @@ pub(crate) enum QuickActionId {
 impl QuickActionId {
     pub(crate) fn label(self) -> &'static str {
         match self {
+            Self::StreamTmux => "Stream tmux",
             Self::ShowTasks => "Open tasks",
             Self::ShowMessages => "Open messages",
             Self::Interrupt => "Interrupt",
@@ -57,6 +59,9 @@ pub(crate) struct QuickAction {
 
 pub(crate) fn default_actions() -> Vec<QuickAction> {
     vec![
+        QuickAction {
+            id: QuickActionId::StreamTmux,
+        },
         QuickAction {
             id: QuickActionId::ShowTasks,
         },
@@ -95,8 +100,14 @@ impl QuickActionState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ActionOutcome {
     NeedsConfirm,
-    Notice { text: String, error: bool },
+    Notice {
+        text: String,
+        error: bool,
+    },
     ChangeStream(StreamView),
+    /// Enter single-agent streaming view for the given workspace —
+    /// body pane becomes a full-pane live tmux capture mirror.
+    StartStreaming(String),
     Close,
 }
 
@@ -111,6 +122,12 @@ pub(crate) fn run_selected(state: &QuickActionState, target: &str) -> Vec<Action
         return vec![ActionOutcome::NeedsConfirm];
     }
     match action.id {
+        QuickActionId::StreamTmux => {
+            vec![
+                ActionOutcome::StartStreaming(target.to_owned()),
+                ActionOutcome::Close,
+            ]
+        }
         QuickActionId::ShowTasks => {
             vec![
                 ActionOutcome::ChangeStream(StreamView::Tasks),
@@ -224,6 +241,10 @@ pub(crate) fn apply_outcomes(app: &mut App, outcomes: Vec<ActionOutcome>) {
             }
             ActionOutcome::ChangeStream(view) => {
                 app.stream = view;
+                app.streamed_workspace = None;
+            }
+            ActionOutcome::StartStreaming(workspace) => {
+                app.streamed_workspace = Some(workspace);
             }
             ActionOutcome::Close => {
                 app.quick_actions.open = false;

@@ -186,12 +186,50 @@ fn sidebar_item<'a>(idx: usize, entry: &'a SidebarEntry, app: &'a App) -> ListIt
 }
 
 fn draw_body(f: &mut Frame, area: Rect, app: &App) {
+    // Streaming mode wins over the regular stream views.
+    if let Some(workspace) = app.streamed_workspace.clone() {
+        draw_stream_single(f, area, app, &workspace);
+        return;
+    }
     match app.stream {
         StreamView::Messages => draw_messages(f, area, app),
         StreamView::Tasks => draw_tasks(f, area, app),
         StreamView::Tokens => draw_tokens(f, area, app),
         StreamView::Hidden => draw_selection_summary(f, area, app),
     }
+}
+
+fn draw_stream_single(f: &mut Frame, area: Rect, app: &App, workspace: &str) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(format!(" {workspace} · tmux stream · esc to exit "));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let capture = app
+        .captures
+        .entries
+        .get(workspace)
+        .map_or("", |entry| entry.content.as_str());
+    if capture.is_empty() {
+        let para =
+            Paragraph::new("(capturing…)").style(Style::default().add_modifier(Modifier::DIM));
+        f.render_widget(para, inner);
+        return;
+    }
+
+    let rows = inner.height as usize;
+    let width = inner.width as usize;
+    let lines: Vec<Line> = crate::captures::recent_lines(capture, rows)
+        .into_iter()
+        .map(|line| Line::from(Span::raw(sanitize_capture_line(line, width))))
+        .collect();
+    let para = Paragraph::new(lines);
+    f.render_widget(para, inner);
 }
 
 fn draw_messages(f: &mut Frame, area: Rect, app: &App) {
@@ -784,6 +822,11 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     } else if app.quick_actions.open {
         (
             "↑↓ action · enter run · esc close · q quit".to_owned(),
+            Style::default().add_modifier(Modifier::DIM),
+        )
+    } else if app.streamed_workspace.is_some() {
+        (
+            "esc exit stream · q quit".to_owned(),
             Style::default().add_modifier(Modifier::DIM),
         )
     } else {

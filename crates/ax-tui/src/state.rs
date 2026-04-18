@@ -53,6 +53,11 @@ pub(crate) struct App {
     /// app loop (where paths are available) and cleared.
     pub(crate) pending_lifecycle: Option<PendingLifecycle>,
     pub(crate) captures: CaptureCache,
+    /// When `Some(ws)`, the body pane becomes a full-pane live
+    /// tmux capture mirror of `ws`. Pressing `esc` clears the
+    /// streaming mode; pressing it again opens the quick-action
+    /// overlay. Matches the Go TUI's `viewModeStream`.
+    pub(crate) streamed_workspace: Option<String>,
     pub(crate) last_refresh: Option<Instant>,
     pub(crate) daemon_running: bool,
     pub(crate) notice: Option<String>,
@@ -77,6 +82,7 @@ impl App {
             task_filter: TaskFilterMode::Active,
             quick_actions: QuickActionState::default(),
             quick_notice: None,
+            streamed_workspace: None,
             pending_lifecycle: None,
             captures: CaptureCache::default(),
             last_refresh: None,

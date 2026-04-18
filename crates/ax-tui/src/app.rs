@@ -133,7 +133,13 @@ fn refresh(app: &mut App, opts: &RunOptions) {
 }
 
 fn refresh_captures(app: &mut App) {
-    let focused = app.selected_workspace().map(str::to_owned);
+    // Streaming mode pins the focused workspace so the mirrored
+    // pane updates every tick. Otherwise fall back to the sidebar
+    // cursor's workspace.
+    let focused = app
+        .streamed_workspace
+        .clone()
+        .or_else(|| app.selected_workspace().map(str::to_owned));
     app.captures
         .refresh(&app.sessions, focused.as_deref(), Instant::now());
     app.captures.prune(&app.sessions);
