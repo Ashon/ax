@@ -1435,7 +1435,8 @@ fn expect_single_name(argv: &[OsString], cmd_label: &str) -> Result<String, CliE
 
 fn parse_watch_args(argv: &[OsString]) -> Result<ParsedCommand, CliError> {
     let mut socket_path = expand_socket_path(DEFAULT_SOCKET_PATH);
-    let mut i = 0;
+    // argv[0] is the command name ("watch" / "top"); skip it.
+    let mut i = 1;
     while i < argv.len() {
         let arg = &argv[i];
         match arg.to_string_lossy().as_ref() {

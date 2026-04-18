@@ -261,7 +261,10 @@ pub enum TaskStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskStartMode {
-    #[serde(rename = "default")]
+    // Older persisted snapshots and Go-era payloads used empty
+    // string to mean "unset / use default". Accept both on the wire
+    // so loading pre-Rust state files still works.
+    #[serde(rename = "default", alias = "")]
     Default,
     #[serde(rename = "fresh")]
     Fresh,
@@ -269,7 +272,7 @@ pub enum TaskStartMode {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskWorkflowMode {
-    #[serde(rename = "parallel")]
+    #[serde(rename = "parallel", alias = "")]
     Parallel,
     #[serde(rename = "serial")]
     Serial,
@@ -279,7 +282,9 @@ pub enum TaskWorkflowMode {
 pub enum TaskPriority {
     #[serde(rename = "low")]
     Low,
-    #[serde(rename = "normal")]
+    // Empty string is the historical "unset" value from the Go
+    // daemon; map it to Normal for backwards compat.
+    #[serde(rename = "normal", alias = "")]
     Normal,
     #[serde(rename = "high")]
     High,

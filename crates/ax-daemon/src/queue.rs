@@ -84,12 +84,17 @@ impl MessageQueue {
         let by_workspace = match std::fs::read(&path) {
             Ok(bytes) if bytes.is_empty() => BTreeMap::new(),
             Ok(bytes) => {
-                let map: BTreeMap<String, VecDeque<Message>> = serde_json::from_slice(&bytes)
-                    .map_err(|source| QueueError::Decode {
+                // Go-era snapshots serialise workspaces with empty
+                // queues as JSON `null` instead of `[]`. Accept both
+                // shapes and treat null as "no pending messages".
+                let raw: BTreeMap<String, Option<VecDeque<Message>>> =
+                    serde_json::from_slice(&bytes).map_err(|source| QueueError::Decode {
                         path: path.clone(),
                         source,
                     })?;
-                map
+                raw.into_iter()
+                    .map(|(k, v)| (k, v.unwrap_or_default()))
+                    .collect()
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
             Err(source) => return Err(QueueError::Read { path, source }),
