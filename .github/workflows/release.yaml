@@ -36,7 +36,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: rs
           key: release-${{ matrix.target }}
 
       - name: Install cross linker
@@ -48,12 +47,11 @@ jobs:
           printf '[target.aarch64-unknown-linux-gnu]\nlinker = "aarch64-linux-gnu-gcc"\n' >> ~/.cargo/config.toml
 
       - name: Build release binary
-        working-directory: rs
         run: cargo build --release --bin ax --target ${{ matrix.target }}
 
       - name: Package
         run: |
-          tar -C rs/target/${{ matrix.target }}/release -czf ${{ matrix.asset }}.tar.gz ax
+          tar -C target/${{ matrix.target }}/release -czf ${{ matrix.asset }}.tar.gz ax
           shasum -a 256 ${{ matrix.asset }}.tar.gz > ${{ matrix.asset }}.tar.gz.sha256
 
       - uses: softprops/action-gh-release@v2

@@ -12,9 +12,6 @@ permissions:
 jobs:
   rust:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: rs
     steps:
       - uses: actions/checkout@v4
 
@@ -23,8 +20,6 @@ jobs:
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rs
 
       - name: Format check
         run: cargo fmt --check
@@ -58,7 +53,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: rs
           key: ${{ matrix.target }}
 
       - name: Install cross linker
@@ -70,5 +64,4 @@ jobs:
           printf '[target.aarch64-unknown-linux-gnu]\nlinker = "aarch64-linux-gnu-gcc"\n' >> ~/.cargo/config.toml
 
       - name: Cross-build ${{ matrix.target }}
-        working-directory: rs
         run: cargo build --release --bin ax --target ${{ matrix.target }}

@@ -3,6 +3,6 @@ ax
 .DS_Store
 dist/
 .mcp.json
-rs/target/
+target/
 **/AGENTS.md
 **/CLAUDE.md

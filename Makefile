@@ -3,8 +3,8 @@ VERSION ?= dev
 .PHONY: build install clean test release-check snapshot release
 
 build:
-	cd rs && cargo build --release --bin ax
-	cp rs/target/release/ax ./ax
+	cargo build --release --bin ax
+	cp target/release/ax ./ax
 
 install: build
 	cp ax $(shell printf '%s' "$${CARGO_HOME:-$$HOME/.cargo}/bin")/ax
@@ -12,10 +12,10 @@ install: build
 
 clean:
 	rm -f ax
-	cd rs && cargo clean
+	cargo clean
 
 test:
-	cd rs && cargo test
+	cargo test
 
 release-check:
 	@test -z "$$(git status --porcelain --untracked-files=all)" || (echo "Working tree is not clean. Commit, stash, or remove changes before releasing." >&2; git status --short >&2; exit 1)
