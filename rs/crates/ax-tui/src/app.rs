@@ -95,6 +95,7 @@ fn refresh(app: &mut App, opts: &RunOptions) {
     refresh_tree(app);
     app.rebuild_sidebar();
     refresh_messages(app, opts);
+    refresh_tasks(app, opts);
     app.last_refresh = Some(Instant::now());
 }
 
@@ -103,6 +104,11 @@ const MESSAGE_HISTORY_BUFFER: usize = 500;
 fn refresh_messages(app: &mut App, opts: &RunOptions) {
     let path = crate::stream::history_file_path(&opts.socket_path);
     app.messages = crate::stream::read_history(&path, MESSAGE_HISTORY_BUFFER);
+}
+
+fn refresh_tasks(app: &mut App, opts: &RunOptions) {
+    let path = crate::tasks::tasks_file_path(&opts.socket_path);
+    app.tasks = crate::tasks::read_tasks(&path);
 }
 
 fn refresh_tree(app: &mut App) {

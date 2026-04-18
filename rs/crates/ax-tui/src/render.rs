@@ -131,7 +131,8 @@ fn sidebar_item<'a>(idx: usize, entry: &'a SidebarEntry, app: &'a App) -> ListIt
 fn draw_body(f: &mut Frame, area: Rect, app: &App) {
     match app.stream {
         StreamView::Messages => draw_messages(f, area, app),
-        StreamView::Tasks | StreamView::Tokens => draw_stub_view(f, area, app),
+        StreamView::Tasks => draw_tasks(f, area, app),
+        StreamView::Tokens => draw_stub_view(f, area, app),
         StreamView::Hidden => draw_selection_summary(f, area, app),
     }
 }
@@ -179,6 +180,61 @@ fn draw_stub_view(f: &mut Frame, area: Rect, app: &App) {
                 .title(app.stream.title()),
         );
     f.render_widget(para, area);
+}
+
+fn draw_tasks(f: &mut Frame, area: Rect, app: &App) {
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let inner_height = area.height.saturating_sub(2) as usize;
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(StreamView::Tasks.title());
+
+    if app.tasks.is_empty() {
+        let para = Paragraph::new("  (no tasks yet)")
+            .style(Style::default().add_modifier(Modifier::DIM))
+            .block(block);
+        f.render_widget(para, area);
+        return;
+    }
+
+    let summary = crate::tasks::summarize_tasks(&app.tasks);
+    let mut lines: Vec<Line> = Vec::with_capacity(inner_height);
+    lines.push(Line::from(Span::styled(
+        crate::tasks::truncate(
+            &format!("Summary: {}", crate::tasks::format_task_summary(&summary)),
+            inner_width.max(1),
+        ),
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    // Column header matches ax-rs tasks list so terminal scrapers read the
+    // same layout in both surfaces.
+    lines.push(Line::from(Span::styled(
+        crate::tasks::truncate(
+            "ID       PRI      STATUS          AGE    ASSIGNEE        TITLE",
+            inner_width.max(1),
+        ),
+        Style::default().add_modifier(Modifier::DIM),
+    )));
+
+    let body_budget = inner_height.saturating_sub(lines.len());
+    for task in app.tasks.iter().take(body_budget) {
+        lines.push(Line::from(Span::raw(format_task_row(task, inner_width))));
+    }
+    let para = Paragraph::new(lines).block(block);
+    f.render_widget(para, area);
+}
+
+fn format_task_row(task: &ax_proto::types::Task, width: usize) -> String {
+    let id = crate::tasks::short_task_id(&task.id);
+    let row = format!(
+        "{id:<8} {:<8} {:<15} {:<6} {:<15} {}",
+        crate::tasks::truncate(crate::tasks::task_priority_label(task.priority.as_ref()), 8),
+        crate::tasks::truncate(&crate::tasks::task_status_label(task), 15),
+        crate::tasks::format_task_age(task),
+        crate::tasks::truncate(&task.assignee, 15),
+        task.title,
+    );
+    crate::tasks::truncate(&row, width.max(1))
 }
 
 fn draw_selection_summary(f: &mut Frame, area: Rect, app: &App) {

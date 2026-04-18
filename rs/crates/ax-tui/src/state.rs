@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use ax_config::ProjectNode;
 use ax_daemon::HistoryEntry;
-use ax_proto::types::WorkspaceInfo;
+use ax_proto::types::{Task, WorkspaceInfo};
 use ax_tmux::SessionInfo;
 
 use crate::sidebar::SidebarEntry;
@@ -35,6 +35,7 @@ pub(crate) struct App {
     pub(crate) selected_entry: usize,
     pub(crate) stream: StreamView,
     pub(crate) messages: Vec<HistoryEntry>,
+    pub(crate) tasks: Vec<Task>,
     pub(crate) last_refresh: Option<Instant>,
     pub(crate) daemon_running: bool,
     pub(crate) notice: Option<String>,
@@ -54,6 +55,7 @@ impl App {
             selected_entry: 0,
             stream: StreamView::Messages,
             messages: Vec::new(),
+            tasks: Vec::new(),
             last_refresh: None,
             daemon_running: false,
             notice: None,

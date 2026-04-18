@@ -14,6 +14,7 @@ mod render;
 mod sidebar;
 mod state;
 mod stream;
+mod tasks;
 mod terminal;
 
 pub use app::{run, RunError, RunOptions};
