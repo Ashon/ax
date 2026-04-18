@@ -3,7 +3,7 @@
 mod daemon_client;
 
 use std::env;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -42,14 +42,12 @@ Usage:
   ax-rs restart <target> [--config PATH] [--socket PATH] [--ax-bin PATH]
   ax-rs dispatch <target> --sender NAME [--fresh] [--config PATH] [--socket PATH] [--ax-bin PATH]
   ax-rs run-agent --workspace NAME [--runtime RUNTIME] [--socket PATH] [--config PATH] [--fresh] [-- ...]
-  ax-rs mcp-server ...
+  ax-rs mcp-server --workspace NAME [--socket PATH] [--config PATH]
 
 Notes:
   --config defaults to the discovered ax config (.ax/config.yaml or ax.yaml)
   --socket defaults to ~/.local/state/ax/daemon.sock
   --ax-bin defaults to the current ax-rs executable
-  ax-rs run-agent is handled natively; mcp-server is still delegated to Go ax
-  Set AX_GO_BINARY=/path/to/ax to override the delegated Go binary for mcp-server (default: ax)
 ";
 
 const ROOT_ORCHESTRATOR_FAILURE_HOLD_SCRIPT: &str = "\"$@\"\nstatus=$?\nif [ \"$status\" -ne 0 ] && [ \"$status\" -ne 130 ] && [ \"$status\" -ne 143 ]; then\n  printf '\\n[ax] Root orchestrator process exited unexpectedly with status %s.\\n' \"$status\"\n  printf '[ax] Common causes: runtime binary not found, auth/config issues, or a CLI crash.\\n'\n  printf '[ax] Press Enter to close this tmux session.\\n'\n  IFS= read -r _\nfi\nexit \"$status\"";
@@ -127,8 +125,10 @@ enum ParsedCommand {
         fresh: bool,
         options: CommonOptions,
     },
-    Delegate {
-        argv: Vec<OsString>,
+    McpServer {
+        workspace: String,
+        socket_path: PathBuf,
+        config_path: Option<PathBuf>,
     },
 }
 
@@ -144,13 +144,7 @@ enum CliError {
     Lifecycle(ax_workspace::LifecycleError),
     Dispatch(ax_workspace::DispatchError),
     RunAgent(ax_agent::LaunchError),
-    DelegateLaunch {
-        binary: String,
-        source: std::io::Error,
-    },
-    DelegateLoop {
-        binary: String,
-    },
+    McpServer(String),
 }
 
 #[derive(Debug)]
@@ -264,12 +258,7 @@ impl fmt::Display for CliError {
             Self::Lifecycle(source) => write!(f, "{source}"),
             Self::Dispatch(source) => write!(f, "{source}"),
             Self::RunAgent(source) => write!(f, "{source}"),
-            Self::DelegateLaunch { binary, source } => {
-                write!(f, "launch delegated ax binary {binary:?}: {source}")
-            }
-            Self::DelegateLoop { binary } => {
-                write!(f, "delegated ax binary {binary:?} resolves to ax-rs itself")
-            }
+            Self::McpServer(source) => write!(f, "{source}"),
         }
     }
 }
@@ -587,7 +576,11 @@ where
             )?;
             Ok(ExitCode::from(status.code().unwrap_or(1) as u8))
         }
-        ParsedCommand::Delegate { argv } => delegate_to_go_ax(&argv, current_exe),
+        ParsedCommand::McpServer {
+            workspace,
+            socket_path,
+            config_path,
+        } => run_mcp_server(&workspace, &socket_path, config_path.as_deref()),
     }
 }
 
@@ -629,7 +622,7 @@ where
         return parse_run_agent_args(&tail, cwd);
     }
     if command == "mcp-server" {
-        return Ok(ParsedCommand::Delegate { argv: tail });
+        return parse_mcp_server_args(&tail, cwd);
     }
 
     let action = match command.as_str() {
@@ -1071,6 +1064,45 @@ fn parse_run_agent_args(argv: &[OsString], cwd: &Path) -> Result<ParsedCommand, 
         config_path,
         fresh,
         extra_args,
+    })
+}
+
+fn parse_mcp_server_args(argv: &[OsString], cwd: &Path) -> Result<ParsedCommand, CliError> {
+    let mut workspace: Option<String> = None;
+    let mut socket_path = expand_socket_path(DEFAULT_SOCKET_PATH);
+    let mut config_path: Option<PathBuf> = None;
+
+    let mut i = 1;
+    while i < argv.len() {
+        let arg = &argv[i];
+        match arg.to_string_lossy().as_ref() {
+            "-h" | "--help" => return Ok(ParsedCommand::Help),
+            "--workspace" => {
+                i += 1;
+                workspace = Some(parse_string_arg(argv.get(i), "--workspace")?);
+            }
+            "--socket" => {
+                i += 1;
+                socket_path = parse_socket_path(argv.get(i), "--socket")?;
+            }
+            "--config" => {
+                i += 1;
+                config_path = Some(parse_path_arg(argv.get(i), "--config", cwd)?);
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown flag {other:?}\n\n{USAGE}"
+                )));
+            }
+        }
+        i += 1;
+    }
+
+    Ok(ParsedCommand::McpServer {
+        workspace: workspace
+            .ok_or_else(|| CliError::Usage(format!("--workspace is required\n\n{USAGE}")))?,
+        socket_path,
+        config_path,
     })
 }
 
@@ -1620,36 +1652,65 @@ fn send_signal(pid: i32, signal: &'static str) -> Result<bool, CliError> {
     .into())
 }
 
-fn delegate_to_go_ax(argv: &[OsString], current_exe: &Path) -> Result<ExitCode, CliError> {
-    let delegate_bin = env::var_os("AX_GO_BINARY").unwrap_or_else(|| OsString::from("ax"));
-    if delegates_to_self(&delegate_bin, current_exe) {
-        return Err(CliError::DelegateLoop {
-            binary: delegate_bin.to_string_lossy().into_owned(),
-        });
-    }
+fn run_mcp_server(
+    workspace: &str,
+    socket_path: &Path,
+    config_path: Option<&Path>,
+) -> Result<ExitCode, CliError> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|source| CliError::McpServer(format!("build tokio runtime: {source}")))?;
+    runtime.block_on(async move {
+        let dir = env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        let effective_cfg = config_path
+            .map(Path::to_path_buf)
+            .or_else(|| ax_mcp_server::find_effective_config(None));
 
-    let status = ProcessCommand::new(&delegate_bin)
-        .args(argv)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .map_err(|source| CliError::DelegateLaunch {
-            binary: delegate_bin.to_string_lossy().into_owned(),
-            source,
-        })?;
+        let (description, registration_cfg, idle_timeout) = match effective_cfg.as_deref() {
+            Some(path) => match ax_config::Config::load(path) {
+                Ok(cfg) => {
+                    let desc = cfg
+                        .workspaces
+                        .get(workspace)
+                        .map(|ws| ws.description.trim().to_owned())
+                        .unwrap_or_default();
+                    let idle = std::time::Duration::from_secs(
+                        (cfg.idle_timeout_minutes_or_default() as u64) * 60,
+                    );
+                    (desc, path.display().to_string(), idle)
+                }
+                Err(_) => (
+                    String::new(),
+                    path.display().to_string(),
+                    std::time::Duration::ZERO,
+                ),
+            },
+            None => (String::new(), String::new(), std::time::Duration::ZERO),
+        };
 
-    Ok(ExitCode::from(status.code().unwrap_or(1) as u8))
-}
-
-fn delegates_to_self(delegate_bin: &OsStr, current_exe: &Path) -> bool {
-    let candidate = Path::new(delegate_bin);
-    if candidate.is_absolute() {
-        return candidate == current_exe;
-    }
-    current_exe
-        .file_name()
-        .is_some_and(|name| name == delegate_bin)
+        let mut builder = ax_mcp_server::DaemonClient::builder(socket_path, workspace)
+            .dir(dir)
+            .description(description)
+            .idle_timeout(idle_timeout);
+        if !registration_cfg.is_empty() {
+            builder = builder.config_path(registration_cfg);
+        }
+        let client = builder
+            .connect()
+            .await
+            .map_err(|e| CliError::McpServer(format!("connect to daemon: {e}")))?;
+        let server = match effective_cfg {
+            Some(path) => ax_mcp_server::Server::new(client).with_config_path(path),
+            None => ax_mcp_server::Server::new(client),
+        };
+        ax_mcp_server::run_stdio(server)
+            .await
+            .map_err(|e| CliError::McpServer(format!("mcp stdio: {e}")))?;
+        Ok::<ExitCode, CliError>(ExitCode::SUCCESS)
+    })
 }
 
 fn format_messages_output(

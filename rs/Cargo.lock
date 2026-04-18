@@ -61,6 +61,7 @@ dependencies = [
  "ax-agent",
  "ax-config",
  "ax-daemon",
+ "ax-mcp-server",
  "ax-proto",
  "ax-tmux",
  "ax-workspace",
