@@ -9,6 +9,7 @@
 //! `CallToolResult::success`, keeping the output byte-compatible with
 //! what Go's `mcp.NewToolResultText(json.MarshalIndent(...))` emits.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -21,19 +22,27 @@ use rmcp::transport::stdio;
 use rmcp::{tool, tool_handler, tool_router, ServerHandler, ServiceExt};
 use serde::Deserialize;
 
+use ax_config::{Config, ProjectNode};
 use ax_proto::payloads::{
-    BroadcastPayload, CancelTaskPayload, CreateTaskPayload, GetSharedPayload, GetTaskPayload,
+    AgentLifecyclePayload, BroadcastPayload, CancelTaskPayload, CreateTaskPayload,
+    FinishTeamReconfigurePayload, GetSharedPayload, GetTaskPayload, GetTeamStatePayload,
     InterveneTaskPayload, ListTasksPayload, ReadMessagesPayload, RecallMemoriesPayload,
     RememberMemoryPayload, RemoveTaskPayload, SendMessagePayload, SetSharedPayload,
-    SetStatusPayload, StartTaskPayload, UpdateTaskPayload,
+    SetStatusPayload, StartTaskPayload, TeamReconfigurePayload, UpdateTaskPayload,
 };
 use ax_proto::responses::{
-    BroadcastResponse, GetSharedResponse, InterveneTaskResponse, ListSharedResponse,
-    ListTasksResponse, ListWorkspacesResponse, MemoryResponse, ReadMessagesResponse,
-    RecallMemoriesResponse, SendMessageResponse, StartTaskResponse, StatusResponse, TaskResponse,
+    AgentLifecycleResponse, BroadcastResponse, GetSharedResponse, InterveneTaskResponse,
+    ListSharedResponse, ListTasksResponse, ListWorkspacesResponse, MemoryResponse,
+    ReadMessagesResponse, RecallMemoriesResponse, SendMessageResponse, StartTaskResponse,
+    StatusResponse, TaskResponse, TeamApplyResponse, TeamPlanResponse, TeamStateResponse,
 };
-use ax_proto::types::TaskStatus;
+use ax_proto::types::{
+    AgentStatus, LifecycleAction, TaskStatus, TeamApplyTicket, TeamChangeOp, TeamChildSpec,
+    TeamEntryKind, TeamReconcileMode, TeamReconfigureAction, TeamReconfigureChange,
+    TeamWorkspaceSpec, WorkspaceInfo,
+};
 use ax_proto::MessageType;
+use ax_workspace::{build_desired_state_with_tree, ReconcileOptions, ReconcileReport, Reconciler};
 
 use crate::daemon_client::{DaemonClient, DaemonClientError};
 use crate::memory_scope;
@@ -334,6 +343,95 @@ pub struct InterveneTaskRequest {
     pub note: Option<String>,
     #[serde(default)]
     pub expected_version: Option<i64>,
+}
+
+#[derive(Debug, Default, schemars::JsonSchema, Deserialize)]
+pub struct ListAgentsRequest {
+    /// Case-insensitive search applied to name, description, runtime,
+    /// command, and instructions preview.
+    #[serde(default)]
+    pub query: Option<String>,
+    /// Return only agents currently registered with the daemon.
+    #[serde(default)]
+    pub active_only: bool,
+}
+
+#[derive(Debug, schemars::JsonSchema, Deserialize)]
+pub struct AgentNameRequest {
+    /// Configured workspace / managed child orchestrator name.
+    pub name: String,
+}
+
+#[derive(Debug, schemars::JsonSchema, Deserialize)]
+pub struct InterruptAgentRequest {
+    /// Target workspace name.
+    pub name: String,
+}
+
+#[derive(Debug, schemars::JsonSchema, Deserialize)]
+pub struct SendKeysRequest {
+    /// Target workspace name.
+    pub workspace: String,
+    /// Ordered key sequence. Named tmux keys (Enter, Escape, `C-c`, …)
+    /// are resolved as-is; anything else is typed literally.
+    pub keys: Vec<String>,
+}
+
+#[derive(Debug, Default, schemars::JsonSchema, Deserialize)]
+pub struct TeamReconfigureRequest {
+    /// Optional optimistic-lock revision.
+    #[serde(default)]
+    pub expected_revision: Option<i64>,
+    /// Ordered v1 team changes. Supported kinds: `workspace`, `child`,
+    /// `root_orchestrator`.
+    pub changes: Vec<TeamReconfigureChangeInput>,
+    /// Runtime reconcile mode: `artifacts_only` (default) or
+    /// `start_missing`.
+    #[serde(default)]
+    pub reconcile_mode: Option<String>,
+}
+
+#[derive(Debug, Clone, schemars::JsonSchema, Deserialize)]
+pub struct TeamReconfigureChangeInput {
+    /// Operation kind: `add`, `remove`, `enable`, or `disable`.
+    pub op: String,
+    /// Target entry kind: `workspace`, `child`, or `root_orchestrator`.
+    pub kind: String,
+    /// Workspace or child name. Omit for `root_orchestrator` changes.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Workspace spec for `workspace` add operations.
+    #[serde(default)]
+    pub workspace: Option<TeamWorkspaceSpecInput>,
+    /// Child spec for `child` add operations.
+    #[serde(default)]
+    pub child: Option<TeamChildSpecInput>,
+}
+
+#[derive(Debug, Clone, Default, schemars::JsonSchema, Deserialize)]
+pub struct TeamWorkspaceSpecInput {
+    pub dir: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub shell: Option<String>,
+    #[serde(default)]
+    pub runtime: Option<String>,
+    #[serde(default)]
+    pub codex_model_reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub agent: Option<String>,
+    #[serde(default)]
+    pub instructions: Option<String>,
+    #[serde(default)]
+    pub env: Option<BTreeMap<String, String>>,
+}
+
+#[derive(Debug, Clone, schemars::JsonSchema, Deserialize)]
+pub struct TeamChildSpecInput {
+    pub dir: String,
+    #[serde(default)]
+    pub prefix: Option<String>,
 }
 
 #[tool_router(router = tool_router)]
@@ -951,6 +1049,417 @@ impl Server {
         )]))
     }
 
+    /// `list_agents` — configured agents from the active ax config,
+    /// enriched with active-workspace status from the daemon.
+    #[tool(
+        description = "List configured ax agents from the active ax config, enriched with current active status when available. Supports filtering to help find a specific agent such as a portfolio development team agent."
+    )]
+    pub async fn list_agents(
+        &self,
+        Parameters(req): Parameters<ListAgentsRequest>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let cfg_path = self
+            .resolve_tool_config_path()
+            .await
+            .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
+        let cfg = Config::load(&cfg_path)
+            .map_err(|e| rmcp::ErrorData::internal_error(format!("load ax config: {e}"), None))?;
+        let active: ListWorkspacesResponse = self
+            .daemon
+            .request(MessageType::ListWorkspaces, &serde_json::json!({}))
+            .await
+            .map_err(tool_error)?;
+
+        let mut active_by_name: BTreeMap<String, WorkspaceInfo> = BTreeMap::new();
+        for ws in &active.workspaces {
+            active_by_name.insert(ws.name.clone(), ws.clone());
+        }
+        let query = req
+            .query
+            .as_deref()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .unwrap_or_default();
+
+        let mut agents: Vec<serde_json::Value> = Vec::new();
+        for (name, ws) in &cfg.workspaces {
+            let mut info = serde_json::Map::new();
+            info.insert("name".into(), serde_json::Value::String(name.clone()));
+            info.insert("dir".into(), serde_json::Value::String(ws.dir.clone()));
+            if !ws.description.is_empty() {
+                info.insert(
+                    "description".into(),
+                    serde_json::Value::String(ws.description.clone()),
+                );
+            }
+
+            let launch_mode;
+            let mut runtime_name: Option<String> = None;
+            let mut command: Option<String> = None;
+            let mut instruction_file: Option<String> = None;
+            if ws.agent == "none" {
+                launch_mode = "manual";
+            } else if !ws.agent.trim().is_empty() {
+                launch_mode = "custom";
+                command = Some(ws.agent.clone());
+            } else {
+                launch_mode = "runtime";
+                let rt = ax_agent::Runtime::normalize(&ws.runtime)
+                    .map_or_else(|| ws.runtime.clone(), |r| r.as_str().to_owned());
+                instruction_file = ax_agent::instruction_file(&ws.runtime).map(str::to_owned);
+                runtime_name = Some(rt);
+            }
+            if let Some(runtime) = &runtime_name {
+                info.insert("runtime".into(), serde_json::Value::String(runtime.clone()));
+            }
+            info.insert(
+                "launch_mode".into(),
+                serde_json::Value::String(launch_mode.into()),
+            );
+            if let Some(cmd) = &command {
+                info.insert("command".into(), serde_json::Value::String(cmd.clone()));
+            }
+
+            let active_entry = active_by_name.get(name).cloned();
+            let is_active = active_entry.is_some();
+            info.insert("active".into(), serde_json::Value::Bool(is_active));
+            let state = if is_active {
+                if ax_tmux::is_idle(name) {
+                    "idle"
+                } else {
+                    "running"
+                }
+            } else {
+                "offline"
+            };
+            info.insert("state".into(), serde_json::Value::String(state.into()));
+            if let Some(ws_info) = active_entry {
+                let status_str = match ws_info.status {
+                    AgentStatus::Online => "online",
+                    AgentStatus::Offline => "offline",
+                    AgentStatus::Disconnected => "disconnected",
+                };
+                info.insert(
+                    "status".into(),
+                    serde_json::Value::String(status_str.into()),
+                );
+                if !ws_info.status_text.is_empty() {
+                    info.insert(
+                        "status_text".into(),
+                        serde_json::Value::String(ws_info.status_text),
+                    );
+                }
+                if let Some(ts) = ws_info.connected_at {
+                    info.insert(
+                        "connected_at".into(),
+                        serde_json::Value::String(ts.to_rfc3339()),
+                    );
+                }
+            }
+            if let Some(path) = instruction_file {
+                info.insert("instruction_file".into(), serde_json::Value::String(path));
+            }
+            let preview = instruction_preview(&ws.instructions);
+            if !preview.is_empty() {
+                info.insert(
+                    "instructions_preview".into(),
+                    serde_json::Value::String(preview),
+                );
+            }
+
+            if req.active_only && !is_active {
+                continue;
+            }
+            if !query.is_empty() && !matches_agent_query(&info, &query) {
+                continue;
+            }
+            agents.push(serde_json::Value::Object(info));
+        }
+        agents.sort_by(|a, b| {
+            a.get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .cmp(b.get("name").and_then(|v| v.as_str()).unwrap_or_default())
+        });
+
+        let body = serde_json::json!({
+            "project": cfg.project,
+            "config_path": cfg_path.display().to_string(),
+            "agent_count": agents.len(),
+            "active_count": active.workspaces.len(),
+            "agents": agents,
+        });
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&body).unwrap_or_default(),
+        )]))
+    }
+
+    /// `start_agent` — bring the workspace's managed session up.
+    #[tool(
+        description = "Start a configured workspace agent or managed child orchestrator by exact name. Root orchestrator lifecycle is not supported by this MCP surface."
+    )]
+    pub async fn start_agent(
+        &self,
+        Parameters(req): Parameters<AgentNameRequest>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        self.agent_lifecycle(req.name, LifecycleAction::Start).await
+    }
+
+    /// `stop_agent` — tear down the workspace's managed session.
+    #[tool(
+        description = "Stop a configured workspace agent or managed child orchestrator by exact name. This removes the managed session and cleans generated artifacts for that target."
+    )]
+    pub async fn stop_agent(
+        &self,
+        Parameters(req): Parameters<AgentNameRequest>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        self.agent_lifecycle(req.name, LifecycleAction::Stop).await
+    }
+
+    /// `restart_agent` — recycle the workspace's managed session from
+    /// scratch.
+    #[tool(
+        description = "Restart a configured workspace agent or managed child orchestrator by exact name from a fresh managed session. Root orchestrator lifecycle is not supported by this MCP surface."
+    )]
+    pub async fn restart_agent(
+        &self,
+        Parameters(req): Parameters<AgentNameRequest>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        self.agent_lifecycle(req.name, LifecycleAction::Restart)
+            .await
+    }
+
+    /// `interrupt_agent` — Escape the target workspace's tmux pane
+    /// without killing the session.
+    #[tool(
+        description = "Send Escape to a workspace tmux session to interrupt the agent's current interactive CLI action without killing the session."
+    )]
+    pub async fn interrupt_agent(
+        &self,
+        Parameters(req): Parameters<InterruptAgentRequest>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let name = req.name.trim();
+        if name.is_empty() {
+            return Err(rmcp::ErrorData::invalid_params("name is required", None));
+        }
+        if !ax_tmux::session_exists(name) {
+            return Err(rmcp::ErrorData::internal_error(
+                format!("Workspace {name:?} is not running"),
+                None,
+            ));
+        }
+        ax_tmux::interrupt_workspace(name).map_err(|e| {
+            rmcp::ErrorData::internal_error(format!("Failed to interrupt {name:?}: {e}"), None)
+        })?;
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Interrupt sent to {name:?}"
+        ))]))
+    }
+
+    /// `send_keys` — forward a sequence of literal or named tmux keys
+    /// to the workspace pane. Used to clear blocking interactive
+    /// prompts inside an agent CLI.
+    #[tool(
+        description = "Send a sequence of keystrokes to a workspace's tmux session. Use this to resolve blocking interactive dialogs in an agent CLI (e.g. Claude Code's \"Resuming from summary\" 1/2/3 prompt). Each element is either a named special key (Enter, Escape, Tab, Space, BSpace, Up/Down/Left/Right, Home/End, PageUp/PageDown, Ctrl-C/Ctrl-D/Ctrl-U/...) or literal text that will be typed verbatim. Example: keys=[\"2\",\"Enter\"] selects the second option and submits it."
+    )]
+    pub async fn send_keys(
+        &self,
+        Parameters(req): Parameters<SendKeysRequest>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let workspace = req.workspace.trim();
+        if workspace.is_empty() {
+            return Err(rmcp::ErrorData::invalid_params(
+                "workspace is required",
+                None,
+            ));
+        }
+        if req.keys.is_empty() {
+            return Err(rmcp::ErrorData::invalid_params(
+                "keys must contain at least one entry",
+                None,
+            ));
+        }
+        if !ax_tmux::session_exists(workspace) {
+            return Err(rmcp::ErrorData::internal_error(
+                format!("Workspace {workspace:?} is not running"),
+                None,
+            ));
+        }
+        let refs: Vec<&str> = req.keys.iter().map(String::as_str).collect();
+        ax_tmux::send_keys(workspace, &refs).map_err(|e| {
+            rmcp::ErrorData::internal_error(
+                format!("Failed to send keys to {workspace:?}: {e}"),
+                None,
+            )
+        })?;
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Sent {} key(s) to {workspace:?}: {}",
+            req.keys.len(),
+            req.keys.join(" ")
+        ))]))
+    }
+
+    /// `get_team_state` — read the daemon-managed effective team
+    /// reconfiguration state.
+    #[tool(
+        description = "Read the daemon-managed effective team state for experimental MCP team reconfiguration."
+    )]
+    pub async fn get_team_state(&self) -> Result<CallToolResult, rmcp::ErrorData> {
+        let cfg_path = self
+            .resolve_base_config_path()
+            .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
+        let resp: TeamStateResponse = self
+            .daemon
+            .request(
+                MessageType::GetTeamState,
+                &GetTeamStatePayload {
+                    config_path: cfg_path.display().to_string(),
+                },
+            )
+            .await
+            .map_err(tool_error)?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&resp.state).unwrap_or_default(),
+        )]))
+    }
+
+    /// `dry_run_team_reconfigure` — validate a planned overlay diff
+    /// without mutating the runtime.
+    #[tool(
+        description = "Plan supported v1 team changes against the daemon-managed effective state without reconciling runtime."
+    )]
+    pub async fn dry_run_team_reconfigure(
+        &self,
+        Parameters(req): Parameters<TeamReconfigureRequest>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if req.changes.is_empty() {
+            return Err(rmcp::ErrorData::invalid_params(
+                "changes must contain at least one entry",
+                None,
+            ));
+        }
+        let cfg_path = self
+            .resolve_base_config_path()
+            .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
+        let changes =
+            convert_changes(req.changes).map_err(|e| rmcp::ErrorData::invalid_params(e, None))?;
+        let payload = TeamReconfigurePayload {
+            config_path: cfg_path.display().to_string(),
+            expected_revision: req.expected_revision,
+            changes,
+            reconcile_mode: None,
+        };
+        let resp: TeamPlanResponse = self
+            .daemon
+            .request(MessageType::DryRunTeam, &payload)
+            .await
+            .map_err(tool_error)?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&resp.plan).unwrap_or_default(),
+        )]))
+    }
+
+    /// `apply_team_reconfigure` — commit a team overlay change and
+    /// run the requested reconcile against the runtime state.
+    #[tool(
+        description = "Apply supported v1 team changes via the daemon-managed effective state and run the requested reconcile mode."
+    )]
+    pub async fn apply_team_reconfigure(
+        &self,
+        Parameters(req): Parameters<TeamReconfigureRequest>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        if req.changes.is_empty() {
+            return Err(rmcp::ErrorData::invalid_params(
+                "changes must contain at least one entry",
+                None,
+            ));
+        }
+        let reconcile_mode = parse_reconcile_mode(req.reconcile_mode.as_deref())
+            .map_err(|e| rmcp::ErrorData::invalid_params(e, None))?
+            .unwrap_or(TeamReconcileMode::ArtifactsOnly);
+        let cfg_path = self
+            .resolve_base_config_path()
+            .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
+        let changes =
+            convert_changes(req.changes).map_err(|e| rmcp::ErrorData::invalid_params(e, None))?;
+        let apply_payload = TeamReconfigurePayload {
+            config_path: cfg_path.display().to_string(),
+            expected_revision: req.expected_revision,
+            changes,
+            reconcile_mode: Some(reconcile_mode.clone()),
+        };
+        let apply: TeamApplyResponse = self
+            .daemon
+            .request(MessageType::ApplyTeam, &apply_payload)
+            .await
+            .map_err(tool_error)?;
+        let ticket = apply.ticket;
+        let socket_path = self.daemon.socket_path().to_path_buf();
+
+        let reconcile = reconcile_applied_team(&ticket, &socket_path);
+        let (report, reconcile_err) = match reconcile {
+            Ok(report) => (report, None),
+            Err(err) => (ReconcileReport::default(), Some(err)),
+        };
+        let actions = team_actions_from_reconcile_report(&report);
+
+        if let Some(err) = reconcile_err {
+            let finish = FinishTeamReconfigurePayload {
+                token: ticket.token.clone(),
+                success: false,
+                error: err.clone(),
+                actions,
+            };
+            let finalize = self
+                .daemon
+                .request::<_, TeamStateResponse>(MessageType::FinishTeam, &finish)
+                .await;
+            if let Err(finish_err) = finalize {
+                return Err(rmcp::ErrorData::internal_error(
+                    format!(
+                        "Team reconfiguration {:?} failed during reconcile: {err} (finalize error: {finish_err})",
+                        ticket.token
+                    ),
+                    None,
+                ));
+            }
+            return Err(rmcp::ErrorData::internal_error(
+                format!(
+                    "Team reconfiguration {:?} failed during reconcile: {err}",
+                    ticket.token
+                ),
+                None,
+            ));
+        }
+
+        let finish = FinishTeamReconfigurePayload {
+            token: ticket.token.clone(),
+            success: true,
+            error: String::new(),
+            actions,
+        };
+        let state_resp: TeamStateResponse = self
+            .daemon
+            .request(MessageType::FinishTeam, &finish)
+            .await
+            .map_err(|e| {
+                rmcp::ErrorData::internal_error(
+                    format!(
+                        "Failed to finalize team reconfiguration {:?}: {e}",
+                        ticket.token
+                    ),
+                    None,
+                )
+            })?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&serde_json::json!({
+                "ticket": ticket,
+                "state": state_resp.state,
+                "reconcile": report,
+            }))
+            .unwrap_or_default(),
+        )]))
+    }
+
     /// `broadcast_message` — fan out a single message to every other
     /// registered workspace.
     #[tool(description = "Send a message to all other workspace agents.")]
@@ -987,6 +1496,65 @@ impl Server {
 }
 
 impl Server {
+    async fn agent_lifecycle(
+        &self,
+        name: String,
+        action: LifecycleAction,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let cfg_path = self
+            .resolve_tool_config_path()
+            .await
+            .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
+        let resp: AgentLifecycleResponse = self
+            .daemon
+            .request(
+                MessageType::AgentLifecycle,
+                &AgentLifecyclePayload {
+                    config_path: cfg_path.display().to_string(),
+                    name,
+                    action,
+                },
+            )
+            .await
+            .map_err(tool_error)?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&resp).unwrap_or_default(),
+        )]))
+    }
+
+    /// Resolve the config path the tool handlers should use. If the
+    /// daemon reports an experimental team-reconfigure overlay is
+    /// active, prefer the overlay's effective config; otherwise fall
+    /// back to the base path recorded on the server.
+    async fn resolve_tool_config_path(&self) -> Result<PathBuf, String> {
+        let base = self.resolve_base_config_path()?;
+        let state: TeamStateResponse = match self
+            .daemon
+            .request(
+                MessageType::GetTeamState,
+                &GetTeamStatePayload {
+                    config_path: base.display().to_string(),
+                },
+            )
+            .await
+        {
+            Ok(resp) => resp,
+            Err(_) => return Ok(base),
+        };
+        if state.state.feature_enabled && !state.state.effective_config_path.trim().is_empty() {
+            return Ok(PathBuf::from(state.state.effective_config_path));
+        }
+        Ok(base)
+    }
+
+    fn resolve_base_config_path(&self) -> Result<PathBuf, String> {
+        if let Some(path) = self.config_path.clone() {
+            return Ok(path);
+        }
+        crate::memory_scope::find_effective_config(None)
+            .ok_or_else(|| "ax config file not found".to_owned())
+    }
+
     async fn memory_query(
         &self,
         req: MemoryQueryRequest,
@@ -1129,6 +1697,191 @@ impl WorkspaceView {
             Self::Assigned => "assigned",
             Self::Created => "created",
             Self::Both => "both",
+        }
+    }
+}
+
+fn instruction_preview(instructions: &str) -> String {
+    let trimmed = instructions.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let mut parts = trimmed.split_whitespace();
+    let mut out: Vec<&str> = Vec::with_capacity(24);
+    for _ in 0..24 {
+        match parts.next() {
+            Some(word) => out.push(word),
+            None => break,
+        }
+    }
+    out.join(" ")
+}
+
+fn matches_agent_query(info: &serde_json::Map<String, serde_json::Value>, query: &str) -> bool {
+    const FIELDS: &[&str] = &[
+        "name",
+        "dir",
+        "description",
+        "runtime",
+        "command",
+        "state",
+        "instructions_preview",
+        "status_text",
+    ];
+    for field in FIELDS {
+        if let Some(text) = info.get(*field).and_then(|v| v.as_str()) {
+            if text.to_ascii_lowercase().contains(query) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn reconcile_applied_team(
+    ticket: &TeamApplyTicket,
+    socket_path: &Path,
+) -> Result<ReconcileReport, String> {
+    let effective = ticket.plan.state.effective_config_path.trim();
+    let base = ticket.plan.state.base_config_path.trim();
+    let effective_path = if !effective.is_empty() {
+        effective
+    } else if !base.is_empty() {
+        base
+    } else {
+        return Err("team apply ticket is missing an effective config path".into());
+    };
+    let effective_path = PathBuf::from(effective_path);
+
+    let cfg = Config::load(&effective_path).map_err(|e| format!("load effective config: {e}"))?;
+    let tree = Config::load_tree(&effective_path)
+        .map_err(|e| format!("load effective config tree: {e}"))?;
+    let include_root = !tree_disables_root(&tree);
+    let desired = build_desired_state_with_tree(
+        &cfg,
+        &tree,
+        socket_path.to_path_buf(),
+        effective_path.clone(),
+        include_root,
+    )
+    .map_err(|e| format!("build desired runtime state: {e}"))?;
+
+    let reconciler = Reconciler::new(socket_path.to_path_buf(), effective_path, ax_bin_path());
+    reconciler
+        .reconcile_desired_state(
+            &desired,
+            ReconcileOptions {
+                daemon_running: ticket.reconcile_mode == TeamReconcileMode::StartMissing,
+                allow_disruptive_changes: ticket.reconcile_mode == TeamReconcileMode::StartMissing,
+            },
+        )
+        .map_err(|e| e.to_string())
+}
+
+fn tree_disables_root(tree: &ProjectNode) -> bool {
+    tree.disable_root_orchestrator
+}
+
+fn ax_bin_path() -> PathBuf {
+    std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ax"))
+}
+
+fn team_actions_from_reconcile_report(report: &ReconcileReport) -> Vec<TeamReconfigureAction> {
+    use ax_proto::types::TeamEntryKind;
+
+    let mut actions: Vec<TeamReconfigureAction> = Vec::with_capacity(report.actions.len() + 1);
+    for action in &report.actions {
+        let Some(kind) = reconcile_action_kind(&action.kind) else {
+            continue;
+        };
+        actions.push(TeamReconfigureAction {
+            action: action.operation.clone(),
+            kind,
+            name: action.name.clone(),
+            dir: String::new(),
+            detail: action.details.clone(),
+        });
+    }
+    if report.root_manual_restart_required {
+        actions.push(TeamReconfigureAction {
+            action: "manual_restart_required".into(),
+            kind: TeamEntryKind::RootOrchestrator,
+            name: "orchestrator".into(),
+            dir: String::new(),
+            detail: report.root_manual_restart_reasons.join("; "),
+        });
+    }
+    actions
+}
+
+fn reconcile_action_kind(value: &str) -> Option<TeamEntryKind> {
+    match value.trim() {
+        "workspace" => Some(TeamEntryKind::Workspace),
+        "orchestrator" => Some(TeamEntryKind::RootOrchestrator),
+        _ => None,
+    }
+}
+
+fn parse_reconcile_mode(raw: Option<&str>) -> Result<Option<TeamReconcileMode>, String> {
+    match raw.map(str::trim).unwrap_or_default() {
+        "" => Ok(None),
+        "artifacts_only" => Ok(Some(TeamReconcileMode::ArtifactsOnly)),
+        "start_missing" => Ok(Some(TeamReconcileMode::StartMissing)),
+        other => Err(format!(
+            "invalid reconcile_mode {other:?} (must be artifacts_only or start_missing)"
+        )),
+    }
+}
+
+fn convert_changes(
+    changes: Vec<TeamReconfigureChangeInput>,
+) -> Result<Vec<TeamReconfigureChange>, String> {
+    changes.into_iter().map(convert_change).collect()
+}
+
+fn convert_change(input: TeamReconfigureChangeInput) -> Result<TeamReconfigureChange, String> {
+    let op = match input.op.trim() {
+        "add" => TeamChangeOp::Add,
+        "remove" => TeamChangeOp::Remove,
+        "enable" => TeamChangeOp::Enable,
+        "disable" => TeamChangeOp::Disable,
+        other => return Err(format!("invalid change op {other:?}")),
+    };
+    let kind = match input.kind.trim() {
+        "workspace" => TeamEntryKind::Workspace,
+        "child" => TeamEntryKind::Child,
+        "root_orchestrator" => TeamEntryKind::RootOrchestrator,
+        other => return Err(format!("invalid change kind {other:?}")),
+    };
+    Ok(TeamReconfigureChange {
+        op,
+        kind,
+        name: input.name.unwrap_or_default(),
+        workspace: input.workspace.map(TeamWorkspaceSpecInput::into_spec),
+        child: input.child.map(TeamChildSpecInput::into_spec),
+    })
+}
+
+impl TeamWorkspaceSpecInput {
+    fn into_spec(self) -> TeamWorkspaceSpec {
+        TeamWorkspaceSpec {
+            dir: self.dir,
+            description: self.description.unwrap_or_default(),
+            shell: self.shell.unwrap_or_default(),
+            runtime: self.runtime.unwrap_or_default(),
+            codex_model_reasoning_effort: self.codex_model_reasoning_effort.unwrap_or_default(),
+            agent: self.agent.unwrap_or_default(),
+            instructions: self.instructions.unwrap_or_default(),
+            env: self.env.unwrap_or_default(),
+        }
+    }
+}
+
+impl TeamChildSpecInput {
+    fn into_spec(self) -> TeamChildSpec {
+        TeamChildSpec {
+            dir: self.dir,
+            prefix: self.prefix.unwrap_or_default(),
         }
     }
 }

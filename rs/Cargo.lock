@@ -107,9 +107,11 @@ dependencies = [
 name = "ax-mcp-server"
 version = "0.1.0"
 dependencies = [
+ "ax-agent",
  "ax-config",
  "ax-daemon",
  "ax-proto",
+ "ax-tmux",
  "ax-workspace",
  "chrono",
  "rmcp",
