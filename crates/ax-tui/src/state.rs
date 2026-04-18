@@ -147,29 +147,28 @@ impl App {
             self.reconfigure_enabled,
             &self.desired,
         );
-        let live = live_entry_positions(&self.sidebar_entries);
-        if live.is_empty() {
+        let selectable = selectable_entry_positions(&self.sidebar_entries);
+        if selectable.is_empty() {
             self.selected_entry = 0;
             return;
         }
-        // Keep the cursor parked on a selectable row after the rebuild.
-        if !live.contains(&self.selected_entry) {
-            self.selected_entry = live[0];
+        if !selectable.contains(&self.selected_entry) {
+            self.selected_entry = selectable[0];
         }
     }
 
     pub(crate) fn move_selection(&mut self, delta: i32) {
-        let live = live_entry_positions(&self.sidebar_entries);
-        if live.is_empty() {
+        let selectable = selectable_entry_positions(&self.sidebar_entries);
+        if selectable.is_empty() {
             self.selected_entry = 0;
             return;
         }
-        let current_pos = live
+        let current_pos = selectable
             .iter()
             .position(|&idx| idx == self.selected_entry)
             .unwrap_or(0);
-        let next = (current_pos as i32 + delta).clamp(0, live.len() as i32 - 1) as usize;
-        self.selected_entry = live[next];
+        let next = (current_pos as i32 + delta).clamp(0, selectable.len() as i32 - 1) as usize;
+        self.selected_entry = selectable[next];
     }
 
     pub(crate) fn set_notice(&mut self, text: impl Into<String>) {
@@ -196,13 +195,14 @@ impl App {
     }
 }
 
-/// Indexes of sidebar entries that accept the selection cursor
-/// (groups and offline rows don't move the cursor).
-fn live_entry_positions(entries: &[SidebarEntry]) -> Vec<usize> {
+/// Indexes of sidebar entries that accept the selection cursor.
+/// Group headers are skipped; offline workspace rows stay selectable
+/// so the overlay (restart/stop/stream) can still target them.
+fn selectable_entry_positions(entries: &[SidebarEntry]) -> Vec<usize> {
     entries
         .iter()
         .enumerate()
-        .filter_map(|(idx, entry)| (!entry.group && entry.session_index.is_some()).then_some(idx))
+        .filter_map(|(idx, entry)| (!entry.group).then_some(idx))
         .collect()
 }
 
@@ -272,17 +272,17 @@ mod tests {
     }
 
     #[test]
-    fn move_selection_clamps_to_live_sidebar_entries() {
+    fn move_selection_clamps_to_selectable_sidebar_entries() {
         let mut app = App::new();
         app.sessions = vec![mock_session("a"), mock_session("b"), mock_session("c")];
         app.rebuild_sidebar();
-        let live = live_entry_positions(&app.sidebar_entries);
-        assert!(!live.is_empty());
-        app.selected_entry = live[0];
+        let selectable = selectable_entry_positions(&app.sidebar_entries);
+        assert!(!selectable.is_empty());
+        app.selected_entry = selectable[0];
         app.move_selection(10);
-        assert_eq!(app.selected_entry, *live.last().unwrap());
+        assert_eq!(app.selected_entry, *selectable.last().unwrap());
         app.move_selection(-10);
-        assert_eq!(app.selected_entry, live[0]);
+        assert_eq!(app.selected_entry, selectable[0]);
     }
 
     fn mock_session(name: &str) -> SessionInfo {
