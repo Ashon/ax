@@ -147,7 +147,10 @@ mod tests {
         // Trailing empty lines (padding from tmux) are skipped; internal
         // blank rows stay so the pane reflects the real capture shape.
         let capture = "first\nsecond\n\nthird\n\n\n";
-        assert_eq!(recent_lines(capture, 4), vec!["first", "second", "", "third"]);
+        assert_eq!(
+            recent_lines(capture, 4),
+            vec!["first", "second", "", "third"]
+        );
         assert_eq!(recent_lines(capture, 2), vec!["", "third"]);
     }
 

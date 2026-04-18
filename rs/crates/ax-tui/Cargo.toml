@@ -19,6 +19,7 @@ ax-workspace = { path = "../ax-workspace" }
 chrono = { workspace = true }
 crossterm = "0.28"
 ratatui = "0.29"
+regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

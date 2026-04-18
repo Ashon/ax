@@ -18,5 +18,6 @@ mod state;
 mod stream;
 mod tasks;
 mod terminal;
+mod tokens;
 
 pub use app::{run, RunError, RunOptions};

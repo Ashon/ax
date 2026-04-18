@@ -189,7 +189,7 @@ fn draw_body(f: &mut Frame, area: Rect, app: &App) {
     match app.stream {
         StreamView::Messages => draw_messages(f, area, app),
         StreamView::Tasks => draw_tasks(f, area, app),
-        StreamView::Tokens => draw_stub_view(f, area, app),
+        StreamView::Tokens => draw_tokens(f, area, app),
         StreamView::Hidden => draw_selection_summary(f, area, app),
     }
 }
@@ -219,6 +219,7 @@ fn draw_messages(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(para, area);
 }
 
+#[allow(dead_code)]
 fn draw_stub_view(f: &mut Frame, area: Rect, app: &App) {
     let text = format!(
         "{} view lands in a follow-up slice — press Tab / s to cycle back to messages",
@@ -236,6 +237,104 @@ fn draw_stub_view(f: &mut Frame, area: Rect, app: &App) {
                 .borders(Borders::ALL)
                 .title(app.stream.title()),
         );
+    f.render_widget(para, area);
+}
+
+fn draw_tokens(f: &mut Frame, area: Rect, app: &App) {
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let inner_height = area.height.saturating_sub(2) as usize;
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(StreamView::Tokens.title());
+
+    // Scan every active session's tmux capture for token markers,
+    // keeping rows ordered the same way the sidebar groups them so
+    // the eye can trace sidebar → token row easily.
+    let mut rows: Vec<crate::tokens::AgentTokens> = app
+        .sessions
+        .iter()
+        .map(|s| {
+            let capture = app
+                .captures
+                .entries
+                .get(&s.workspace)
+                .map_or("", |entry| entry.content.as_str());
+            crate::tokens::parse_agent_tokens(&s.workspace, capture)
+        })
+        .filter(|t| !t.is_empty())
+        .collect();
+    rows.sort_by(|a, b| a.workspace.cmp(&b.workspace));
+
+    if rows.is_empty() {
+        let hint = if app.sessions.is_empty() {
+            "  (no active agents — run `ax up` to start workspaces)"
+        } else {
+            "  (no token markers in recent tmux captures)"
+        };
+        let para = Paragraph::new(hint)
+            .style(Style::default().add_modifier(Modifier::DIM))
+            .block(block);
+        f.render_widget(para, area);
+        return;
+    }
+
+    let max_cost = rows
+        .iter()
+        .map(|r| crate::tokens::parse_cost_value(&r.cost))
+        .fold(0.0_f64, f64::max);
+
+    let mut lines: Vec<Line> = Vec::with_capacity(inner_height);
+    lines.push(Line::from(Span::styled(
+        " live usage ",
+        Style::default().add_modifier(Modifier::DIM),
+    )));
+    lines.push(Line::from(Span::styled(
+        " WORKSPACE              INPUT      OUTPUT      COST",
+        Style::default().add_modifier(Modifier::DIM),
+    )));
+
+    let budget = inner_height.saturating_sub(lines.len());
+    for tokens in rows.into_iter().take(budget) {
+        let up_display = if tokens.up.is_empty() {
+            "-".to_owned()
+        } else {
+            format!(
+                "↑{}",
+                crate::tokens::format_token_count(crate::tokens::parse_token_value(&tokens.up))
+            )
+        };
+        let down_display = if tokens.down.is_empty() {
+            "-".to_owned()
+        } else {
+            format!(
+                "↓{}",
+                crate::tokens::format_token_count(crate::tokens::parse_token_value(&tokens.down))
+            )
+        };
+        let cost = crate::tokens::parse_cost_value(&tokens.cost);
+        let cost_display = if tokens.cost.is_empty() {
+            "-".to_owned()
+        } else {
+            tokens.cost.clone()
+        };
+        let style = if max_cost > 0.0 && cost >= max_cost * 0.8 {
+            Style::default().fg(Color::Red)
+        } else {
+            Style::default()
+        };
+        let row = format!(
+            " {:<22} {:<10} {:<10} {}",
+            crate::tasks::truncate(&tokens.workspace, 22),
+            up_display,
+            down_display,
+            cost_display,
+        );
+        lines.push(Line::from(Span::styled(
+            crate::tasks::truncate(&row, inner_width.max(1)),
+            style,
+        )));
+    }
+    let para = Paragraph::new(lines).block(block);
     f.render_widget(para, area);
 }
 
