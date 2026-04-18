@@ -12,6 +12,62 @@ import (
 	"github.com/ashon/ax/internal/workspace"
 )
 
+// refreshOrchestratorArtifacts regenerates orchestrator MCP config
+// and prompt files across the tree without touching tmux sessions.
+// Used by `ax up` (on-demand prep) and historically by `ax refresh`
+// (now ported to ax-cli's refresh.rs).
+func refreshOrchestratorArtifacts(node *config.ProjectNode, parentName, socketPath, cfgPath string) error {
+	skipRoot, err := reconcileRootOrchestratorState(cfgPath)
+	if err != nil {
+		return err
+	}
+	return refreshOrchestratorArtifactsNode(node, parentName, socketPath, cfgPath, skipRoot)
+}
+
+func refreshOrchestratorArtifactsNode(node *config.ProjectNode, parentName, socketPath, cfgPath string, skipRoot bool) error {
+	if node == nil {
+		return nil
+	}
+	selfName := workspace.OrchestratorName(node.Prefix)
+	isRoot := node.Prefix == ""
+
+	if !(isRoot && skipRoot) {
+		orchDir, err := orchestratorDir(node)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(orchDir, 0o755); err != nil {
+			return err
+		}
+		if err := workspace.WriteMCPConfig(orchDir, selfName, socketPath, cfgPath); err != nil {
+			return err
+		}
+		runtime := node.OrchestratorRuntime
+		if runtime == "" {
+			runtime = "claude"
+		}
+		if runtime == "codex" {
+			if err := workspace.EnsureCodexConfig(orchDir, selfName, socketPath, cfgPath); err != nil {
+				return err
+			}
+		}
+		if err := workspace.WriteOrchestratorPrompt(orchDir, node, node.Prefix, parentName, runtime, socketPath); err != nil {
+			return err
+		}
+	}
+
+	childParentName := selfName
+	if isRoot && skipRoot {
+		childParentName = ""
+	}
+	for _, child := range node.Children {
+		if err := refreshOrchestratorArtifactsNode(child, childParentName, socketPath, cfgPath, skipRoot); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // ensureOrchestrators walks the project tree and makes sure each project's
 // orchestrator artifacts (prompt + MCP config) exist. Sub-orchestrators
 // (every non-root node) also get a long-running tmux session, since they

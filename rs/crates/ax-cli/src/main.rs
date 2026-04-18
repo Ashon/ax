@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod daemon_client;
+mod refresh;
 mod status;
 mod workspace;
 
@@ -46,6 +47,7 @@ Usage:
   ax-rs run-agent --workspace NAME [--runtime RUNTIME] [--socket PATH] [--config PATH] [--fresh] [-- ...]
   ax-rs mcp-server --workspace NAME [--socket PATH] [--config PATH]
   ax-rs status [--socket PATH] [--config PATH]
+  ax-rs refresh [--restart] [--start-missing] [--socket PATH] [--config PATH] [--ax-bin PATH]
   ax-rs workspace create <name> [--dir PATH] [--socket PATH] [--config PATH] [--ax-bin PATH]
   ax-rs workspace destroy <name> [--socket PATH] [--config PATH] [--ax-bin PATH]
   ax-rs workspace list [--internal] [--socket PATH] [--config PATH]
@@ -142,6 +144,10 @@ enum ParsedCommand {
         socket_path: PathBuf,
         config_path: Option<PathBuf>,
     },
+    Refresh {
+        options: CommonOptions,
+        refresh: refresh::RefreshOptions,
+    },
     WorkspaceCreate {
         name: String,
         dir: Option<PathBuf>,
@@ -178,6 +184,7 @@ enum CliError {
     RunAgent(ax_agent::LaunchError),
     McpServer(String),
     Status(String),
+    Refresh(refresh::RefreshError),
     Workspace(workspace::WorkspaceCliError),
 }
 
@@ -293,6 +300,7 @@ impl fmt::Display for CliError {
             Self::Dispatch(source) => write!(f, "{source}"),
             Self::RunAgent(source) => write!(f, "{source}"),
             Self::McpServer(source) | Self::Status(source) => write!(f, "{source}"),
+            Self::Refresh(source) => write!(f, "{source}"),
             Self::Workspace(source) => write!(f, "{source}"),
         }
     }
@@ -620,6 +628,7 @@ where
             socket_path,
             config_path,
         } => run_status(&socket_path, config_path.as_deref()),
+        ParsedCommand::Refresh { options, refresh } => run_refresh(&options, refresh),
         ParsedCommand::WorkspaceCreate { name, dir, options } => {
             let body = workspace::create_workspace(
                 &options.socket_path,
@@ -713,6 +722,9 @@ where
     }
     if command == "status" {
         return parse_status_args(&tail, cwd);
+    }
+    if command == "refresh" {
+        return parse_refresh_args(&tail, cwd, current_exe);
     }
     if matches!(command.as_str(), "workspace" | "ws") {
         return parse_workspace_args(&tail, cwd, current_exe);
@@ -1367,6 +1379,59 @@ fn expect_single_name(argv: &[OsString], cmd_label: &str) -> Result<String, CliE
     name.ok_or_else(|| CliError::Usage(format!("{cmd_label} requires a name\n\n{USAGE}")))
 }
 
+fn parse_refresh_args(
+    argv: &[OsString],
+    cwd: &Path,
+    current_exe: &Path,
+) -> Result<ParsedCommand, CliError> {
+    let mut socket_override: Option<PathBuf> = None;
+    let mut config_override: Option<PathBuf> = None;
+    let mut ax_bin_override: Option<PathBuf> = None;
+    let mut restart = false;
+    let mut start_missing = false;
+
+    let mut i = 1;
+    while i < argv.len() {
+        let arg = &argv[i];
+        match arg.to_string_lossy().as_ref() {
+            "-h" | "--help" => return Ok(ParsedCommand::Help),
+            "--restart" => restart = true,
+            "--start-missing" => start_missing = true,
+            "--socket" => {
+                i += 1;
+                socket_override = Some(parse_socket_path(argv.get(i), "--socket")?);
+            }
+            "--config" => {
+                i += 1;
+                config_override = Some(parse_path_arg(argv.get(i), "--config", cwd)?);
+            }
+            "--ax-bin" => {
+                i += 1;
+                ax_bin_override = Some(parse_path_arg(argv.get(i), "--ax-bin", cwd)?);
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown flag {other:?}\n\n{USAGE}"
+                )));
+            }
+        }
+        i += 1;
+    }
+
+    let options = CommonOptions {
+        socket_path: socket_override.unwrap_or_else(|| expand_socket_path(DEFAULT_SOCKET_PATH)),
+        config_path: resolve_config_path(config_override, cwd)?,
+        ax_bin: ax_bin_override.unwrap_or_else(|| current_exe.to_path_buf()),
+    };
+    Ok(ParsedCommand::Refresh {
+        options,
+        refresh: refresh::RefreshOptions {
+            restart,
+            start_missing,
+        },
+    })
+}
+
 fn parse_status_args(argv: &[OsString], cwd: &Path) -> Result<ParsedCommand, CliError> {
     let mut socket_path = expand_socket_path(DEFAULT_SOCKET_PATH);
     let mut config_path: Option<PathBuf> = None;
@@ -1982,6 +2047,26 @@ fn send_signal(pid: i32, signal: &'static str) -> Result<bool, CliError> {
         stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
     }
     .into())
+}
+
+fn run_refresh(
+    options: &CommonOptions,
+    refresh_opts: refresh::RefreshOptions,
+) -> Result<ExitCode, CliError> {
+    let running = matches!(
+        daemon_status(&options.socket_path)?,
+        DaemonStatus::Running(_)
+    );
+    let body = refresh::run(
+        &options.socket_path,
+        &options.config_path,
+        &options.ax_bin,
+        running,
+        refresh_opts,
+    )
+    .map_err(CliError::Refresh)?;
+    print!("{body}");
+    Ok(ExitCode::SUCCESS)
 }
 
 fn run_status(socket_path: &Path, config_path: Option<&Path>) -> Result<ExitCode, CliError> {

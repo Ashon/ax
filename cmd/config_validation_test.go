@@ -40,26 +40,19 @@ children:
 
 	oldConfigPath := configPath
 	oldSocketPath := socketPath
-	oldRefreshRestart := refreshRestart
-	oldRefreshStartMissing := refreshStartMissing
 	t.Cleanup(func() {
 		configPath = oldConfigPath
 		socketPath = oldSocketPath
-		refreshRestart = oldRefreshRestart
-		refreshStartMissing = oldRefreshStartMissing
 	})
 
 	configPath = rootConfigPath
 	socketPath = filepath.Join(rootDir, "daemon.sock")
-	refreshRestart = false
-	refreshStartMissing = false
 
 	commands := []struct {
 		name string
 		run  func() error
 	}{
 		{name: "up", run: func() error { return upCmd.RunE(upCmd, nil) }},
-		{name: "refresh", run: func() error { return refreshCmd.RunE(refreshCmd, nil) }},
 	}
 
 	for _, command := range commands {
@@ -91,26 +84,19 @@ children:
 
 	oldConfigPath := configPath
 	oldSocketPath := socketPath
-	oldRefreshRestart := refreshRestart
-	oldRefreshStartMissing := refreshStartMissing
 	t.Cleanup(func() {
 		configPath = oldConfigPath
 		socketPath = oldSocketPath
-		refreshRestart = oldRefreshRestart
-		refreshStartMissing = oldRefreshStartMissing
 	})
 
 	configPath = rootConfigPath
 	socketPath = filepath.Join(rootDir, "daemon.sock")
-	refreshRestart = false
-	refreshStartMissing = false
 
 	commands := []struct {
 		name string
 		run  func() error
 	}{
 		{name: "up", run: func() error { return upCmd.RunE(upCmd, nil) }},
-		{name: "refresh", run: func() error { return refreshCmd.RunE(refreshCmd, nil) }},
 	}
 
 	for _, command := range commands {
