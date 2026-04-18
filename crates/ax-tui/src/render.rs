@@ -456,8 +456,11 @@ fn tabs_title(app: &App) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     for (idx, view) in StreamView::ALL.iter().enumerate() {
         if idx > 0 {
+            // Use the same horizontal glyph as the surrounding block
+            // border so the divider melts into the top edge instead
+            // of poking up as a dot.
             spans.push(Span::styled(
-                format!(" {} ", symbols::DOT),
+                format!(" {} ", symbols::line::HORIZONTAL),
                 Style::default().add_modifier(Modifier::DIM),
             ));
         }
