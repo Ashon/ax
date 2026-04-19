@@ -118,11 +118,17 @@ pub(crate) struct App {
     pub(crate) focus: Focus,
     pub(crate) stream: StreamView,
     pub(crate) messages: Vec<HistoryEntry>,
-    /// How far back from the message tail the viewer is parked. `0`
-    /// means "follow" (always pin to latest); positive values scroll
-    /// into history. The upper bound is enforced at render time so
-    /// state doesn't need to know the pane height.
+    /// Absolute row index of the currently-selected message (0 =
+    /// oldest, `len - 1` = newest). The list highlights this row and
+    /// the detail pane reads the matching entry, so list + detail
+    /// stay locked together. Render clamps the ceiling against the
+    /// live `messages` length.
     pub(crate) messages_cursor: PaneCursor,
+    /// When `true`, new messages appearing in `messages` bump the
+    /// cursor forward so the operator keeps seeing the latest entry
+    /// selected. Walking back with ↑/PgUp/g breaks follow-mode;
+    /// `G`/End re-engages it.
+    pub(crate) messages_follow_tail: bool,
     pub(crate) tasks: Vec<Task>,
     pub(crate) task_cursor: PaneCursor,
     pub(crate) task_filter: TaskFilterMode,
@@ -185,6 +191,7 @@ impl App {
             stream: StreamView::Agents,
             messages: Vec::new(),
             messages_cursor: PaneCursor::default(),
+            messages_follow_tail: true,
             tasks: Vec::new(),
             task_cursor: PaneCursor::default(),
             task_filter: TaskFilterMode::Active,
@@ -273,24 +280,56 @@ impl App {
         self.clamp_task_selection();
     }
 
-    /// Shift the messages viewport. Positive `delta` walks back into
-    /// history (older); negative walks forward toward the tail. The
-    /// zero floor keeps "scroll past the latest" from underflowing
-    /// into follow-from-tail confusion; render clamps the ceiling.
+    /// Move the message selection by `delta` rows. Positive walks
+    /// forward in time (toward the newest entry), negative walks
+    /// back. Follow-tail mode re-engages only when the cursor lands
+    /// exactly on the last row so a single keystroke doesn't
+    /// silently flip between "parked" and "live-tailing" states.
     pub(crate) fn scroll_messages(&mut self, delta: i32) {
-        self.messages_cursor.shift(delta);
+        if self.messages.is_empty() {
+            self.messages_cursor.reset();
+            self.messages_follow_tail = true;
+            return;
+        }
+        let n = self.messages.len() as i32;
+        let next = (self.messages_cursor.index as i32 + delta).clamp(0, n - 1) as usize;
+        self.messages_cursor.index = next;
+        self.messages_follow_tail = next + 1 == self.messages.len();
     }
 
-    /// Snap the messages view back to the tail (follow mode).
+    /// Re-engage live-tail: select the newest message and let future
+    /// refreshes keep bumping the cursor forward.
     pub(crate) fn messages_to_tail(&mut self) {
+        self.messages_follow_tail = true;
+        if !self.messages.is_empty() {
+            self.messages_cursor.index = self.messages.len() - 1;
+        } else {
+            self.messages_cursor.reset();
+        }
+    }
+
+    /// Jump to the oldest message and break live-tail — operator is
+    /// paging through history and doesn't want new entries to steal
+    /// the selection.
+    pub(crate) fn messages_to_head(&mut self) {
+        self.messages_follow_tail = false;
         self.messages_cursor.reset();
     }
 
-    /// Jump to the oldest message. `messages.len()` is an intentional
-    /// over-shoot — the render clamp pins the view at the head without
-    /// the caller needing the pane height.
-    pub(crate) fn messages_to_head(&mut self) {
-        self.messages_cursor.jump_to(self.messages.len());
+    /// Keep the cursor anchored to the newest message when follow-tail
+    /// is on, and clamp against the current length so old selections
+    /// don't dangle past a shrunken log. Called after each refresh.
+    pub(crate) fn reconcile_message_cursor(&mut self) {
+        if self.messages.is_empty() {
+            self.messages_cursor.reset();
+            self.messages_follow_tail = true;
+            return;
+        }
+        if self.messages_follow_tail {
+            self.messages_cursor.index = self.messages.len() - 1;
+        } else {
+            self.messages_cursor.clamp(self.messages.len() - 1);
+        }
     }
 
     /// Shift the tokens list viewport. Positive `delta` moves the
@@ -485,19 +524,73 @@ mod tests {
     }
 
     #[test]
-    fn scroll_messages_walks_back_and_snaps_to_head_or_tail() {
+    fn scroll_messages_moves_absolute_cursor_and_toggles_follow_tail() {
         let mut app = App::new();
         app.messages = vec![mock_history(); 5];
+        // Set the cursor at the tail so the test reflects the state
+        // after a normal refresh tick (follow-tail default).
+        app.reconcile_message_cursor();
+        assert_eq!(app.messages_cursor.index, 4);
+        assert!(app.messages_follow_tail);
 
-        app.scroll_messages(2);
-        assert_eq!(app.messages_cursor.index, 2);
-        app.scroll_messages(-3);
-        assert_eq!(app.messages_cursor.index, 0, "floor clamps at tail");
+        // ↑ (delta = -1) walks one step older and breaks follow-tail.
+        app.scroll_messages(-1);
+        assert_eq!(app.messages_cursor.index, 3);
+        assert!(
+            !app.messages_follow_tail,
+            "moving off the tail parks the cursor"
+        );
 
-        app.messages_to_head();
-        assert_eq!(app.messages_cursor.index, app.messages.len());
-        app.messages_to_tail();
+        // ↓ back to the tail re-engages follow-tail.
+        app.scroll_messages(1);
+        assert_eq!(app.messages_cursor.index, 4);
+        assert!(app.messages_follow_tail);
+
+        // Clamp at both ends — no under/overflow.
+        app.scroll_messages(-100);
         assert_eq!(app.messages_cursor.index, 0);
+        app.scroll_messages(100);
+        assert_eq!(app.messages_cursor.index, 4);
+    }
+
+    #[test]
+    fn messages_to_head_and_tail_flip_follow_mode() {
+        let mut app = App::new();
+        app.messages = vec![mock_history(); 3];
+        app.messages_to_head();
+        assert_eq!(app.messages_cursor.index, 0);
+        assert!(!app.messages_follow_tail, "head parks the cursor");
+        app.messages_to_tail();
+        assert_eq!(app.messages_cursor.index, 2);
+        assert!(app.messages_follow_tail, "tail re-engages follow-mode");
+    }
+
+    #[test]
+    fn reconcile_message_cursor_auto_bumps_tail_but_clamps_parked() {
+        let mut app = App::new();
+        app.messages = vec![mock_history(); 3];
+        app.reconcile_message_cursor();
+        assert_eq!(app.messages_cursor.index, 2);
+
+        // New message arrives while follow-tail is on → cursor slides
+        // forward so the operator keeps seeing the latest entry.
+        app.messages.push(mock_history());
+        app.reconcile_message_cursor();
+        assert_eq!(app.messages_cursor.index, 3);
+        assert!(app.messages_follow_tail);
+
+        // Walk back; subsequent new messages must NOT steal the
+        // selection — operators mid-history shouldn't lose their place.
+        app.scroll_messages(-2);
+        let parked = app.messages_cursor.index;
+        app.messages.push(mock_history());
+        app.reconcile_message_cursor();
+        assert_eq!(app.messages_cursor.index, parked);
+
+        // If the buffer shrinks under a parked cursor, clamp down.
+        app.messages.truncate(2);
+        app.reconcile_message_cursor();
+        assert_eq!(app.messages_cursor.index, 1);
     }
 
     #[test]

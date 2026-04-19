@@ -110,14 +110,15 @@ fn handle_list_key(app: &mut App, event: KeyEvent) {
             KeyCode::Down | KeyCode::Char('j') => app.move_task_selection(1),
             _ => {}
         },
-        // Messages scroll is tail-anchored: ↑ walks back into history,
-        // ↓ walks back toward the latest. `G`/End returns to follow
-        // mode; `g`/Home jumps to the oldest entry.
+        // Messages is a cursor-selected list: ↑ moves the selection
+        // one step older, ↓ one step newer. Landing on the tail
+        // re-engages follow-mode so new messages auto-select.
+        // `g`/Home jumps to the oldest; `G`/End re-follows the tail.
         StreamView::Messages => match event.code {
-            KeyCode::Up | KeyCode::Char('k') => app.scroll_messages(1),
-            KeyCode::Down | KeyCode::Char('j') => app.scroll_messages(-1),
-            KeyCode::PageUp => app.scroll_messages(10),
-            KeyCode::PageDown => app.scroll_messages(-10),
+            KeyCode::Up | KeyCode::Char('k') => app.scroll_messages(-1),
+            KeyCode::Down | KeyCode::Char('j') => app.scroll_messages(1),
+            KeyCode::PageUp => app.scroll_messages(-10),
+            KeyCode::PageDown => app.scroll_messages(10),
             KeyCode::Home | KeyCode::Char('g') => app.messages_to_head(),
             KeyCode::End | KeyCode::Char('G') => app.messages_to_tail(),
             _ => {}
@@ -172,7 +173,10 @@ pub(crate) fn handle_scroll(app: &mut App, direction: i32) {
         Focus::List => match app.stream {
             StreamView::Agents => app.move_selection(direction),
             StreamView::Tasks => app.move_task_selection(direction),
-            StreamView::Messages => app.scroll_messages(-direction),
+            // Wheel-down = one step newer, wheel-up = one step older
+            // (`direction` is already signed that way), so no sign
+            // flip needed now that messages use absolute indices.
+            StreamView::Messages => app.scroll_messages(direction),
             StreamView::Tokens => app.scroll_tokens(direction),
             // Stream is a live tail — no manual scroll surface yet.
             StreamView::Stream => {}
@@ -247,6 +251,16 @@ mod tests {
 
     fn press(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn mock_history() -> ax_daemon::HistoryEntry {
+        ax_daemon::HistoryEntry {
+            timestamp: chrono::Utc::now(),
+            from: "alpha".into(),
+            to: "orch".into(),
+            content: "hi".into(),
+            task_id: String::new(),
+        }
     }
 
     #[test]
@@ -447,13 +461,18 @@ mod tests {
         handle_scroll(&mut app, -1);
         assert_eq!(app.selected_entry, 0);
 
-        // List + Messages: wheel-up walks back into history (direction
-        // inverts because message scroll is entries-from-tail).
+        // List + Messages: populate a tail-selected cursor, then
+        // wheel-up (direction=-1) walks one message older. The cursor
+        // is an absolute index now, so direction feeds through
+        // without inversion.
         app.stream = StreamView::Messages;
+        app.messages = vec![mock_history(); 3];
+        app.reconcile_message_cursor();
+        assert_eq!(app.messages_cursor.index, 2, "tail-selected by default");
         handle_scroll(&mut app, -1);
         assert_eq!(app.messages_cursor.index, 1);
         handle_scroll(&mut app, 1);
-        assert_eq!(app.messages_cursor.index, 0);
+        assert_eq!(app.messages_cursor.index, 2);
 
         // List + Tokens: wheel-down pans toward the last row.
         app.stream = StreamView::Tokens;

@@ -200,6 +200,10 @@ const MESSAGE_HISTORY_BUFFER: usize = 500;
 fn refresh_messages(app: &mut App, opts: &RunOptions) {
     let path = crate::stream::history_file_path(&opts.socket_path);
     app.messages = crate::stream::read_history(&path, MESSAGE_HISTORY_BUFFER);
+    // Keep the cursor consistent with the live log: bump it forward
+    // in follow-tail mode so new entries appear selected, and clamp
+    // if the buffer shrank underneath a parked selection.
+    app.reconcile_message_cursor();
 }
 
 fn refresh_tasks(app: &mut App, opts: &RunOptions) {

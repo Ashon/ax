@@ -785,11 +785,8 @@ fn focus_border_style(app: &App, panel: Focus) -> Style {
 }
 
 fn draw_messages(f: &mut Frame, area: Rect, app: &App) {
-    // `area` is the body block's inner rect — outer border + tab
-    // strip are already painted by `draw_body`. Render raw content
-    // into this area without stacking another block.
-    let inner_height = area.height as usize;
-
+    // `area` is the body list pane — outer border + tab strip are
+    // already painted by `draw_body`. Render raw rows into it.
     if app.messages.is_empty() {
         let para =
             Paragraph::new("  (no messages yet)").style(Style::default().add_modifier(Modifier::DIM));
@@ -797,27 +794,40 @@ fn draw_messages(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    // Map `messages_cursor.index` (entries-from-tail) onto a viewport
-    // window. The input handler never knows the pane height, so it
-    // lets scroll over-shoot; clamping lives here.
-    let total = app.messages.len();
-    let visible = inner_height.max(1).min(total);
-    let max_scroll = total.saturating_sub(visible);
-    let scroll = app.messages_cursor.index.min(max_scroll);
-    let end = total - scroll;
-    let start = end.saturating_sub(visible);
-
-    let viewport = Viewport {
-        start,
-        end,
-        visible: end - start,
-        total,
-    };
+    // Viewport keeps the selected row visible so ↑/↓ behave like a
+    // standard list: cursor moves, window follows.
+    let cursor = app
+        .messages_cursor
+        .index
+        .min(app.messages.len().saturating_sub(1));
+    let viewport = compute_viewport(app.messages.len(), cursor, area.height as usize);
     let content_area = viewport.content_area(area);
     let content_width = content_area.width as usize;
-    let lines: Vec<Line> = app.messages[start..end]
+
+    let list_focused = app.focus == Focus::List;
+    let lines: Vec<Line> = app.messages[viewport.start..viewport.end]
         .iter()
-        .map(|entry| Line::from(Span::raw(format_message_line(entry, content_width.max(1)))))
+        .enumerate()
+        .map(|(rel, entry)| {
+            let absolute = viewport.start + rel;
+            let text = format_message_line(entry, content_width.max(1));
+            let style = if absolute == cursor {
+                // REVERSED reads as selection everywhere else in the
+                // TUI (tasks list, agents list); CYAN tint when the
+                // list has focus disambiguates "live cursor" from
+                // "selection parked while detail is focused".
+                if list_focused {
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::default().add_modifier(Modifier::REVERSED)
+                }
+            } else {
+                Style::default()
+            };
+            Line::from(Span::styled(text, style))
+        })
         .collect();
     f.render_widget(Paragraph::new(lines), content_area);
     render_scrollbar(f, area, viewport);
@@ -1283,11 +1293,12 @@ fn draw_messages_detail(f: &mut Frame, area: Rect, app: &App) {
         f.render_widget(para, area);
         return;
     }
-    // `messages_cursor.index` is "entries from tail"; resolve to an
-    // absolute index so the detail tracks the list cursor as it walks
-    // back into history.
-    let scroll = app.messages_cursor.index.min(app.messages.len().saturating_sub(1));
-    let idx = app.messages.len() - 1 - scroll;
+    // `messages_cursor.index` is an absolute row — the same row the
+    // list pane highlights — so detail naturally tracks the selection.
+    let idx = app
+        .messages_cursor
+        .index
+        .min(app.messages.len().saturating_sub(1));
     let entry = &app.messages[idx];
 
     let mut lines: Vec<Line<'static>> = Vec::new();
