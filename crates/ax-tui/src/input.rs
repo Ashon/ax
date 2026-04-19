@@ -131,6 +131,30 @@ fn handle_body_key(app: &mut App, event: KeyEvent) {
     }
 }
 
+/// Route a mouse wheel event to the focused panel's scroll handler.
+/// `direction` is `-1` for wheel-up (scroll toward top / into history)
+/// and `+1` for wheel-down. Kept focus-driven for now — hover-based
+/// routing would need the last-rendered pane rects plumbed in.
+///
+/// Mapping mirrors the keyboard: Agents moves the selection cursor,
+/// Tasks the task cursor, Messages walks history (wheel-up = older),
+/// Tokens pans the sorted list.
+pub(crate) fn handle_scroll(app: &mut App, direction: i32) {
+    if app.quick_actions.open {
+        // Overlay swallows the scroll so a stray wheel doesn't flicker
+        // the panel underneath while a destructive confirm is pending.
+        return;
+    }
+    match app.focus {
+        Focus::Agents => app.move_selection(direction),
+        Focus::Body => match app.stream {
+            StreamView::Tasks => app.move_task_selection(direction),
+            StreamView::Messages => app.scroll_messages(-direction),
+            StreamView::Tokens => app.scroll_tokens(direction),
+        },
+    }
+}
+
 fn open_overlay(app: &mut App) {
     if app.selected_workspace().is_none() {
         return;
@@ -357,5 +381,69 @@ mod tests {
         app.focus = Focus::Body;
         handle_key(&mut app, press(KeyCode::Esc));
         assert_eq!(app.focus, Focus::Agents);
+    }
+
+    #[test]
+    fn mouse_wheel_drives_focused_panel() {
+        let mut app = App::new();
+        app.agent_entries = vec![
+            crate::agents::AgentEntry {
+                label: "alpha".into(),
+                workspace: "alpha".into(),
+                session_index: Some(0),
+                level: 0,
+                group: false,
+                reconcile: String::new(),
+            },
+            crate::agents::AgentEntry {
+                label: "beta".into(),
+                workspace: "beta".into(),
+                session_index: Some(1),
+                level: 0,
+                group: false,
+                reconcile: String::new(),
+            },
+        ];
+        app.selected_entry = 0;
+
+        // Agents focus: wheel-down advances the cursor.
+        handle_scroll(&mut app, 1);
+        assert_eq!(app.selected_entry, 1);
+        handle_scroll(&mut app, -1);
+        assert_eq!(app.selected_entry, 0);
+
+        // Body + Messages: wheel-up walks back into history
+        // (direction gets inverted because message scroll is
+        // entries-from-tail).
+        app.focus = Focus::Body;
+        app.stream = StreamView::Messages;
+        handle_scroll(&mut app, -1);
+        assert_eq!(app.messages_cursor.index, 1);
+        handle_scroll(&mut app, 1);
+        assert_eq!(app.messages_cursor.index, 0);
+
+        // Body + Tokens: wheel-down pans toward the last row.
+        app.stream = StreamView::Tokens;
+        handle_scroll(&mut app, 1);
+        assert_eq!(app.tokens_cursor.index, 1);
+    }
+
+    #[test]
+    fn mouse_wheel_is_ignored_while_overlay_is_open() {
+        let mut app = App::new();
+        app.agent_entries = vec![crate::agents::AgentEntry {
+            label: "alpha".into(),
+            workspace: "alpha".into(),
+            session_index: Some(0),
+            level: 0,
+            group: false,
+            reconcile: String::new(),
+        }];
+        app.selected_entry = 0;
+        handle_key(&mut app, press(KeyCode::Enter));
+        assert!(app.quick_actions.open);
+        let before = app.quick_actions.selected;
+        handle_scroll(&mut app, 1);
+        assert_eq!(app.quick_actions.selected, before, "overlay swallows wheel");
     }
 }

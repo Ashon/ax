@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crossterm::event::{self, Event};
+use crossterm::event::{self, Event, MouseEventKind};
 
 use crate::daemon::Client;
 use crate::state::App;
@@ -56,8 +56,14 @@ pub fn run(opts: &RunOptions) -> Result<(), RunError> {
             .map_err(RunError::Render)?;
 
         if event::poll(POLL_INTERVAL).map_err(RunError::Input)? {
-            if let Event::Key(key) = event::read().map_err(RunError::Input)? {
-                crate::input::handle_key(&mut app, key);
+            match event::read().map_err(RunError::Input)? {
+                Event::Key(key) => crate::input::handle_key(&mut app, key),
+                Event::Mouse(mouse) => match mouse.kind {
+                    MouseEventKind::ScrollUp => crate::input::handle_scroll(&mut app, -1),
+                    MouseEventKind::ScrollDown => crate::input::handle_scroll(&mut app, 1),
+                    _ => {}
+                },
+                _ => {}
             }
         }
         if app.quit {
