@@ -446,13 +446,12 @@ fn draw_body(f: &mut Frame, area: Rect, app: &mut App) {
 
 /// Build the body block's title as a tab strip. The line sits on the
 /// top border of whichever body sub-view is active, so we don't burn
-/// an extra row on a standalone tab strip above the pane. Styles
-/// follow the same focus/selection matrix as a dedicated Tabs
-/// widget: when Tabs focus is active, the highlighted tab turns
-/// cyan bold; otherwise it falls back to white bold with dim
-/// siblings. Dots between tabs imitate `symbols::DOT`.
+/// an extra row on a standalone tab strip above the pane. The tabs
+/// belong to the Body panel now (no standalone Tabs focus), so the
+/// highlighted tab turns cyan bold whenever Body is focused and
+/// falls back to white bold with dim siblings otherwise.
 fn tabs_title(app: &App) -> Line<'static> {
-    let focused = app.focus == Focus::Tabs;
+    let focused = app.focus == Focus::Body;
     let mut spans: Vec<Span<'static>> = Vec::new();
     for (idx, view) in StreamView::ALL.iter().enumerate() {
         if idx > 0 {
@@ -563,7 +562,6 @@ fn draw_messages(f: &mut Frame, area: Rect, app: &App) {
     // `area` is the body block's inner rect — outer border + tab
     // strip are already painted by `draw_body`. Render raw content
     // into this area without stacking another block.
-    let inner_width = area.width as usize;
     let inner_height = area.height as usize;
 
     if app.messages.is_empty() {
@@ -573,12 +571,30 @@ fn draw_messages(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let start = app.messages.len().saturating_sub(inner_height.max(1));
-    let lines: Vec<Line> = app.messages[start..]
+    // Map `messages_cursor.index` (entries-from-tail) onto a viewport
+    // window. The input handler never knows the pane height, so it
+    // lets scroll over-shoot; clamping lives here.
+    let total = app.messages.len();
+    let visible = inner_height.max(1).min(total);
+    let max_scroll = total.saturating_sub(visible);
+    let scroll = app.messages_cursor.index.min(max_scroll);
+    let end = total - scroll;
+    let start = end.saturating_sub(visible);
+
+    let viewport = Viewport {
+        start,
+        end,
+        visible: end - start,
+        total,
+    };
+    let content_area = viewport.content_area(area);
+    let content_width = content_area.width as usize;
+    let lines: Vec<Line> = app.messages[start..end]
         .iter()
-        .map(|entry| Line::from(Span::raw(format_message_line(entry, inner_width.max(1)))))
+        .map(|entry| Line::from(Span::raw(format_message_line(entry, content_width.max(1)))))
         .collect();
-    f.render_widget(Paragraph::new(lines), area);
+    f.render_widget(Paragraph::new(lines), content_area);
+    render_scrollbar(f, area, viewport);
 }
 
 fn draw_tokens(f: &mut Frame, area: Rect, app: &App) {
@@ -645,6 +661,20 @@ fn draw_tokens(f: &mut Frame, area: Rect, app: &App) {
         inner.height - header_rows,
     );
 
+    // Slice the sorted row set by the scroll offset so arrow keys
+    // walk the view without losing the stable A→Z order.
+    let total_rows = rows.len();
+    let budget = (list_area.height as usize).min(total_rows);
+    let max_scroll = total_rows.saturating_sub(budget);
+    let scroll = app.tokens_cursor.index.min(max_scroll);
+    let viewport = Viewport {
+        start: scroll,
+        end: scroll + budget,
+        visible: budget,
+        total: total_rows,
+    };
+    let content_area = viewport.content_area(list_area);
+
     // Text column reserves a fixed width; the sparkline absorbs the
     // rest (with a lower bound so it isn't degenerate on narrow
     // panes).
@@ -652,17 +682,16 @@ fn draw_tokens(f: &mut Frame, area: Rect, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(text_width.min(list_area.width.saturating_sub(12))),
+            Constraint::Length(text_width.min(content_area.width.saturating_sub(12))),
             Constraint::Min(10),
         ])
-        .split(list_area);
+        .split(content_area);
     let text_col = chunks[0];
     let spark_col = chunks[1];
 
     let now = chrono::Utc::now();
-    let budget = (list_area.height as usize).min(rows.len());
-    for (idx, trend) in rows.into_iter().take(budget).enumerate() {
-        let y = list_area.y + idx as u16;
+    for (idx, trend) in rows.into_iter().skip(scroll).take(budget).enumerate() {
+        let y = content_area.y + idx as u16;
         let row_text = Rect::new(text_col.x, y, text_col.width, 1);
         let row_spark = Rect::new(spark_col.x, y, spark_col.width, 1);
 
@@ -741,6 +770,8 @@ fn draw_tokens(f: &mut Frame, area: Rect, app: &App) {
             );
         }
     }
+
+    render_scrollbar(f, list_area, viewport);
 }
 
 /// Compact model label — strips vendor prefixes so names like
@@ -807,7 +838,7 @@ fn draw_tasks_list(f: &mut Frame, area: Rect, app: &App, filtered: &[ax_proto::t
         .title(format!(
             " tasks {} {}/{} ",
             app.task_filter.label(),
-            filtered.len().min(app.task_selected.saturating_add(1)),
+            filtered.len().min(app.task_cursor.index.saturating_add(1)),
             filtered.len(),
         ));
     let inner = block.inner(area);
@@ -855,13 +886,17 @@ fn draw_tasks_list(f: &mut Frame, area: Rect, app: &App, filtered: &[ax_proto::t
         return;
     }
 
-    let viewport = compute_viewport(filtered.len(), app.task_selected, body_area.height as usize);
+    let viewport = compute_viewport(
+        filtered.len(),
+        app.task_cursor.index,
+        body_area.height as usize,
+    );
     let rows_area = viewport.content_area(body_area);
     let rows_width = rows_area.width as usize;
     let mut lines: Vec<Line> = Vec::with_capacity(viewport.visible);
     for (idx, task) in filtered[viewport.start..viewport.end].iter().enumerate() {
         let absolute = viewport.start + idx;
-        let style = if absolute == app.task_selected {
+        let style = if absolute == app.task_cursor.index {
             Style::default().add_modifier(Modifier::REVERSED)
         } else {
             Style::default()
@@ -884,7 +919,7 @@ fn draw_task_detail(f: &mut Frame, area: Rect, app: &App, filtered: &[ax_proto::
         .border_style(focus_border_style(app, Focus::Body))
         .title(" detail ");
 
-    let Some(task) = filtered.get(app.task_selected) else {
+    let Some(task) = filtered.get(app.task_cursor.index) else {
         let para = Paragraph::new("  (no task selected)")
             .style(Style::default().add_modifier(Modifier::DIM))
             .block(block);
@@ -1211,15 +1246,18 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
 }
 
 /// Pick a context-aware hint line based on the focused panel so the
-/// footer shows the keys that actually do something right now.
+/// footer shows the keys that actually do something right now. Tab
+/// cycling lives on global keys (`Tab`/`1-3`) so it's pulled out of
+/// the per-panel slot.
 fn focus_footer_hint(app: &App) -> String {
-    let base = "[/] panel · 1-3 tab · f filter · q quit";
+    let base = "[/] panel · Tab/1-3 view · f filter · q quit";
     let scoped = match app.focus {
         Focus::Agents => "↑↓/jk agent · enter actions",
-        Focus::Tabs => "Tab/←→ tab · ↓ body · ↑ agents",
         Focus::Body => match app.stream {
-            StreamView::Tasks => "↑↓/jk task · ←→ tab · esc tabs",
-            _ => "←→ tab · esc tabs",
+            StreamView::Tasks => "↑↓/jk task · esc agents",
+            StreamView::Messages | StreamView::Tokens => {
+                "↑↓/jk scroll · g/G head/tail · esc agents"
+            }
         },
     };
     format!("[{focus}] {scoped} · {base}", focus = app.focus.label())

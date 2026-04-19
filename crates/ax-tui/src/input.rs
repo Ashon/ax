@@ -42,25 +42,29 @@ pub(crate) fn handle_key(app: &mut App, event: KeyEvent) {
         return;
     }
 
-    // Global bindings — active regardless of the focused panel.
-    // `[` and `]` cycle panels. Tab/BackTab are deliberately *not*
-    // global so the tab strip can claim them when focused.
+    // Global bindings — active regardless of which panel is focused.
+    // Arrow keys are deliberately *not* global: each panel owns them
+    // so a stray ↑/↓ can't leak across scopes. Tab switching moves to
+    // its own dedicated keys (Tab/Shift-Tab + 1/2/3) so operators can
+    // flip views without losing their place in Agents.
     match event.code {
-        KeyCode::Char('[') => {
-            app.cycle_focus(-1);
+        KeyCode::Char('[') | KeyCode::Char(']') => {
+            app.cycle_focus(1);
             return;
         }
-        KeyCode::Char(']') => {
-            app.cycle_focus(1);
+        KeyCode::Tab => {
+            app.step_stream(1);
+            return;
+        }
+        KeyCode::BackTab => {
+            app.step_stream(-1);
             return;
         }
         KeyCode::Char(c @ ('1' | '2' | '3')) => {
             let idx = (c as u8 - b'1') as usize;
             app.select_stream(idx);
-            // Jumping to a specific tab implies the operator wants
-            // to interact with its body next; move focus so they
-            // don't have to chase it with `]`.
-            app.focus = Focus::Body;
+            // Focus intentionally preserved — peeking at a tab from
+            // Agents shouldn't strand the cursor in Body.
             return;
         }
         KeyCode::Char('f') => {
@@ -70,10 +74,10 @@ pub(crate) fn handle_key(app: &mut App, event: KeyEvent) {
         _ => {}
     }
 
-    // Panel-scoped dispatch.
+    // Panel-scoped dispatch. Each handler only touches keys that mean
+    // something inside that panel — no cross-panel fallbacks.
     match app.focus {
         Focus::Agents => handle_agents_key(app, event),
-        Focus::Tabs => handle_tabs_key(app, event),
         Focus::Body => handle_body_key(app, event),
     }
 }
@@ -87,39 +91,41 @@ fn handle_agents_key(app: &mut App, event: KeyEvent) {
     }
 }
 
-fn handle_tabs_key(app: &mut App, event: KeyEvent) {
-    match event.code {
-        // Tab/Shift-Tab cycle tabs while the strip is focused — the
-        // muscle-memory move for a tab row.
-        KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => app.step_stream(1),
-        KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => app.step_stream(-1),
-        // Pressing enter on a tab "drops in" — shift focus to the
-        // panel body so follow-up arrow keys navigate its contents.
-        KeyCode::Enter => app.focus = Focus::Body,
-        KeyCode::Up | KeyCode::Char('k') => app.focus = Focus::Agents,
-        KeyCode::Down | KeyCode::Char('j') => app.focus = Focus::Body,
-        _ => {}
-    }
-}
-
 fn handle_body_key(app: &mut App, event: KeyEvent) {
+    // Esc always drops back to Agents — the single "one step back"
+    // gesture regardless of sub-view.
+    if matches!(event.code, KeyCode::Esc) {
+        app.focus = Focus::Agents;
+        return;
+    }
     match app.stream {
         StreamView::Tasks => match event.code {
             KeyCode::Up | KeyCode::Char('k') => app.move_task_selection(-1),
             KeyCode::Down | KeyCode::Char('j') => app.move_task_selection(1),
-            KeyCode::Left | KeyCode::Char('h') => app.step_stream(-1),
-            KeyCode::Right | KeyCode::Char('l') => app.step_stream(1),
-            KeyCode::Esc => app.focus = Focus::Tabs,
             _ => {}
         },
-        // Messages + Tokens are read-only today. Arrow keys still
-        // offer a path back to the tab strip so keyboard-only users
-        // aren't trapped.
-        _ => match event.code {
-            KeyCode::Up | KeyCode::Char('k') => app.focus = Focus::Tabs,
-            KeyCode::Left | KeyCode::Char('h') => app.step_stream(-1),
-            KeyCode::Right | KeyCode::Char('l') => app.step_stream(1),
-            KeyCode::Esc => app.focus = Focus::Tabs,
+        // Messages scroll is tail-anchored: ↑ walks back into history,
+        // ↓ walks back toward the latest. `G`/End returns to follow
+        // mode; `g`/Home jumps to the oldest entry.
+        StreamView::Messages => match event.code {
+            KeyCode::Up | KeyCode::Char('k') => app.scroll_messages(1),
+            KeyCode::Down | KeyCode::Char('j') => app.scroll_messages(-1),
+            KeyCode::PageUp => app.scroll_messages(10),
+            KeyCode::PageDown => app.scroll_messages(-10),
+            KeyCode::Home | KeyCode::Char('g') => app.messages_to_head(),
+            KeyCode::End | KeyCode::Char('G') => app.messages_to_tail(),
+            _ => {}
+        },
+        // Tokens is a top-anchored sorted list, so ↑/↓ move the view
+        // up/down like any list. Keys intentionally mirror Messages
+        // for a single muscle-memory rule across read-only tabs.
+        StreamView::Tokens => match event.code {
+            KeyCode::Up | KeyCode::Char('k') => app.scroll_tokens(-1),
+            KeyCode::Down | KeyCode::Char('j') => app.scroll_tokens(1),
+            KeyCode::PageUp => app.scroll_tokens(-10),
+            KeyCode::PageDown => app.scroll_tokens(10),
+            KeyCode::Home | KeyCode::Char('g') => app.tokens_to_head(),
+            KeyCode::End | KeyCode::Char('G') => app.tokens_to_tail(),
             _ => {}
         },
     }
@@ -264,36 +270,35 @@ mod tests {
     }
 
     #[test]
-    fn brackets_cycle_focus_between_panels() {
+    fn brackets_toggle_focus_between_panels() {
         let mut app = App::new();
         assert_eq!(app.focus, Focus::Agents);
-        handle_key(&mut app, press(KeyCode::Char(']')));
-        assert_eq!(app.focus, Focus::Tabs);
         handle_key(&mut app, press(KeyCode::Char(']')));
         assert_eq!(app.focus, Focus::Body);
         handle_key(&mut app, press(KeyCode::Char(']')));
         assert_eq!(app.focus, Focus::Agents);
+        // `[` and `]` behave identically with only two panels.
         handle_key(&mut app, press(KeyCode::Char('[')));
         assert_eq!(app.focus, Focus::Body);
     }
 
     #[test]
-    fn tab_key_cycles_tabs_only_when_tabs_focused() {
+    fn tab_key_cycles_tabs_from_any_focus() {
         let mut app = App::new();
-        // Agents focus → Tab is a no-op (only [ / ] cycle panels).
-        handle_key(&mut app, press(KeyCode::Tab));
-        assert_eq!(app.focus, Focus::Agents);
-        assert_eq!(app.stream, crate::stream::StreamView::Messages);
-
-        app.focus = Focus::Tabs;
+        // Agents focus → Tab still cycles the view without stealing
+        // focus so operators can peek at other tabs.
         handle_key(&mut app, press(KeyCode::Tab));
         assert_eq!(app.stream, crate::stream::StreamView::Tasks);
+        assert_eq!(app.focus, Focus::Agents);
+
+        app.focus = Focus::Body;
         handle_key(&mut app, press(KeyCode::BackTab));
         assert_eq!(app.stream, crate::stream::StreamView::Messages);
+        assert_eq!(app.focus, Focus::Body);
     }
 
     #[test]
-    fn arrow_keys_scope_to_focused_panel() {
+    fn arrow_keys_stay_inside_focused_panel() {
         let mut app = App::new();
         app.agent_entries = vec![
             crate::agents::AgentEntry {
@@ -315,23 +320,42 @@ mod tests {
         ];
         app.selected_entry = 0;
 
+        // Agents focus: Down moves the cursor.
         handle_key(&mut app, press(KeyCode::Down));
-        assert_eq!(app.selected_entry, 1, "Down on Agents focus moves cursor");
+        assert_eq!(app.selected_entry, 1);
 
-        // In Tabs focus, Down should drop into Body, not move the
-        // agent cursor.
-        app.focus = Focus::Tabs;
+        // Body focus: Down/Up must not leak back into Agents.
+        app.focus = Focus::Body;
         let before = app.selected_entry;
-        handle_key(&mut app, press(KeyCode::Down));
-        assert_eq!(app.selected_entry, before);
-        assert_eq!(app.focus, Focus::Body);
+        handle_key(&mut app, press(KeyCode::Up));
+        assert_eq!(app.focus, Focus::Body, "Up stays inside Body");
+        assert_eq!(app.selected_entry, before, "Body arrows don't touch Agents");
+
+        // Body Left/Right no longer cycle tabs — they're no-ops so the
+        // tab strip isn't an accidental target.
+        let stream_before = app.stream;
+        handle_key(&mut app, press(KeyCode::Right));
+        assert_eq!(app.stream, stream_before);
     }
 
     #[test]
-    fn digit_keys_jump_tab_and_focus_body() {
+    fn digit_keys_jump_tab_without_changing_focus() {
         let mut app = App::new();
+        assert_eq!(app.focus, Focus::Agents);
         handle_key(&mut app, press(KeyCode::Char('3')));
         assert_eq!(app.stream, crate::stream::StreamView::Tokens);
-        assert_eq!(app.focus, Focus::Body);
+        assert_eq!(
+            app.focus,
+            Focus::Agents,
+            "digit keys preserve current focus"
+        );
+    }
+
+    #[test]
+    fn esc_returns_from_body_to_agents() {
+        let mut app = App::new();
+        app.focus = Focus::Body;
+        handle_key(&mut app, press(KeyCode::Esc));
+        assert_eq!(app.focus, Focus::Agents);
     }
 }

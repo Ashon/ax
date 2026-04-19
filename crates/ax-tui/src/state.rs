@@ -33,33 +33,72 @@ pub(crate) enum ViewMode {
     Stream,
 }
 
-/// Which panel the keyboard is scoped to. `[`/`]` cycles through
-/// them; arrows + Enter dispatch into whichever is focused so
-/// operators can reach every interaction from the same keys
-/// regardless of which panel they're thinking about.
+/// Which panel the keyboard is scoped to. `[`/`]` toggles between
+/// them; arrow keys stay *inside* the focused panel so navigation
+/// never leaks into another scope by accident. Tab switching lives
+/// on dedicated keys (`Tab`/`Shift-Tab`, `1`/`2`/`3`) and is
+/// available regardless of focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Focus {
     /// Top workspace list. Arrows move the selection cursor, Enter
     /// opens the quick-action overlay for the current agent.
     Agents,
-    /// Thin tab strip between the agents panel and the body. Arrows
-    /// step between messages / tasks / tokens tabs.
-    Tabs,
     /// Bottom pane. Arrow behaviour depends on the active tab — e.g.
     /// tasks focus moves the task-detail cursor; messages/tokens
-    /// ignore nav keys today.
+    /// ignore nav keys today (scrolling lands in a follow-up slice).
     Body,
 }
 
 impl Focus {
-    pub(crate) const ORDER: [Focus; 3] = [Focus::Agents, Focus::Tabs, Focus::Body];
+    pub(crate) const ORDER: [Focus; 2] = [Focus::Agents, Focus::Body];
 
     #[must_use]
     pub(crate) fn label(self) -> &'static str {
         match self {
             Focus::Agents => "agents",
-            Focus::Tabs => "tabs",
             Focus::Body => "body",
+        }
+    }
+}
+
+/// Shared cursor primitive for every stream view. Carries a single
+/// `index` whose meaning is view-specific — messages read it as
+/// "entries back from the tail", tokens as "first visible row",
+/// tasks as "selected row index". The type stays dumb on purpose:
+/// floor clamping happens here, ceiling clamping happens in render
+/// where the pane height is known.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct PaneCursor {
+    pub(crate) index: usize,
+}
+
+impl PaneCursor {
+    /// Shift the cursor by `delta`. Positive grows the index, negative
+    /// shrinks it. Clamps at zero so repeated downward presses don't
+    /// underflow into a follow-mode ambiguity.
+    pub(crate) fn shift(&mut self, delta: i32) {
+        self.index = (self.index as i32).saturating_add(delta).max(0) as usize;
+    }
+
+    /// Snap to zero — "top" for top-anchored views, "tail/follow" for
+    /// tail-anchored views.
+    pub(crate) fn reset(&mut self) {
+        self.index = 0;
+    }
+
+    /// Jump to `idx`. Used for "other end" gestures where the caller
+    /// intentionally over-shoots and lets the render pass clamp the
+    /// ceiling — the cursor primitive never needs the pane height.
+    pub(crate) fn jump_to(&mut self, idx: usize) {
+        self.index = idx;
+    }
+
+    /// Clamp down to `ceiling` if the underlying row set shrank. Used
+    /// after a refresh to keep selection from pointing past the last
+    /// visible row.
+    pub(crate) fn clamp(&mut self, ceiling: usize) {
+        if self.index > ceiling {
+            self.index = ceiling;
         }
     }
 }
@@ -79,9 +118,18 @@ pub(crate) struct App {
     pub(crate) focus: Focus,
     pub(crate) stream: StreamView,
     pub(crate) messages: Vec<HistoryEntry>,
+    /// How far back from the message tail the viewer is parked. `0`
+    /// means "follow" (always pin to latest); positive values scroll
+    /// into history. The upper bound is enforced at render time so
+    /// state doesn't need to know the pane height.
+    pub(crate) messages_cursor: PaneCursor,
     pub(crate) tasks: Vec<Task>,
-    pub(crate) task_selected: usize,
+    pub(crate) task_cursor: PaneCursor,
     pub(crate) task_filter: TaskFilterMode,
+    /// First visible row index in the tokens table. Clamped at render
+    /// so shrinking `usage_trends` doesn't strand the view past the
+    /// last row.
+    pub(crate) tokens_cursor: PaneCursor,
     pub(crate) quick_actions: QuickActionState,
     pub(crate) quick_notice: Option<Notice>,
     /// Lifecycle action queued by the input handler; executed by the
@@ -126,9 +174,11 @@ impl App {
             focus: Focus::Agents,
             stream: StreamView::Messages,
             messages: Vec::new(),
+            messages_cursor: PaneCursor::default(),
             tasks: Vec::new(),
-            task_selected: 0,
+            task_cursor: PaneCursor::default(),
             task_filter: TaskFilterMode::Active,
+            tokens_cursor: PaneCursor::default(),
             quick_actions: QuickActionState::default(),
             quick_notice: None,
             streamed_workspace: None,
@@ -195,12 +245,11 @@ impl App {
     pub(crate) fn move_task_selection(&mut self, delta: i32) {
         let filtered = self.filtered_tasks();
         if filtered.is_empty() {
-            self.task_selected = 0;
+            self.task_cursor.reset();
             return;
         }
-        let n = filtered.len() as i32;
-        let next = (self.task_selected as i32 + delta).clamp(0, n - 1) as usize;
-        self.task_selected = next;
+        self.task_cursor.shift(delta);
+        self.task_cursor.clamp(filtered.len() - 1);
     }
 
     /// Cycle the filter and snap the cursor so it stays valid in
@@ -210,18 +259,60 @@ impl App {
         self.clamp_task_selection();
     }
 
+    /// Shift the messages viewport. Positive `delta` walks back into
+    /// history (older); negative walks forward toward the tail. The
+    /// zero floor keeps "scroll past the latest" from underflowing
+    /// into follow-from-tail confusion; render clamps the ceiling.
+    pub(crate) fn scroll_messages(&mut self, delta: i32) {
+        self.messages_cursor.shift(delta);
+    }
+
+    /// Snap the messages view back to the tail (follow mode).
+    pub(crate) fn messages_to_tail(&mut self) {
+        self.messages_cursor.reset();
+    }
+
+    /// Jump to the oldest message. `messages.len()` is an intentional
+    /// over-shoot — the render clamp pins the view at the head without
+    /// the caller needing the pane height.
+    pub(crate) fn messages_to_head(&mut self) {
+        self.messages_cursor.jump_to(self.messages.len());
+    }
+
+    /// Shift the tokens list viewport. Positive `delta` moves the
+    /// view down (toward the last row); negative moves up.
+    pub(crate) fn scroll_tokens(&mut self, delta: i32) {
+        self.tokens_cursor.shift(delta);
+    }
+
+    pub(crate) fn tokens_to_head(&mut self) {
+        self.tokens_cursor.reset();
+    }
+
+    pub(crate) fn tokens_to_tail(&mut self) {
+        self.tokens_cursor.jump_to(self.token_row_count());
+    }
+
+    /// Rows the tokens table actually renders. Mirrors the filter in
+    /// `draw_tokens` so scroll bookkeeping stays in sync with what the
+    /// user sees.
+    fn token_row_count(&self) -> usize {
+        self.usage_trends
+            .values()
+            .filter(|t| t.available && t.total.total() > 0)
+            .count()
+    }
+
     /// Called after each refresh so an out-of-range selection (tasks
     /// removed underneath the cursor, or filter change shrank the
     /// visible list) snaps back to the last live row.
     pub(crate) fn clamp_task_selection(&mut self) {
         let n = self.filtered_tasks().len();
         if n == 0 {
-            self.task_selected = 0;
+            self.task_cursor.reset();
             return;
         }
-        if self.task_selected >= n {
-            self.task_selected = n - 1;
-        }
+        self.task_cursor.clamp(n - 1);
     }
 
     /// Regenerate agents-panel entries from the current session + tree
@@ -305,22 +396,22 @@ mod tests {
     fn move_task_selection_clamps_and_no_op_on_empty() {
         let mut app = App::new();
         app.move_task_selection(5);
-        assert_eq!(app.task_selected, 0);
+        assert_eq!(app.task_cursor.index, 0);
         app.tasks = vec![mock_task(), mock_task(), mock_task()];
         app.move_task_selection(10);
-        assert_eq!(app.task_selected, 2);
+        assert_eq!(app.task_cursor.index, 2);
         app.move_task_selection(-10);
-        assert_eq!(app.task_selected, 0);
+        assert_eq!(app.task_cursor.index, 0);
     }
 
     #[test]
     fn clamp_task_selection_snaps_back_when_tasks_shrink() {
         let mut app = App::new();
         app.tasks = vec![mock_task(), mock_task(), mock_task()];
-        app.task_selected = 2;
+        app.task_cursor.index = 2;
         app.tasks.truncate(1);
         app.clamp_task_selection();
-        assert_eq!(app.task_selected, 0);
+        assert_eq!(app.task_cursor.index, 0);
     }
 
     fn mock_task() -> ax_proto::types::Task {
@@ -359,6 +450,82 @@ mod tests {
             remove_reason: String::new(),
             created_at: now,
             updated_at: now,
+        }
+    }
+
+    #[test]
+    fn pane_cursor_primitive_clamps_floor_and_obeys_ceiling() {
+        let mut c = PaneCursor::default();
+        c.shift(5);
+        assert_eq!(c.index, 5);
+        c.shift(-100);
+        assert_eq!(c.index, 0, "floor clamps at zero");
+        c.jump_to(12);
+        assert_eq!(c.index, 12, "ceiling is set verbatim (render clamps)");
+        c.clamp(7);
+        assert_eq!(c.index, 7, "clamp snaps down when ceiling shrinks");
+        c.clamp(20);
+        assert_eq!(c.index, 7, "clamp is a no-op when already under ceiling");
+        c.reset();
+        assert_eq!(c.index, 0);
+    }
+
+    #[test]
+    fn scroll_messages_walks_back_and_snaps_to_head_or_tail() {
+        let mut app = App::new();
+        app.messages = vec![mock_history(); 5];
+
+        app.scroll_messages(2);
+        assert_eq!(app.messages_cursor.index, 2);
+        app.scroll_messages(-3);
+        assert_eq!(app.messages_cursor.index, 0, "floor clamps at tail");
+
+        app.messages_to_head();
+        assert_eq!(app.messages_cursor.index, app.messages.len());
+        app.messages_to_tail();
+        assert_eq!(app.messages_cursor.index, 0);
+    }
+
+    #[test]
+    fn scroll_tokens_walks_and_snaps() {
+        let mut app = App::new();
+        let trend = mock_trend("a");
+        app.usage_trends.insert("a".into(), trend.clone());
+        app.usage_trends.insert("b".into(), mock_trend("b"));
+
+        app.scroll_tokens(3);
+        assert_eq!(app.tokens_cursor.index, 3);
+        app.scroll_tokens(-10);
+        assert_eq!(app.tokens_cursor.index, 0, "floor clamps at top");
+
+        app.tokens_to_tail();
+        assert_eq!(app.tokens_cursor.index, 2, "tail = row count");
+        app.tokens_to_head();
+        assert_eq!(app.tokens_cursor.index, 0);
+    }
+
+    fn mock_history() -> HistoryEntry {
+        HistoryEntry {
+            timestamp: chrono::Utc::now(),
+            from: "alpha".into(),
+            to: "orch".into(),
+            content: "hello".into(),
+            task_id: String::new(),
+        }
+    }
+
+    fn mock_trend(name: &str) -> ax_proto::usage::WorkspaceTrend {
+        use ax_proto::usage::{Tokens, WorkspaceTrend};
+        WorkspaceTrend {
+            workspace: name.into(),
+            available: true,
+            total: Tokens {
+                input: 10,
+                output: 10,
+                cache_read: 0,
+                cache_creation: 0,
+            },
+            ..WorkspaceTrend::default()
         }
     }
 
