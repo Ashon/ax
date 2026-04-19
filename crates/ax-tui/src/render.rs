@@ -274,10 +274,31 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
     } else {
         "stopped"
     };
+    let online = app
+        .workspace_infos
+        .values()
+        .filter(|w| matches!(w.status, AgentStatus::Online))
+        .count();
+    let total_agents = app.workspace_infos.len();
+    let active_tasks = app
+        .tasks
+        .iter()
+        .filter(|t| {
+            matches!(
+                t.status,
+                ax_proto::types::TaskStatus::Pending | ax_proto::types::TaskStatus::InProgress
+            )
+        })
+        .count();
+    // Collapse segments so the line stays under a single terminal row
+    // even on narrow windows. `agents: 0/0` and an empty task set are
+    // common on a freshly-booted repo, so keep them visible as a cue
+    // that the surface is wired up.
     let text = format!(
-        "ax watch — daemon: {daemon} · agents: {} · sessions: {}",
-        app.workspace_infos.len(),
-        app.sessions.len(),
+        "ax · daemon: {daemon} · agents: {online}/{total_agents} · tasks: {active_tasks} active / {total_tasks} · sessions: {sessions} · filter: {filter}",
+        total_tasks = app.tasks.len(),
+        sessions = app.sessions.len(),
+        filter = app.task_filter.label(),
     );
     if app.daemon_running {
         let throbber = status_throbber(text, Style::default().add_modifier(Modifier::BOLD));
