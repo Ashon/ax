@@ -28,8 +28,27 @@ pub(crate) fn handle_key(app: &mut App, event: KeyEvent) {
         _ => {}
     }
 
+    if app.help_open {
+        // Help is a pure reference surface — `?` / Esc close it; q
+        // still quits (handled above). Everything else is swallowed
+        // so a stray arrow doesn't scroll the panel behind the
+        // overlay while the user reads the cheatsheet.
+        if matches!(event.code, KeyCode::Char('?') | KeyCode::Esc) {
+            app.help_open = false;
+        }
+        return;
+    }
+
     if app.quick_actions.open {
         handle_overlay_key(app, event);
+        return;
+    }
+
+    // `?` toggles the help overlay from any non-overlay context. It's
+    // global so operators can reach it without first parking focus on
+    // a specific panel.
+    if matches!(event.code, KeyCode::Char('?')) {
+        app.help_open = true;
         return;
     }
 
@@ -140,9 +159,10 @@ fn handle_body_key(app: &mut App, event: KeyEvent) {
 /// Tasks the task cursor, Messages walks history (wheel-up = older),
 /// Tokens pans the sorted list.
 pub(crate) fn handle_scroll(app: &mut App, direction: i32) {
-    if app.quick_actions.open {
-        // Overlay swallows the scroll so a stray wheel doesn't flicker
-        // the panel underneath while a destructive confirm is pending.
+    if app.quick_actions.open || app.help_open {
+        // Overlays swallow the wheel so a stray scroll doesn't flicker
+        // the panel underneath while a destructive confirm or the
+        // help cheatsheet is visible.
         return;
     }
     match app.focus {
@@ -426,6 +446,33 @@ mod tests {
         app.stream = StreamView::Tokens;
         handle_scroll(&mut app, 1);
         assert_eq!(app.tokens_cursor.index, 1);
+    }
+
+    #[test]
+    fn question_mark_toggles_help_overlay() {
+        let mut app = App::new();
+        assert!(!app.help_open);
+        handle_key(&mut app, press(KeyCode::Char('?')));
+        assert!(app.help_open);
+        // Arrow keys are swallowed while help is open so the panel
+        // behind the overlay doesn't drift.
+        app.agent_entries = vec![crate::agents::AgentEntry {
+            label: "alpha".into(),
+            workspace: "alpha".into(),
+            session_index: Some(0),
+            level: 0,
+            group: false,
+            reconcile: String::new(),
+        }];
+        app.selected_entry = 0;
+        handle_key(&mut app, press(KeyCode::Down));
+        assert_eq!(app.selected_entry, 0, "arrows swallowed under help");
+        handle_key(&mut app, press(KeyCode::Char('?')));
+        assert!(!app.help_open);
+        handle_key(&mut app, press(KeyCode::Char('?')));
+        assert!(app.help_open);
+        handle_key(&mut app, press(KeyCode::Esc));
+        assert!(!app.help_open, "esc also closes help");
     }
 
     #[test]

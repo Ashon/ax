@@ -132,6 +132,11 @@ pub(crate) struct App {
     pub(crate) tokens_cursor: PaneCursor,
     pub(crate) quick_actions: QuickActionState,
     pub(crate) quick_notice: Option<Notice>,
+    /// Toggle for the `?` help overlay. When true, the TUI draws a
+    /// centered keybinding reference over the grid and swallows all
+    /// keys (except `?` / `Esc` / `q`) so the panel underneath
+    /// doesn't drift.
+    pub(crate) help_open: bool,
     /// Lifecycle action queued by the input handler; executed by the
     /// app loop (where paths are available) and cleared.
     pub(crate) pending_lifecycle: Option<PendingLifecycle>,
@@ -181,6 +186,7 @@ impl App {
             tokens_cursor: PaneCursor::default(),
             quick_actions: QuickActionState::default(),
             quick_notice: None,
+            help_open: false,
             streamed_workspace: None,
             pending_lifecycle: None,
             captures: CaptureCache::default(),

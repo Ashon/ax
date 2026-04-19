@@ -50,8 +50,117 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
     if app.quick_actions.open {
         draw_quick_actions(f, area, agents_area, app);
     }
+    if app.help_open {
+        draw_help(f, area);
+    }
 
     draw_footer(f, chunks[2], app);
+}
+
+/// Centered keybinding cheatsheet. Opened via `?` from any non-overlay
+/// context, dismissed via `?` or `Esc`. Reuses the `Clear` + framed
+/// block pattern from `draw_quick_actions` so the visual language
+/// stays consistent.
+fn draw_help(f: &mut Frame, frame: Rect) {
+    const SECTIONS: &[(&str, &[(&str, &str)])] = &[
+        (
+            "global",
+            &[
+                ("?", "toggle this help"),
+                ("q / ctrl-c", "quit"),
+                ("[ / ]", "switch panel (agents ↔ body)"),
+                ("Tab / Shift-Tab", "cycle body tab"),
+                ("1 / 2 / 3", "jump to messages / tasks / tokens"),
+                ("f", "cycle task filter"),
+            ],
+        ),
+        (
+            "agents",
+            &[
+                ("↑ ↓ / j k", "move cursor"),
+                ("Enter", "open action menu"),
+                ("wheel", "scroll list"),
+            ],
+        ),
+        (
+            "body · tasks",
+            &[
+                ("↑ ↓ / j k", "move selected task"),
+                ("wheel", "scroll list"),
+                ("Esc", "back to agents"),
+            ],
+        ),
+        (
+            "body · messages / tokens",
+            &[
+                ("↑ ↓ / j k", "scroll"),
+                ("PgUp / PgDn", "scroll by page"),
+                ("g / G", "head / tail"),
+                ("wheel", "scroll"),
+                ("Esc", "back to agents"),
+            ],
+        ),
+        (
+            "action menu",
+            &[
+                ("↑ ↓", "select action"),
+                ("Enter", "run (re-press to confirm destructive ops)"),
+                ("Esc", "close"),
+            ],
+        ),
+    ];
+
+    let total_rows: u16 = SECTIONS
+        .iter()
+        .map(|(_, rows)| rows.len() as u16 + 1)
+        .sum();
+    let height = (total_rows + 2)
+        .min(frame.height.saturating_sub(2))
+        .max(6);
+    let width: u16 = 56;
+    let width = width.min(frame.width.saturating_sub(2));
+
+    let x = frame.x + frame.width.saturating_sub(width) / 2;
+    let y = frame.y + frame.height.saturating_sub(height) / 2;
+    let area = Rect::new(x, y, width, height);
+
+    f.render_widget(ratatui::widgets::Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" help · ? or esc to close ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.height == 0 {
+        return;
+    }
+
+    let key_col = 18usize;
+    let mut lines: Vec<Line> = Vec::with_capacity(total_rows as usize);
+    for (idx, (section, rows)) in SECTIONS.iter().enumerate() {
+        if idx > 0 {
+            // Blank separator between sections so the cheatsheet reads
+            // as a vertically-stacked set of groups rather than one
+            // long table.
+            lines.push(Line::from(Span::raw("")));
+        }
+        lines.push(Line::from(Span::styled(
+            format!(" {section}"),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for (key, desc) in *rows {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {key:<width$}", width = key_col),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(*desc),
+            ]));
+        }
+    }
+    let visible: Vec<Line> = lines.into_iter().take(inner.height as usize).collect();
+    f.render_widget(Paragraph::new(visible), inner);
 }
 
 /// Clamp the agents pane so it shows every row when possible but
@@ -1250,7 +1359,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
 /// cycling lives on global keys (`Tab`/`1-3`) so it's pulled out of
 /// the per-panel slot.
 fn focus_footer_hint(app: &App) -> String {
-    let base = "[/] panel · Tab/1-3 view · f filter · q quit";
+    let base = "[/] panel · Tab/1-3 view · f filter · ? help · q quit";
     let scoped = match app.focus {
         Focus::Agents => "↑↓/jk agent · enter actions",
         Focus::Body => match app.stream {
