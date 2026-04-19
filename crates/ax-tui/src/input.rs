@@ -70,11 +70,12 @@ pub(crate) fn handle_key(app: &mut App, event: KeyEvent) {
             app.step_stream(-1);
             return;
         }
-        KeyCode::Char(c @ ('1' | '2' | '3' | '4')) => {
+        KeyCode::Char(c @ ('1' | '2' | '3' | '4' | '5')) => {
             let idx = (c as u8 - b'1') as usize;
             app.select_stream(idx);
             // Focus intentionally preserved — peeking at a tab from
-            // Agents shouldn't strand the cursor in Body.
+            // the list shouldn't strand the cursor in the detail
+            // pane or vice versa.
             return;
         }
         KeyCode::Char('f') => {
@@ -84,31 +85,26 @@ pub(crate) fn handle_key(app: &mut App, event: KeyEvent) {
         _ => {}
     }
 
-    // Panel-scoped dispatch. Each handler only touches keys that mean
-    // something inside that panel — no cross-panel fallbacks.
+    // Focus-scoped dispatch. `List` routes the keys to the active
+    // tab's list handler; `Detail` drives the shared detail scroll
+    // state. Either focus returns no-op for irrelevant keys.
     match app.focus {
-        Focus::Agents => handle_agents_key(app, event),
-        Focus::Body => handle_body_key(app, event),
+        Focus::List => handle_list_key(app, event),
+        Focus::Detail => handle_detail_key(app, event),
     }
 }
 
-fn handle_agents_key(app: &mut App, event: KeyEvent) {
-    match event.code {
-        KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
-        KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
-        KeyCode::Enter => open_overlay(app),
-        _ => {}
-    }
-}
-
-fn handle_body_key(app: &mut App, event: KeyEvent) {
-    // Esc always drops back to Agents — the single "one step back"
-    // gesture regardless of sub-view.
-    if matches!(event.code, KeyCode::Esc) {
-        app.focus = Focus::Agents;
-        return;
-    }
+fn handle_list_key(app: &mut App, event: KeyEvent) {
+    // Esc from the list cycles Back-a-step inside the list scope —
+    // clears any lingering notice but doesn't steal focus. `[/]`
+    // is the move to the detail pane.
     match app.stream {
+        StreamView::Agents => match event.code {
+            KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
+            KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
+            KeyCode::Enter => open_overlay(app),
+            _ => {}
+        },
         StreamView::Tasks => match event.code {
             KeyCode::Up | KeyCode::Char('k') => app.move_task_selection(-1),
             KeyCode::Down | KeyCode::Char('j') => app.move_task_selection(1),
@@ -126,9 +122,7 @@ fn handle_body_key(app: &mut App, event: KeyEvent) {
             KeyCode::End | KeyCode::Char('G') => app.messages_to_tail(),
             _ => {}
         },
-        // Tokens is a top-anchored sorted list, so ↑/↓ move the view
-        // up/down like any list. Keys intentionally mirror Messages
-        // for a single muscle-memory rule across read-only tabs.
+        // Tokens is a top-anchored sorted list.
         StreamView::Tokens => match event.code {
             KeyCode::Up | KeyCode::Char('k') => app.scroll_tokens(-1),
             KeyCode::Down | KeyCode::Char('j') => app.scroll_tokens(1),
@@ -138,11 +132,24 @@ fn handle_body_key(app: &mut App, event: KeyEvent) {
             KeyCode::End | KeyCode::Char('G') => app.tokens_to_tail(),
             _ => {}
         },
-        // Stream is a read-only tmux mirror — nav keys no-op. The
-        // underlying capture refreshes every tick so the tail scrolls
-        // automatically. Follow-up slice can add `g`/`G` style scroll
-        // once the capture buffer carries a cursor.
+        // Stream's "list" is the live capture tail — no manual scroll
+        // surface yet; follow-up slice adds it alongside a scroll
+        // cursor on the capture buffer.
         StreamView::Stream => {}
+    }
+}
+
+fn handle_detail_key(app: &mut App, event: KeyEvent) {
+    match event.code {
+        KeyCode::Up | KeyCode::Char('k') => app.detail_scroll.shift(-1),
+        KeyCode::Down | KeyCode::Char('j') => app.detail_scroll.shift(1),
+        KeyCode::PageUp => app.detail_scroll.shift(-10),
+        KeyCode::PageDown => app.detail_scroll.shift(10),
+        KeyCode::Home | KeyCode::Char('g') => app.detail_scroll.reset(),
+        // Esc drops focus back to the list so operators can exit the
+        // detail scope without hitting `[/]` explicitly.
+        KeyCode::Esc => app.focus = Focus::List,
+        _ => {}
     }
 }
 
@@ -162,14 +169,15 @@ pub(crate) fn handle_scroll(app: &mut App, direction: i32) {
         return;
     }
     match app.focus {
-        Focus::Agents => app.move_selection(direction),
-        Focus::Body => match app.stream {
+        Focus::List => match app.stream {
+            StreamView::Agents => app.move_selection(direction),
             StreamView::Tasks => app.move_task_selection(direction),
             StreamView::Messages => app.scroll_messages(-direction),
             StreamView::Tokens => app.scroll_tokens(direction),
             // Stream is a live tail — no manual scroll surface yet.
             StreamView::Stream => {}
         },
+        Focus::Detail => app.detail_scroll.shift(direction),
     }
 }
 
@@ -314,29 +322,30 @@ mod tests {
     #[test]
     fn brackets_toggle_focus_between_panels() {
         let mut app = App::new();
-        assert_eq!(app.focus, Focus::Agents);
+        assert_eq!(app.focus, Focus::List);
         handle_key(&mut app, press(KeyCode::Char(']')));
-        assert_eq!(app.focus, Focus::Body);
+        assert_eq!(app.focus, Focus::Detail);
         handle_key(&mut app, press(KeyCode::Char(']')));
-        assert_eq!(app.focus, Focus::Agents);
+        assert_eq!(app.focus, Focus::List);
         // `[` and `]` behave identically with only two panels.
         handle_key(&mut app, press(KeyCode::Char('[')));
-        assert_eq!(app.focus, Focus::Body);
+        assert_eq!(app.focus, Focus::Detail);
     }
 
     #[test]
     fn tab_key_cycles_tabs_from_any_focus() {
         let mut app = App::new();
-        // Agents focus → Tab still cycles the view without stealing
-        // focus so operators can peek at other tabs.
+        // Default is Agents; Tab walks to Messages without stealing
+        // the List↔Detail focus so operators can peek at other tabs.
+        assert_eq!(app.stream, crate::stream::StreamView::Agents);
         handle_key(&mut app, press(KeyCode::Tab));
-        assert_eq!(app.stream, crate::stream::StreamView::Tasks);
-        assert_eq!(app.focus, Focus::Agents);
-
-        app.focus = Focus::Body;
-        handle_key(&mut app, press(KeyCode::BackTab));
         assert_eq!(app.stream, crate::stream::StreamView::Messages);
-        assert_eq!(app.focus, Focus::Body);
+        assert_eq!(app.focus, Focus::List);
+
+        app.focus = Focus::Detail;
+        handle_key(&mut app, press(KeyCode::BackTab));
+        assert_eq!(app.stream, crate::stream::StreamView::Agents);
+        assert_eq!(app.focus, Focus::Detail);
     }
 
     #[test]
@@ -367,10 +376,10 @@ mod tests {
         assert_eq!(app.selected_entry, 1);
 
         // Body focus: Down/Up must not leak back into Agents.
-        app.focus = Focus::Body;
+        app.focus = Focus::Detail;
         let before = app.selected_entry;
         handle_key(&mut app, press(KeyCode::Up));
-        assert_eq!(app.focus, Focus::Body, "Up stays inside Body");
+        assert_eq!(app.focus, Focus::Detail, "Up stays inside Body");
         assert_eq!(app.selected_entry, before, "Body arrows don't touch Agents");
 
         // Body Left/Right no longer cycle tabs — they're no-ops so the
@@ -383,26 +392,32 @@ mod tests {
     #[test]
     fn digit_keys_jump_tab_without_changing_focus() {
         let mut app = App::new();
-        assert_eq!(app.focus, Focus::Agents);
-        handle_key(&mut app, press(KeyCode::Char('3')));
+        assert_eq!(app.focus, Focus::List);
+        // `4` is now Tokens (Agents=1, Messages=2, Tasks=3, Tokens=4,
+        // Stream=5); focus must stay on List so digits are a pure
+        // view peek.
+        handle_key(&mut app, press(KeyCode::Char('4')));
         assert_eq!(app.stream, crate::stream::StreamView::Tokens);
         assert_eq!(
             app.focus,
-            Focus::Agents,
+            Focus::List,
             "digit keys preserve current focus"
         );
+        // `5` jumps to Stream, exercising the 5th slot.
+        handle_key(&mut app, press(KeyCode::Char('5')));
+        assert_eq!(app.stream, crate::stream::StreamView::Stream);
     }
 
     #[test]
     fn esc_returns_from_body_to_agents() {
         let mut app = App::new();
-        app.focus = Focus::Body;
+        app.focus = Focus::Detail;
         handle_key(&mut app, press(KeyCode::Esc));
-        assert_eq!(app.focus, Focus::Agents);
+        assert_eq!(app.focus, Focus::List);
     }
 
     #[test]
-    fn mouse_wheel_drives_focused_panel() {
+    fn mouse_wheel_routes_by_focus_and_tab() {
         let mut app = App::new();
         app.agent_entries = vec![
             crate::agents::AgentEntry {
@@ -423,27 +438,37 @@ mod tests {
             },
         ];
         app.selected_entry = 0;
+        assert_eq!(app.focus, Focus::List);
+        assert_eq!(app.stream, StreamView::Agents);
 
-        // Agents focus: wheel-down advances the cursor.
+        // List + Agents: wheel-down advances the agent cursor.
         handle_scroll(&mut app, 1);
         assert_eq!(app.selected_entry, 1);
         handle_scroll(&mut app, -1);
         assert_eq!(app.selected_entry, 0);
 
-        // Body + Messages: wheel-up walks back into history
-        // (direction gets inverted because message scroll is
-        // entries-from-tail).
-        app.focus = Focus::Body;
+        // List + Messages: wheel-up walks back into history (direction
+        // inverts because message scroll is entries-from-tail).
         app.stream = StreamView::Messages;
         handle_scroll(&mut app, -1);
         assert_eq!(app.messages_cursor.index, 1);
         handle_scroll(&mut app, 1);
         assert_eq!(app.messages_cursor.index, 0);
 
-        // Body + Tokens: wheel-down pans toward the last row.
+        // List + Tokens: wheel-down pans toward the last row.
         app.stream = StreamView::Tokens;
         handle_scroll(&mut app, 1);
         assert_eq!(app.tokens_cursor.index, 1);
+
+        // Detail focus routes the wheel to `detail_scroll` regardless
+        // of which tab is active — a single shared cursor for every
+        // detail pane.
+        app.focus = Focus::Detail;
+        app.stream = StreamView::Agents;
+        handle_scroll(&mut app, 1);
+        assert_eq!(app.detail_scroll.index, 1);
+        handle_scroll(&mut app, 1);
+        assert_eq!(app.detail_scroll.index, 2);
     }
 
     #[test]

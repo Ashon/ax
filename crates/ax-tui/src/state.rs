@@ -33,30 +33,30 @@ pub(crate) enum ViewMode {
     Grid,
 }
 
-/// Which panel the keyboard is scoped to. `[`/`]` toggles between
-/// them; arrow keys stay *inside* the focused panel so navigation
-/// never leaks into another scope by accident. Tab switching lives
-/// on dedicated keys (`Tab`/`Shift-Tab`, `1`/`2`/`3`) and is
-/// available regardless of focus.
+/// Which half of the body the keyboard is scoped to. `[`/`]` toggles
+/// between the two; Tab/1-5 pick a tab regardless of focus. Arrow
+/// keys stay *inside* the focused half so navigation never leaks
+/// across panes by accident.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Focus {
-    /// Top workspace list. Arrows move the selection cursor, Enter
-    /// opens the quick-action overlay for the current agent.
-    Agents,
-    /// Bottom pane. Arrow behaviour depends on the active tab — e.g.
-    /// tasks focus moves the task-detail cursor; messages/tokens
-    /// ignore nav keys today (scrolling lands in a follow-up slice).
-    Body,
+    /// Top half of the body — the list for the active tab. Arrows
+    /// move the per-tab selection cursor; Enter opens the tab's
+    /// action surface (currently only wired on the agents tab).
+    List,
+    /// Bottom half of the body — the detail pane for the current
+    /// list selection. Arrows scroll the detail (long task logs,
+    /// wrapped message content, etc.).
+    Detail,
 }
 
 impl Focus {
-    pub(crate) const ORDER: [Focus; 2] = [Focus::Agents, Focus::Body];
+    pub(crate) const ORDER: [Focus; 2] = [Focus::List, Focus::Detail];
 
     #[must_use]
     pub(crate) fn label(self) -> &'static str {
         match self {
-            Focus::Agents => "agents",
-            Focus::Body => "body",
+            Focus::List => "list",
+            Focus::Detail => "detail",
         }
     }
 }
@@ -130,6 +130,11 @@ pub(crate) struct App {
     /// so shrinking `usage_trends` doesn't strand the view past the
     /// last row.
     pub(crate) tokens_cursor: PaneCursor,
+    /// Scroll offset for the detail pane (bottom half of the body).
+    /// Shared across tabs because only one detail is visible at a
+    /// time; flipping tabs resets the offset so operators don't see
+    /// a stray scroll carry over. Render clamps the ceiling.
+    pub(crate) detail_scroll: PaneCursor,
     pub(crate) quick_actions: QuickActionState,
     pub(crate) quick_notice: Option<Notice>,
     /// Toggle for the `?` help overlay. When true, the TUI draws a
@@ -176,14 +181,15 @@ impl App {
             desired: BTreeMap::new(),
             agent_entries: Vec::new(),
             selected_entry: 0,
-            focus: Focus::Agents,
-            stream: StreamView::Messages,
+            focus: Focus::List,
+            stream: StreamView::Agents,
             messages: Vec::new(),
             messages_cursor: PaneCursor::default(),
             tasks: Vec::new(),
             task_cursor: PaneCursor::default(),
             task_filter: TaskFilterMode::Active,
             tokens_cursor: PaneCursor::default(),
+            detail_scroll: PaneCursor::default(),
             quick_actions: QuickActionState::default(),
             quick_notice: None,
             help_open: false,
@@ -201,18 +207,18 @@ impl App {
         }
     }
 
-    /// Step the stream tab forward (+1) or backward (-1). Used by the
-    /// Tabs focus arrow-key handling so `[ / ]` stay reserved for
-    /// inter-panel navigation.
+    /// Step the stream tab forward (+1) or backward (-1). Used by
+    /// Tab/Shift-Tab so `[/]` can stay reserved for list↔detail
+    /// toggling. Resets `detail_scroll` so the new tab's detail
+    /// opens at the top instead of inheriting the previous view's
+    /// scroll position.
     pub(crate) fn step_stream(&mut self, delta: i32) {
         let views = StreamView::ALL;
-        if views.is_empty() {
-            return;
-        }
         let current = views.iter().position(|v| *v == self.stream).unwrap_or(0);
         let n = views.len() as i32;
         let next = ((current as i32 + delta).rem_euclid(n)) as usize;
         self.stream = views[next];
+        self.detail_scroll.reset();
         self.clamp_task_selection();
     }
 
@@ -232,10 +238,12 @@ impl App {
 
     /// Jump directly to tab index `idx` from the bottom tab bar.
     /// Out-of-range indices are ignored so stray key presses don't
-    /// flicker the pane.
+    /// flicker the pane. Resets `detail_scroll` for the same reason
+    /// as `step_stream`.
     pub(crate) fn select_stream(&mut self, idx: usize) {
         if let Some(view) = StreamView::ALL.get(idx) {
             self.stream = *view;
+            self.detail_scroll.reset();
         }
     }
 

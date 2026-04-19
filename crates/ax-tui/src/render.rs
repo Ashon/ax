@@ -1,6 +1,8 @@
-//! ratatui draw routine. Splits the screen into a top `agents` panel
-//! (project tree + live sessions) and a body pane underneath for
-//! messages / tasks / tokens or a full-screen tmux capture mirror.
+//! ratatui draw routine. Body is a tab strip over a vertical
+//! list/detail split: every tab — agents, messages, tasks, tokens,
+//! stream — owns both a list renderer (top) and a detail renderer
+//! (bottom). No standalone agents pane anymore; fleet visibility
+//! moves to the header status bar when the active tab isn't agents.
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -25,35 +27,52 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // header
-            Constraint::Min(1),    // agents + tabs + content
+            Constraint::Length(1), // header / status bar
+            Constraint::Min(1),    // body = tab strip + list + detail
             Constraint::Length(1), // footer
         ])
         .split(area);
 
     draw_header(f, chunks[0], app);
-
-    let agents_h = compute_agents_height(app, chunks[1].height);
-    // No standalone tab row — the body block embeds the tab strip
-    // inside its top border (see `tabs_title`), so the middle region
-    // splits cleanly into agents + body.
-    let middle = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(agents_h), Constraint::Min(1)])
-        .split(chunks[1]);
-    let agents_area = middle[0];
-    let content_area = middle[1];
-    draw_agents(f, agents_area, app);
-    draw_body(f, content_area, app);
+    let body_area = chunks[1];
+    draw_body(f, body_area, app);
 
     if app.quick_actions.open {
-        draw_quick_actions(f, area, agents_area, app);
+        // Overlay anchors to the list pane since that's where the
+        // agents cursor lives when it's open.
+        let (list_area, _) = split_body_inner(body_area);
+        draw_quick_actions(f, area, list_area, app);
     }
     if app.help_open {
         draw_help(f, area);
     }
 
     draw_footer(f, chunks[2], app);
+}
+
+/// Split the body's inner rect into `(list, detail)` vertical halves.
+/// Returns the `list` rect first so the selected-row math anchors on
+/// the top pane. Gives list 45% and detail 55% by default — detail
+/// wins the extra row so long task logs / message content stay
+/// legible without scrolling. `compute_body_inner` wraps the border
+/// math so overlays can recompute the same layout without repeating
+/// the outer block.
+fn split_body_inner(body_area: Rect) -> (Rect, Rect) {
+    // Mirror `draw_body`'s outer block: one row of top border (tabs
+    // title), two rows consumed by side + bottom borders, no extra
+    // padding. Detail pane is rendered directly under the list.
+    let inner = Rect::new(
+        body_area.x + 1,
+        body_area.y + 1,
+        body_area.width.saturating_sub(2),
+        body_area.height.saturating_sub(2),
+    );
+    let list_h = (inner.height * 45 / 100).max(3).min(inner.height.saturating_sub(3));
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(list_h), Constraint::Min(3)])
+        .split(inner);
+    (chunks[0], chunks[1])
 }
 
 /// Centered keybinding cheatsheet. Opened via `?` from any non-overlay
@@ -67,36 +86,43 @@ fn draw_help(f: &mut Frame, frame: Rect) {
             &[
                 ("?", "toggle this help"),
                 ("q / ctrl-c", "quit"),
-                ("[ / ]", "switch panel (agents ↔ body)"),
-                ("Tab / Shift-Tab", "cycle body tab"),
-                ("1 / 2 / 3", "jump to messages / tasks / tokens"),
+                ("[ / ]", "switch pane (list ↔ detail)"),
+                ("Tab / Shift-Tab", "cycle tab"),
+                ("1-5", "agents · messages · tasks · tokens · stream"),
                 ("f", "cycle task filter"),
             ],
         ),
         (
-            "agents",
+            "list · agents",
             &[
-                ("↑ ↓ / j k", "move cursor"),
+                ("↑ ↓ / j k", "move agent cursor"),
                 ("Enter", "open action menu"),
                 ("wheel", "scroll list"),
             ],
         ),
         (
-            "body · tasks",
+            "list · tasks",
             &[
                 ("↑ ↓ / j k", "move selected task"),
                 ("wheel", "scroll list"),
-                ("Esc", "back to agents"),
             ],
         ),
         (
-            "body · messages / tokens",
+            "list · messages / tokens",
             &[
                 ("↑ ↓ / j k", "scroll"),
                 ("PgUp / PgDn", "scroll by page"),
                 ("g / G", "head / tail"),
                 ("wheel", "scroll"),
-                ("Esc", "back to agents"),
+            ],
+        ),
+        (
+            "detail",
+            &[
+                ("↑ ↓ / j k", "scroll detail"),
+                ("PgUp / PgDn", "scroll by page"),
+                ("g", "top"),
+                ("Esc", "back to list"),
             ],
         ),
         (
@@ -162,21 +188,14 @@ fn draw_help(f: &mut Frame, frame: Rect) {
     f.render_widget(Paragraph::new(visible), inner);
 }
 
-/// Clamp the agents pane so it shows every row when possible but
-/// never starves the content pane below it. Overflow rows scroll
-/// within the pane; the reserved budget accounts for the body
-/// block's border (2) so it never collapses to a single row.
-fn compute_agents_height(app: &App, middle_h: u16) -> u16 {
-    let reserved = 3;
-    let desired = (app.agent_entries.len() as u16).saturating_add(3).max(5);
-    let cap = middle_h.saturating_sub(reserved).max(3);
-    desired.min(cap)
-}
-
 /// Context-menu style overlay: drops down from the selected agent
 /// row with a small indent so it reads as a popup on that row.
 /// Clamps into the frame so it never runs off the edge.
-fn draw_quick_actions(f: &mut Frame, frame: Rect, agents_area: Rect, app: &App) {
+///
+/// `list_area` is the list half of the body (already inside the
+/// outer block). The agents list reserves 1 row for its column
+/// header, then paints rows from `list_area.y + 1` down.
+fn draw_quick_actions(f: &mut Frame, frame: Rect, list_area: Rect, app: &App) {
     let workspace = app.selected_workspace().unwrap_or("");
     let action_count = app.quick_actions.actions.len() as u16;
     // Content rows: confirm mode is a two-line prompt, normal mode
@@ -195,19 +214,19 @@ fn draw_quick_actions(f: &mut Frame, frame: Rect, agents_area: Rect, app: &App) 
 
     // Reproduce the agents-panel layout so the popup appears *below*
     // the row under the cursor (even when the list has scrolled off
-    // the top). The panel block contributes a 1-row top border plus a
-    // 1-row column header before the list starts.
-    let list_area_height = agents_area.height.saturating_sub(3);
+    // the top). The list pane reserves 1 row for its column header
+    // before the agent rows start.
+    let rows_height = list_area.height.saturating_sub(1);
     let viewport = compute_viewport(
         app.agent_entries.len(),
         app.selected_entry,
-        list_area_height as usize,
+        rows_height as usize,
     );
-    let list_y = agents_area.y.saturating_add(2);
+    let rows_y = list_area.y.saturating_add(1);
     let rel = (app.selected_entry.saturating_sub(viewport.start)) as u16;
-    let selected_row = list_y.saturating_add(rel);
+    let selected_row = rows_y.saturating_add(rel);
 
-    let anchor_x = agents_area.x + 2;
+    let anchor_x = list_area.x + 2;
     let below = selected_row.saturating_add(1);
     let max_x = frame.right().saturating_sub(width);
     let max_y = frame.bottom().saturating_sub(height);
@@ -309,42 +328,35 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
-fn draw_agents(f: &mut Frame, area: Rect, app: &App) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(focus_border_style(app, Focus::Agents))
-        .title(" agents ");
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 {
+/// Agents list pane. Renders directly into the body's list area (no
+/// outer block — the tab strip's block owns that). Shows the column
+/// header + agent rows with a scrollbar when entries overflow.
+fn draw_agents_list(f: &mut Frame, area: Rect, app: &App) {
+    if area.width == 0 || area.height == 0 {
         return;
     }
-
     if app.agent_entries.is_empty() {
         let empty = Paragraph::new(
             "No active agents. Run `ax up` in a project directory with .ax/config.yaml.",
         )
         .wrap(Wrap { trim: true });
-        f.render_widget(empty, inner);
+        f.render_widget(empty, area);
         return;
     }
 
-    let cols = AgentColumns::fit(inner.width);
-    let header_area = Rect::new(inner.x, inner.y, inner.width, 1);
+    let cols = AgentColumns::fit(area.width);
+    let header_area = Rect::new(area.x, area.y, area.width, 1);
     draw_agents_header(f, header_area, &cols);
 
     let list_area = Rect::new(
-        inner.x,
-        inner.y + 1,
-        inner.width,
-        inner.height.saturating_sub(1),
+        area.x,
+        area.y + 1,
+        area.width,
+        area.height.saturating_sub(1),
     );
     if list_area.height == 0 {
         return;
     }
-    // Slice the entry list so the selection stays inside the visible
-    // rows. A scrollbar makes off-screen overflow visible instead of
-    // relying on inline hint markers alone.
     let viewport = compute_viewport(
         app.agent_entries.len(),
         app.selected_entry,
@@ -550,24 +562,94 @@ fn pad_or_trunc(s: &str, width: usize) -> String {
 }
 
 fn draw_body(f: &mut Frame, area: Rect, app: &mut App) {
-    // Outer body block. Tab strip sits on the top border so we don't
-    // burn a row on a standalone tab row. Sub-views render into the
-    // inner area without drawing their own outer border.
+    // Outer body block carries the tab strip in its top border so the
+    // layout doesn't burn a row on a standalone tab row. The inner
+    // area splits vertically into a list pane (top) and a detail
+    // pane (bottom); each tab owns a renderer for both halves.
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(focus_border_style(app, Focus::Body))
+        // Border stays neutral — focus is communicated inline on the
+        // list/detail pane titles so the outer frame doesn't strobe
+        // between cyan and default as the user toggles `[/]`.
+        .border_style(Style::default())
         .title(tabs_title(app));
+    f.render_widget(block, area);
+    let (list_area, detail_area) = split_body_inner(area);
+    if list_area.width == 0 || list_area.height == 0 {
+        return;
+    }
+
+    draw_list_pane(f, list_area, app);
+    // A subtle top border on the detail pane doubles as the divider
+    // between the two halves. Focus-cyan highlights whichever side
+    // currently owns the keyboard.
+    draw_detail_pane(f, detail_area, app);
+}
+
+/// Dispatch the list half of the body to the per-tab renderer.
+fn draw_list_pane(f: &mut Frame, area: Rect, app: &mut App) {
+    match app.stream {
+        StreamView::Agents => draw_agents_list(f, area, app),
+        StreamView::Messages => draw_messages(f, area, app),
+        StreamView::Tasks => draw_tasks_list_only(f, area, app),
+        StreamView::Tokens => draw_tokens(f, area, app),
+        StreamView::Stream => draw_stream(f, area, app),
+    }
+}
+
+/// Dispatch the detail half of the body to the per-tab renderer.
+/// Outer divider + focus coloring live here so every tab inherits
+/// the same visual frame without duplicating border logic.
+fn draw_detail_pane(f: &mut Frame, area: Rect, app: &mut App) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let title = detail_title(app);
+    let block = Block::default()
+        .borders(Borders::TOP)
+        .border_style(focus_border_style(app, Focus::Detail))
+        .title(title);
     let inner = block.inner(area);
     f.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
         return;
     }
     match app.stream {
-        StreamView::Messages => draw_messages(f, inner, app),
-        StreamView::Tasks => draw_tasks(f, inner, app),
-        StreamView::Tokens => draw_tokens(f, inner, app),
-        StreamView::Stream => draw_stream(f, inner, app),
+        StreamView::Agents => draw_agents_detail(f, inner, app),
+        StreamView::Messages => draw_messages_detail(f, inner, app),
+        StreamView::Tasks => draw_task_detail_only(f, inner, app),
+        StreamView::Tokens => draw_tokens_detail(f, inner, app),
+        StreamView::Stream => draw_stream_detail(f, inner, app),
     }
+}
+
+/// Compose the detail block's top-border title. Surfaces the selected
+/// row identifier so operators can see what the detail is describing
+/// even after scrolling the detail body.
+fn detail_title(app: &App) -> Line<'static> {
+    let focus_detail = app.focus == Focus::Detail;
+    let label = match app.stream {
+        StreamView::Agents => app
+            .selected_workspace()
+            .map(|w| format!(" detail · {w} "))
+            .unwrap_or_else(|| " detail ".to_owned()),
+        StreamView::Messages => " message detail ".to_owned(),
+        StreamView::Tasks => " task detail ".to_owned(),
+        StreamView::Tokens => " token detail ".to_owned(),
+        StreamView::Stream => app
+            .streamed_workspace
+            .as_deref()
+            .map(|w| format!(" stream · {w} "))
+            .unwrap_or_else(|| " stream detail ".to_owned()),
+    };
+    let style = if focus_detail {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().add_modifier(Modifier::DIM)
+    };
+    Line::from(Span::styled(label, style))
 }
 
 /// Build the body block's title as a tab strip. The line sits on the
@@ -577,7 +659,7 @@ fn draw_body(f: &mut Frame, area: Rect, app: &mut App) {
 /// highlighted tab turns cyan bold whenever Body is focused and
 /// falls back to white bold with dim siblings otherwise.
 fn tabs_title(app: &App) -> Line<'static> {
-    let focused = app.focus == Focus::Body;
+    let focused = app.focus == Focus::Detail;
     let mut spans: Vec<Span<'static>> = Vec::new();
     for (idx, view) in StreamView::ALL.iter().enumerate() {
         if idx > 0 {
@@ -948,10 +1030,10 @@ fn format_last_activity(now: chrono::DateTime<chrono::Utc>, ts: chrono::DateTime
     ts.format("%Y-%m-%d").to_string()
 }
 
-fn draw_tasks(f: &mut Frame, area: Rect, app: &App) {
-    // `area` is the body block's inner rect; `draw_body` already
-    // painted the outer border + tab-strip title. The list/detail
-    // split lives inside.
+/// Tasks list half of the body. The detail pane is rendered
+/// separately under `draw_detail_pane` so both halves benefit from
+/// the uniform list/detail layout used by every other tab.
+fn draw_tasks_list_only(f: &mut Frame, area: Rect, app: &App) {
     let filtered = app.filtered_tasks();
     if app.tasks.is_empty() {
         let para = Paragraph::new("  (no tasks yet)")
@@ -959,50 +1041,53 @@ fn draw_tasks(f: &mut Frame, area: Rect, app: &App) {
         f.render_widget(para, area);
         return;
     }
+    draw_tasks_list(f, area, app, &filtered);
+}
 
-    // Split horizontally: list ~45% / detail ~55%, clamped so neither
-    // pane gets uselessly narrow on tiny terminals.
-    let list_width = area
-        .width
-        .saturating_mul(45)
-        .saturating_div(100)
-        .clamp(36, area.width.saturating_sub(28));
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(list_width), Constraint::Min(24)])
-        .split(area);
-    draw_tasks_list(f, chunks[0], app, &filtered);
-    draw_task_detail(f, chunks[1], app, &filtered);
+/// Tasks detail half. Slots into the body's detail pane so long
+/// logs + activity history get the full width instead of the
+/// cramped column they had under the horizontal split.
+fn draw_task_detail_only(f: &mut Frame, area: Rect, app: &App) {
+    let filtered = app.filtered_tasks();
+    draw_task_detail(f, area, app, &filtered);
 }
 
 fn draw_tasks_list(f: &mut Frame, area: Rect, app: &App, filtered: &[ax_proto::types::Task]) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(focus_border_style(app, Focus::Body))
-        .title(format!(
-            " tasks {} {}/{} ",
-            app.task_filter.label(),
-            filtered.len().min(app.task_cursor.index.saturating_add(1)),
-            filtered.len(),
-        ));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 {
+    // No outer block — the body frame already draws the border + tab
+    // strip. A 3-line in-pane header carries the filter label, count,
+    // and column names so operators still have context while the
+    // cursor walks the rows.
+    if area.width == 0 || area.height == 0 {
         return;
     }
+    let header_height = area.height.min(3);
+    let header_area = Rect::new(area.x, area.y, area.width, header_height);
+    let body_area = Rect::new(
+        area.x,
+        area.y + header_height,
+        area.width,
+        area.height.saturating_sub(header_height),
+    );
+    let inner_width = area.width as usize;
 
     let summary = crate::tasks::summarize_tasks(&app.tasks);
-    let header_height = inner.height.min(2);
-    let header_area = Rect::new(inner.x, inner.y, inner.width, header_height);
-    let body_area = Rect::new(
-        inner.x,
-        inner.y + header_height,
-        inner.width,
-        inner.height.saturating_sub(header_height),
+    let title_line = format!(
+        "tasks · {} · {}/{}",
+        app.task_filter.label(),
+        filtered.len().min(app.task_cursor.index.saturating_add(1)),
+        filtered.len(),
     );
-    let inner_width = inner.width as usize;
-
     let header_lines = vec![
+        Line::from(Span::styled(
+            crate::tasks::truncate(&title_line, inner_width.max(1)),
+            Style::default()
+                .fg(if app.focus == Focus::List {
+                    Color::Cyan
+                } else {
+                    Color::White
+                })
+                .add_modifier(Modifier::BOLD),
+        )),
         Line::from(Span::styled(
             crate::tasks::truncate(&format_task_summary_compact(&summary), inner_width.max(1)),
             Style::default().add_modifier(Modifier::BOLD),
@@ -1056,24 +1141,360 @@ fn draw_tasks_list(f: &mut Frame, area: Rect, app: &App, filtered: &[ax_proto::t
 }
 
 fn draw_task_detail(f: &mut Frame, area: Rect, app: &App, filtered: &[ax_proto::types::Task]) {
-    let inner_width = area.width.saturating_sub(2) as usize;
-    let inner_height = area.height.saturating_sub(2) as usize;
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(focus_border_style(app, Focus::Body))
-        .title(" detail ");
+    // Body detail pane already provides the surrounding block —
+    // render plain content here.
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let inner_width = area.width as usize;
+    let inner_height = area.height as usize;
 
     let Some(task) = filtered.get(app.task_cursor.index) else {
         let para = Paragraph::new("  (no task selected)")
-            .style(Style::default().add_modifier(Modifier::DIM))
-            .block(block);
+            .style(Style::default().add_modifier(Modifier::DIM));
         f.render_widget(para, area);
         return;
     };
 
-    let lines = build_detail_lines(task, &app.messages, inner_width, inner_height);
-    let para = Paragraph::new(lines).block(block);
-    f.render_widget(para, area);
+    // `build_detail_lines` over-produces; map the shared `detail_scroll`
+    // onto the line window so ↑/↓ walk long logs without needing a
+    // dedicated cursor.
+    let all_lines = build_detail_lines(task, &app.messages, inner_width, usize::MAX);
+    let total = all_lines.len();
+    let visible = inner_height.min(total);
+    let max_scroll = total.saturating_sub(visible);
+    let scroll = app.detail_scroll.index.min(max_scroll);
+    let end = (scroll + visible).min(total);
+    let window: Vec<Line> = all_lines.into_iter().skip(scroll).take(end - scroll).collect();
+    f.render_widget(Paragraph::new(window), area);
+}
+
+/// Agent detail pane. Reads off `selected_workspace` and assembles a
+/// compact dashboard: name/status, reconcile notes, live token
+/// readings, and the tail of the tmux capture so operators don't
+/// have to flip tabs to peek at what the agent is doing.
+fn draw_agents_detail(f: &mut Frame, area: Rect, app: &App) {
+    let Some(workspace) = app.selected_workspace().map(ToOwned::to_owned) else {
+        let para = Paragraph::new("  (select an agent with ↑/↓ to see its detail)")
+            .style(Style::default().add_modifier(Modifier::DIM));
+        f.render_widget(para, area);
+        return;
+    };
+    let info = app.workspace_infos.get(&workspace);
+    let trend = app.usage_trends.get(&workspace);
+    let capture = app
+        .captures
+        .entries
+        .get(&workspace)
+        .map_or("", |e| e.content.as_str());
+    let session = app
+        .sessions
+        .iter()
+        .find(|s| s.workspace == workspace);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("workspace  "),
+            Style::default().add_modifier(Modifier::DIM),
+        ),
+        Span::styled(
+            workspace.clone(),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    let status_label = info
+        .map(|w| agent_status_str(&w.status).to_owned())
+        .unwrap_or_else(|| "offline".to_owned());
+    lines.push(Line::from(vec![
+        Span::styled(
+            "status     ".to_owned(),
+            Style::default().add_modifier(Modifier::DIM),
+        ),
+        Span::raw(status_label),
+    ]));
+    if let Some(info) = info {
+        if !info.status_text.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    "note       ".to_owned(),
+                    Style::default().add_modifier(Modifier::DIM),
+                ),
+                Span::raw(info.status_text.clone()),
+            ]));
+        }
+    }
+    if let Some(s) = session {
+        lines.push(Line::from(vec![
+            Span::styled(
+                "tmux       ".to_owned(),
+                Style::default().add_modifier(Modifier::DIM),
+            ),
+            Span::raw(format!(
+                "{} · {} window{}",
+                s.name,
+                s.windows,
+                if s.windows == 1 { "" } else { "s" }
+            )),
+        ]));
+    }
+    if let Some(t) = trend.filter(|t| t.available) {
+        let total_all = (t.total.cache_read + t.total.cache_creation + t.total.input) as f64;
+        lines.push(Line::from(vec![
+            Span::styled(
+                "tokens     ".to_owned(),
+                Style::default().add_modifier(Modifier::DIM),
+            ),
+            Span::raw(format!(
+                "↑{} · ↓{} · Σ{}",
+                crate::tokens::format_token_count(t.total.input as f64),
+                crate::tokens::format_token_count(t.total.output as f64),
+                crate::tokens::format_token_count(total_all),
+            )),
+        ]));
+    }
+    if !capture.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "recent tmux:".to_owned(),
+            Style::default().add_modifier(Modifier::DIM),
+        )));
+        let rows_budget = area.height.saturating_sub(lines.len() as u16).saturating_sub(1) as usize;
+        if rows_budget > 0 {
+            for line in
+                crate::captures::recent_wrapped_lines(capture, rows_budget, area.width as usize)
+            {
+                lines.push(Line::from(Span::raw(line)));
+            }
+        }
+    }
+
+    apply_detail_scroll(f, area, app, lines);
+}
+
+/// Messages detail. Shows the full content of the message at the
+/// current scroll tail so operators can read wrapped long messages
+/// without leaving the tab. When no messages exist, renders a dim
+/// placeholder so the pane isn't suspiciously empty.
+fn draw_messages_detail(f: &mut Frame, area: Rect, app: &App) {
+    if app.messages.is_empty() {
+        let para = Paragraph::new("  (no messages yet)")
+            .style(Style::default().add_modifier(Modifier::DIM));
+        f.render_widget(para, area);
+        return;
+    }
+    // `messages_cursor.index` is "entries from tail"; resolve to an
+    // absolute index so the detail tracks the list cursor as it walks
+    // back into history.
+    let scroll = app.messages_cursor.index.min(app.messages.len().saturating_sub(1));
+    let idx = app.messages.len() - 1 - scroll;
+    let entry = &app.messages[idx];
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled(
+            "time   ".to_owned(),
+            Style::default().add_modifier(Modifier::DIM),
+        ),
+        Span::raw(entry.timestamp.format("%Y-%m-%d %H:%M:%S").to_string()),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(
+            "from   ".to_owned(),
+            Style::default().add_modifier(Modifier::DIM),
+        ),
+        Span::raw(entry.from.clone()),
+        Span::raw("  →  "),
+        Span::raw(entry.to.clone()),
+    ]));
+    if !entry.task_id.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled(
+                "task   ".to_owned(),
+                Style::default().add_modifier(Modifier::DIM),
+            ),
+            Span::raw(entry.task_id.clone()),
+        ]));
+    }
+    lines.push(Line::from(""));
+    for raw in entry.content.lines() {
+        lines.push(Line::from(Span::raw(raw.to_owned())));
+    }
+
+    apply_detail_scroll(f, area, app, lines);
+}
+
+/// Tokens detail. Resolves the workspace at the current scroll
+/// position and shows the token aggregate plus bucket range. Simple
+/// by design — richer per-agent/per-model breakdowns can land once
+/// the underlying trend payload surfaces them.
+fn draw_tokens_detail(f: &mut Frame, area: Rect, app: &App) {
+    let mut rows: Vec<&ax_proto::usage::WorkspaceTrend> = app
+        .usage_trends
+        .values()
+        .filter(|t| t.available && t.total.total() > 0)
+        .collect();
+    if rows.is_empty() {
+        let para = Paragraph::new("  (no token activity yet)")
+            .style(Style::default().add_modifier(Modifier::DIM));
+        f.render_widget(para, area);
+        return;
+    }
+    rows.sort_by(|a, b| a.workspace.cmp(&b.workspace));
+    let idx = app.tokens_cursor.index.min(rows.len().saturating_sub(1));
+    let t = rows[idx];
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled(
+            "workspace  ".to_owned(),
+            Style::default().add_modifier(Modifier::DIM),
+        ),
+        Span::styled(
+            t.workspace.clone(),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    if !t.latest_model.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled(
+                "model      ".to_owned(),
+                Style::default().add_modifier(Modifier::DIM),
+            ),
+            Span::raw(short_model(&t.latest_model)),
+        ]));
+    }
+    lines.push(Line::from(vec![
+        Span::styled(
+            "input      ".to_owned(),
+            Style::default().add_modifier(Modifier::DIM),
+        ),
+        Span::raw(crate::tokens::format_token_count(t.total.input as f64)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(
+            "output     ".to_owned(),
+            Style::default().add_modifier(Modifier::DIM),
+        ),
+        Span::raw(crate::tokens::format_token_count(t.total.output as f64)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(
+            "cache read ".to_owned(),
+            Style::default().add_modifier(Modifier::DIM),
+        ),
+        Span::raw(crate::tokens::format_token_count(t.total.cache_read as f64)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(
+            "cache creat".to_owned(),
+            Style::default().add_modifier(Modifier::DIM),
+        ),
+        Span::raw(crate::tokens::format_token_count(t.total.cache_creation as f64)),
+    ]));
+    if let Some(last) = t.last_activity {
+        lines.push(Line::from(vec![
+            Span::styled(
+                "last active".to_owned(),
+                Style::default().add_modifier(Modifier::DIM),
+            ),
+            Span::raw(format_last_activity(chrono::Utc::now(), last)),
+        ]));
+    }
+    lines.push(Line::from(vec![
+        Span::styled(
+            "buckets    ".to_owned(),
+            Style::default().add_modifier(Modifier::DIM),
+        ),
+        Span::raw(format!(
+            "{} × {}m window",
+            t.buckets.len(),
+            t.bucket_minutes
+        )),
+    ]));
+
+    apply_detail_scroll(f, area, app, lines);
+}
+
+/// Stream detail. The list half already shows the live capture, so
+/// this pane focuses on metadata: workspace name, session, status.
+fn draw_stream_detail(f: &mut Frame, area: Rect, app: &App) {
+    let Some(workspace) = app.streamed_workspace.clone() else {
+        let para = Paragraph::new(
+            "  (no workspace streaming yet — open the agents tab, press Enter → Stream tmux)",
+        )
+        .style(Style::default().add_modifier(Modifier::DIM));
+        f.render_widget(para, area);
+        return;
+    };
+    let info = app.workspace_infos.get(&workspace);
+    let session = app
+        .sessions
+        .iter()
+        .find(|s| s.workspace == workspace);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled(
+            "mirroring  ".to_owned(),
+            Style::default().add_modifier(Modifier::DIM),
+        ),
+        Span::styled(
+            workspace.clone(),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    if let Some(info) = info {
+        lines.push(Line::from(vec![
+            Span::styled(
+                "status     ".to_owned(),
+                Style::default().add_modifier(Modifier::DIM),
+            ),
+            Span::raw(agent_status_str(&info.status).to_owned()),
+        ]));
+        if !info.status_text.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    "note       ".to_owned(),
+                    Style::default().add_modifier(Modifier::DIM),
+                ),
+                Span::raw(info.status_text.clone()),
+            ]));
+        }
+    }
+    if let Some(s) = session {
+        lines.push(Line::from(vec![
+            Span::styled(
+                "session    ".to_owned(),
+                Style::default().add_modifier(Modifier::DIM),
+            ),
+            Span::raw(format!(
+                "{} · {} window{}",
+                s.name,
+                s.windows,
+                if s.windows == 1 { "" } else { "s" }
+            )),
+        ]));
+    }
+
+    apply_detail_scroll(f, area, app, lines);
+}
+
+/// Windowed render for detail panes that over-produce lines. Maps
+/// `app.detail_scroll.index` onto the visible slice and clamps the
+/// ceiling so arrow keys can over-shoot without scrolling past the
+/// last row.
+fn apply_detail_scroll(f: &mut Frame, area: Rect, app: &App, lines: Vec<Line<'static>>) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let total = lines.len();
+    let visible = (area.height as usize).min(total);
+    let max_scroll = total.saturating_sub(visible);
+    let scroll = app.detail_scroll.index.min(max_scroll);
+    let end = (scroll + visible).min(total);
+    let window: Vec<Line<'static>> = lines.into_iter().skip(scroll).take(end - scroll).collect();
+    f.render_widget(Paragraph::new(window), area);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1384,21 +1805,23 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(footer, area);
 }
 
-/// Pick a context-aware hint line based on the focused panel so the
-/// footer shows the keys that actually do something right now. Tab
-/// cycling lives on global keys (`Tab`/`1-4`) so it's pulled out of
-/// the per-panel slot.
+/// Pick a context-aware hint line based on the focused pane so the
+/// footer shows the keys that actually do something right now. The
+/// list half gets view-specific hints; the detail half gets a
+/// uniform scroll/esc line since every detail uses the shared
+/// `detail_scroll` cursor.
 fn focus_footer_hint(app: &App) -> String {
-    let base = "[/] panel · Tab/1-4 view · f filter · ? help · q quit";
+    let base = "[/] pane · Tab/1-5 view · f filter · ? help · q quit";
     let scoped = match app.focus {
-        Focus::Agents => "↑↓/jk agent · enter actions",
-        Focus::Body => match app.stream {
-            StreamView::Tasks => "↑↓/jk task · esc agents",
+        Focus::List => match app.stream {
+            StreamView::Agents => "↑↓/jk agent · enter actions",
+            StreamView::Tasks => "↑↓/jk task",
             StreamView::Messages | StreamView::Tokens => {
-                "↑↓/jk scroll · g/G head/tail · esc agents"
+                "↑↓/jk scroll · g/G head/tail"
             }
-            StreamView::Stream => "live tmux mirror · esc agents",
+            StreamView::Stream => "live tmux mirror",
         },
+        Focus::Detail => "↑↓/jk scroll · g reset · esc list",
     };
     format!("[{focus}] {scoped} · {base}", focus = app.focus.label())
 }

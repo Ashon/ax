@@ -11,9 +11,15 @@ use ax_daemon::{expand_socket_path, HistoryEntry};
 
 const HISTORY_FILE_NAME: &str = "message_history.jsonl";
 
-/// Which stream the body pane is showing.
+/// Which stream the body pane is showing. Each variant owns both a
+/// list renderer (top half of the body) and a detail renderer
+/// (bottom half) so every tab follows the same master/detail shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StreamView {
+    /// Workspace fleet. List = agent rows from the config tree +
+    /// live sessions; detail = the selected agent's reconcile /
+    /// tmux tail / activity summary.
+    Agents,
     Messages,
     Tasks,
     Tokens,
@@ -27,6 +33,7 @@ pub(crate) enum StreamView {
 impl StreamView {
     pub(crate) fn tab_label(self) -> &'static str {
         match self {
+            Self::Agents => "agents",
             Self::Messages => "messages",
             Self::Tasks => "tasks",
             Self::Tokens => "tokens",
@@ -34,8 +41,13 @@ impl StreamView {
         }
     }
 
-    pub(crate) const ALL: [Self; 4] =
-        [Self::Messages, Self::Tasks, Self::Tokens, Self::Stream];
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Agents,
+        Self::Messages,
+        Self::Tasks,
+        Self::Tokens,
+        Self::Stream,
+    ];
 }
 
 /// Resolve the absolute path to the daemon's history file given
@@ -181,6 +193,7 @@ mod tests {
         assert_eq!(
             StreamView::ALL,
             [
+                StreamView::Agents,
                 StreamView::Messages,
                 StreamView::Tasks,
                 StreamView::Tokens,
