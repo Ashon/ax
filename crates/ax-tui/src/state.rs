@@ -24,13 +24,13 @@ pub(crate) struct PendingLifecycle {
 use crate::agents::AgentEntry;
 use crate::stream::StreamView;
 
-/// Which full-pane view is active. Currently only `Grid` is
-/// implemented; `Stream` follows in the next slice.
+/// Which full-pane view is active. Historical — the stream variant
+/// was collapsed into a regular tab (`StreamView::Stream`) so this
+/// enum only retains `Grid` today. Kept as a hook in case a true
+/// full-screen mode (e.g. zoom) lands later.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ViewMode {
     Grid,
-    #[allow(dead_code)]
-    Stream,
 }
 
 /// Which panel the keyboard is scoped to. `[`/`]` toggles between

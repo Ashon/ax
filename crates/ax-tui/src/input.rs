@@ -52,19 +52,10 @@ pub(crate) fn handle_key(app: &mut App, event: KeyEvent) {
         return;
     }
 
-    // In streaming mode, `esc` exits back to the grid/stream layout
-    // first. All other keys still steer the agents panel + stream
-    // view so you can e.g. swap to the tasks table while a capture is
-    // open.
-    if app.streamed_workspace.is_some() && matches!(event.code, KeyCode::Esc) {
-        app.streamed_workspace = None;
-        return;
-    }
-
     // Global bindings — active regardless of which panel is focused.
     // Arrow keys are deliberately *not* global: each panel owns them
     // so a stray ↑/↓ can't leak across scopes. Tab switching moves to
-    // its own dedicated keys (Tab/Shift-Tab + 1/2/3) so operators can
+    // its own dedicated keys (Tab/Shift-Tab + 1-4) so operators can
     // flip views without losing their place in Agents.
     match event.code {
         KeyCode::Char('[') | KeyCode::Char(']') => {
@@ -79,7 +70,7 @@ pub(crate) fn handle_key(app: &mut App, event: KeyEvent) {
             app.step_stream(-1);
             return;
         }
-        KeyCode::Char(c @ ('1' | '2' | '3')) => {
+        KeyCode::Char(c @ ('1' | '2' | '3' | '4')) => {
             let idx = (c as u8 - b'1') as usize;
             app.select_stream(idx);
             // Focus intentionally preserved — peeking at a tab from
@@ -147,6 +138,11 @@ fn handle_body_key(app: &mut App, event: KeyEvent) {
             KeyCode::End | KeyCode::Char('G') => app.tokens_to_tail(),
             _ => {}
         },
+        // Stream is a read-only tmux mirror — nav keys no-op. The
+        // underlying capture refreshes every tick so the tail scrolls
+        // automatically. Follow-up slice can add `g`/`G` style scroll
+        // once the capture buffer carries a cursor.
+        StreamView::Stream => {}
     }
 }
 
@@ -171,6 +167,8 @@ pub(crate) fn handle_scroll(app: &mut App, direction: i32) {
             StreamView::Tasks => app.move_task_selection(direction),
             StreamView::Messages => app.scroll_messages(-direction),
             StreamView::Tokens => app.scroll_tokens(direction),
+            // Stream is a live tail — no manual scroll surface yet.
+            StreamView::Stream => {}
         },
     }
 }

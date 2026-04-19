@@ -33,8 +33,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
 
     draw_header(f, chunks[0], app);
 
-    let streaming = app.streamed_workspace.is_some();
-    let agents_h = compute_agents_height(app, chunks[1].height, streaming);
+    let agents_h = compute_agents_height(app, chunks[1].height);
     // No standalone tab row — the body block embeds the tab strip
     // inside its top border (see `tabs_title`), so the middle region
     // splits cleanly into agents + body.
@@ -167,7 +166,7 @@ fn draw_help(f: &mut Frame, frame: Rect) {
 /// never starves the content pane below it. Overflow rows scroll
 /// within the pane; the reserved budget accounts for the body
 /// block's border (2) so it never collapses to a single row.
-fn compute_agents_height(app: &App, middle_h: u16, _streaming: bool) -> u16 {
+fn compute_agents_height(app: &App, middle_h: u16) -> u16 {
     let reserved = 3;
     let desired = (app.agent_entries.len() as u16).saturating_add(3).max(5);
     let cap = middle_h.saturating_sub(reserved).max(3);
@@ -551,10 +550,6 @@ fn pad_or_trunc(s: &str, width: usize) -> String {
 }
 
 fn draw_body(f: &mut Frame, area: Rect, app: &mut App) {
-    if let Some(workspace) = app.streamed_workspace.clone() {
-        draw_stream_single(f, area, app, &workspace);
-        return;
-    }
     // Outer body block. Tab strip sits on the top border so we don't
     // burn a row on a standalone tab row. Sub-views render into the
     // inner area without drawing their own outer border.
@@ -571,6 +566,7 @@ fn draw_body(f: &mut Frame, area: Rect, app: &mut App) {
         StreamView::Messages => draw_messages(f, inner, app),
         StreamView::Tasks => draw_tasks(f, inner, app),
         StreamView::Tokens => draw_tokens(f, inner, app),
+        StreamView::Stream => draw_stream(f, inner, app),
     }
 }
 
@@ -610,40 +606,58 @@ fn tabs_title(app: &App) -> Line<'static> {
     Line::from(spans)
 }
 
-fn draw_stream_single(f: &mut Frame, area: Rect, app: &mut App, workspace: &str) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(format!(" {workspace} · tmux stream · esc to exit "));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 {
+/// Render the live tmux capture of `app.streamed_workspace` into the
+/// body's inner rect. The outer block + tab strip are already painted
+/// by `draw_body`, so this routine only draws the capture lines (or a
+/// placeholder when no workspace has been picked yet).
+fn draw_stream(f: &mut Frame, area: Rect, app: &mut App) {
+    let Some(workspace) = app.streamed_workspace.clone() else {
+        let placeholder = Paragraph::new(
+            "  (no workspace streaming — focus an agent and hit enter → Stream tmux)",
+        )
+        .style(Style::default().add_modifier(Modifier::DIM));
+        f.render_widget(placeholder, area);
+        return;
+    };
+    if area.width == 0 || area.height == 0 {
         return;
     }
 
     let capture = app
         .captures
         .entries
-        .get(workspace)
+        .get(&workspace)
         .map_or("", |entry| entry.content.as_str());
     if capture.is_empty() {
-        let loading_area = centered_loading_area(inner);
+        let loading_area = centered_loading_area(area);
         let throbber = status_throbber(
-            "waiting for tmux capture…".to_owned(),
+            format!("waiting for tmux capture of {workspace}…"),
             Style::default().add_modifier(Modifier::DIM),
         );
         f.render_stateful_widget(throbber, loading_area, &mut app.throbber_state);
         return;
     }
 
-    let rows = inner.height as usize;
-    let width = inner.width as usize;
+    // Give the header a single-row caption so the streaming target
+    // stays identifiable even though the tab strip only says
+    // "stream". Mirrors the old hijack-mode title.
+    let caption = Paragraph::new(format!("  {workspace} · tmux mirror"))
+        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+    let caption_area = Rect::new(area.x, area.y, area.width, 1);
+    f.render_widget(caption, caption_area);
+    let body_area = Rect::new(area.x, area.y + 1, area.width, area.height.saturating_sub(1));
+    if body_area.height == 0 {
+        return;
+    }
+
+    let rows = body_area.height as usize;
+    let width = body_area.width as usize;
     let lines: Vec<Line> = crate::captures::recent_wrapped_lines(capture, rows, width)
         .into_iter()
         .map(|line| Line::from(Span::raw(line)))
         .collect();
     let para = Paragraph::new(lines);
-    f.render_widget(para, inner);
+    f.render_widget(para, body_area);
 }
 
 /// Pick the current frame of the shared braille spinner based on the
@@ -1363,11 +1377,6 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
             "↑↓ action · enter run · esc close · q quit".to_owned(),
             Style::default().add_modifier(Modifier::DIM),
         )
-    } else if app.streamed_workspace.is_some() {
-        (
-            "esc exit stream · q quit".to_owned(),
-            Style::default().add_modifier(Modifier::DIM),
-        )
     } else {
         (focus_footer_hint(app), Style::default().add_modifier(Modifier::DIM))
     };
@@ -1377,10 +1386,10 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
 
 /// Pick a context-aware hint line based on the focused panel so the
 /// footer shows the keys that actually do something right now. Tab
-/// cycling lives on global keys (`Tab`/`1-3`) so it's pulled out of
+/// cycling lives on global keys (`Tab`/`1-4`) so it's pulled out of
 /// the per-panel slot.
 fn focus_footer_hint(app: &App) -> String {
-    let base = "[/] panel · Tab/1-3 view · f filter · ? help · q quit";
+    let base = "[/] panel · Tab/1-4 view · f filter · ? help · q quit";
     let scoped = match app.focus {
         Focus::Agents => "↑↓/jk agent · enter actions",
         Focus::Body => match app.stream {
@@ -1388,6 +1397,7 @@ fn focus_footer_hint(app: &App) -> String {
             StreamView::Messages | StreamView::Tokens => {
                 "↑↓/jk scroll · g/G head/tail · esc agents"
             }
+            StreamView::Stream => "live tmux mirror · esc agents",
         },
     };
     format!("[{focus}] {scoped} · {base}", focus = app.focus.label())

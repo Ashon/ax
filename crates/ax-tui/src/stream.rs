@@ -17,6 +17,11 @@ pub(crate) enum StreamView {
     Messages,
     Tasks,
     Tokens,
+    /// Live tmux capture of `App::streamed_workspace` (set via the
+    /// agents quick-action). Kept in the regular tab strip so
+    /// operators can flip between stream and messages without
+    /// leaving either mode.
+    Stream,
 }
 
 impl StreamView {
@@ -25,10 +30,12 @@ impl StreamView {
             Self::Messages => "messages",
             Self::Tasks => "tasks",
             Self::Tokens => "tokens",
+            Self::Stream => "stream",
         }
     }
 
-    pub(crate) const ALL: [Self; 3] = [Self::Messages, Self::Tasks, Self::Tokens];
+    pub(crate) const ALL: [Self; 4] =
+        [Self::Messages, Self::Tasks, Self::Tokens, Self::Stream];
 }
 
 /// Resolve the absolute path to the daemon's history file given
@@ -170,13 +177,14 @@ mod tests {
     }
 
     #[test]
-    fn stream_view_all_preserves_messages_tasks_tokens_order() {
+    fn stream_view_all_preserves_display_order() {
         assert_eq!(
             StreamView::ALL,
             [
                 StreamView::Messages,
                 StreamView::Tasks,
-                StreamView::Tokens
+                StreamView::Tokens,
+                StreamView::Stream,
             ]
         );
     }

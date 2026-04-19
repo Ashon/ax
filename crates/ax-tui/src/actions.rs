@@ -123,7 +123,12 @@ pub(crate) fn run_selected(state: &QuickActionState, target: &str) -> Vec<Action
     }
     match action.id {
         QuickActionId::StreamTmux => {
+            // Switch to the stream tab first so the caller sees the
+            // live mirror the moment the overlay closes. Without the
+            // view change the user would remain on whatever tab was
+            // active and wonder if the action did anything.
             vec![
+                ActionOutcome::ChangeStream(StreamView::Stream),
                 ActionOutcome::StartStreaming(target.to_owned()),
                 ActionOutcome::Close,
             ]
@@ -240,8 +245,12 @@ pub(crate) fn apply_outcomes(app: &mut App, outcomes: Vec<ActionOutcome>) {
                 app.quick_notice = Some(Notice::new(text, error));
             }
             ActionOutcome::ChangeStream(view) => {
+                // `streamed_workspace` used to be cleared here because
+                // the stream view was a full-pane hijack. It's a
+                // regular tab now, so the mirror target persists
+                // across tab switches — re-open `stream` and the
+                // capture resumes.
                 app.stream = view;
-                app.streamed_workspace = None;
             }
             ActionOutcome::StartStreaming(workspace) => {
                 app.streamed_workspace = Some(workspace);
@@ -287,6 +296,37 @@ mod tests {
                 ActionOutcome::ChangeStream(StreamView::Messages),
                 ActionOutcome::Close
             ]
+        );
+    }
+
+    #[test]
+    fn run_selected_for_stream_flips_tab_and_sets_mirror_target() {
+        let state = open_state(QuickActionId::StreamTmux);
+        let outcomes = run_selected(&state, "alpha");
+        assert_eq!(
+            outcomes,
+            vec![
+                ActionOutcome::ChangeStream(StreamView::Stream),
+                ActionOutcome::StartStreaming("alpha".into()),
+                ActionOutcome::Close,
+            ],
+            "stream action flips to the Stream tab first so the live \
+             mirror appears immediately when the overlay closes",
+        );
+    }
+
+    #[test]
+    fn change_stream_preserves_mirror_target_so_users_can_tab_away() {
+        let mut app = crate::state::App::new();
+        app.streamed_workspace = Some("alpha".into());
+        app.stream = StreamView::Stream;
+        apply_outcomes(&mut app, vec![ActionOutcome::ChangeStream(StreamView::Tasks)]);
+        assert_eq!(app.stream, StreamView::Tasks);
+        assert_eq!(
+            app.streamed_workspace.as_deref(),
+            Some("alpha"),
+            "tab switch must not clear the stream target — otherwise \
+             returning to the Stream tab loses the active mirror",
         );
     }
 
