@@ -26,7 +26,13 @@ fn validation_err(err: TreeError) -> ValidationError {
 }
 
 #[test]
-fn duplicate_workspace_dir_fails() {
+fn duplicate_workspace_dir_is_allowed_for_role_axis_overlap() {
+    // Role-axis projects commonly declare multiple workspaces over
+    // the same subtree — e.g. docs/qa/implementation all operating
+    // on the repo root. The validator must allow this: downstream
+    // paths (tmux session, codex home, dispatch) are keyed on
+    // workspace name, and telemetry attribution by cwd degrades
+    // gracefully when a dir is shared.
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     write(
@@ -42,11 +48,10 @@ workspaces:
     runtime: claude
 ",
     );
-    let err = validation_err(Config::load(default_config_path(root)).unwrap_err());
-    assert!(
-        matches!(err, ValidationError::DuplicateWorkspaceDir { .. }),
-        "got {err:?}"
-    );
+    let cfg = Config::load(default_config_path(root)).expect("duplicate dirs must load");
+    assert_eq!(cfg.workspaces.len(), 2);
+    assert!(cfg.workspaces.contains_key("a"));
+    assert!(cfg.workspaces.contains_key("b"));
 }
 
 #[test]

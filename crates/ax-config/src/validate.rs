@@ -1,9 +1,17 @@
 //! Structural validation for the ax config tree.
 //!
 //! `validate_tree` does a pre-pass over the entire project tree so
-//! duplicate child prefixes, duplicate workspace directories, and
-//! reserved-name collisions with orchestrator sessions fail loudly
-//! before `Config::load` tries to merge anything.
+//! duplicate child prefixes and reserved-name collisions with
+//! orchestrator sessions fail loudly before `Config::load` tries to
+//! merge anything.
+//!
+//! Workspace directory overlap is intentionally **not** validated:
+//! role-axis projects commonly have a docs/qa/implementation trio
+//! all rooted at `.` or at a shared subtree. Downstream code —
+//! tmux session names, codex-home paths, dispatch — is keyed on
+//! workspace name, not dir, so overlap is safe. Telemetry
+//! attribution by cwd already degrades gracefully when multiple
+//! workspaces share a dir (see `assign_series` in ax-usage).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -27,18 +35,6 @@ pub enum ValidationError {
         second_name: String,
         second_path: String,
         second_dir: String,
-    },
-    #[error(
-        "duplicate ax workspace dir {dir:?}: workspace {first_name:?} in {first_path} (merged {first_merged:?}) conflicts with workspace {second_name:?} in {second_path} (merged {second_merged:?})"
-    )]
-    DuplicateWorkspaceDir {
-        dir: String,
-        first_name: String,
-        first_path: String,
-        first_merged: String,
-        second_name: String,
-        second_path: String,
-        second_merged: String,
     },
     #[error(
         "reserved ax session name collision {merged:?}: workspace {name:?} in {path} conflicts with {existing}"
@@ -157,19 +153,8 @@ fn validate_recursive(
                 },
             )));
         }
-        if let Some(existing) = state.workspace_dirs.get(&ws.dir) {
-            return Err(TreeError::Validation(Box::new(
-                ValidationError::DuplicateWorkspaceDir {
-                    dir: ws.dir.clone(),
-                    first_name: existing.name.clone(),
-                    first_path: existing.config_path.display().to_string(),
-                    first_merged: existing.merged_name.clone(),
-                    second_name: name.clone(),
-                    second_path: abs.display().to_string(),
-                    second_merged: merged_name.clone(),
-                },
-            )));
-        }
+        // Workspace dir overlap is allowed — role-axis projects
+        // often co-own `.` or a shared subtree. See module docs.
         state
             .workspaces
             .entry(merged_name.clone())
@@ -178,15 +163,7 @@ fn validate_recursive(
                 name: name.clone(),
                 merged_name: merged_name.clone(),
             });
-        state.workspace_dirs.insert(
-            ws.dir.clone(),
-            WorkspaceDirClaim {
-                config_path: abs.clone(),
-                name: name.clone(),
-                merged_name: merged_name.clone(),
-                dir: ws.dir.clone(),
-            },
-        );
+        let _ = ws;
     }
 
     let mut child_names: Vec<_> = cfg.children.keys().cloned().collect();
@@ -278,7 +255,6 @@ fn validate_recursive(
 #[derive(Debug, Default)]
 struct ValidationState {
     child_prefixes: BTreeMap<String, ChildPrefixClaim>,
-    workspace_dirs: BTreeMap<String, WorkspaceDirClaim>,
     workspaces: BTreeMap<String, WorkspaceClaim>,
     orchestrators: BTreeMap<String, OrchestratorClaim>,
     /// Root-config caps; zero disables the corresponding check.
@@ -301,15 +277,6 @@ struct WorkspaceClaim {
     name: String,
     #[allow(dead_code)]
     merged_name: String,
-}
-
-#[derive(Debug, Clone)]
-struct WorkspaceDirClaim {
-    config_path: PathBuf,
-    name: String,
-    merged_name: String,
-    #[allow(dead_code)]
-    dir: String,
 }
 
 #[derive(Debug, Clone)]
