@@ -25,9 +25,10 @@
 - 현재 기본 recall 범위: `global`, `project:ax`, `workspace:ax.orchestrator`
 
 현재 관련 durable memory:
-- [decision] `project:ax` Adopt seam-first Go/Rust routing for ax migration: Adopt immediately for new ax work: keep the current lineup (`ax.cli`, `ax.config`, `ax.daemon`, `ax.mcp`, `ax.runtime`, `ax.workspace`, `ax.usage`, `ax.release`) and route by subsystem seam across both Go and Rust. Use one owner when Go and Rust files sit on the same seam. Every migration task must state whether it is parity, cutover, or cleanup and must name the current source-of-truth path. Default `rs/crates/ax-proto` and `internal/types` to `ax.daemon` unless MCP schema/tool UX is the primary surface. Completion evidence must mention both Go and Rust modules touched plus explicit cutover impact. This policy was explicitly adopted by the root orchestrator on 2026-04-18 Asia/Seoul and should govern future dispatches until superseded. (tags: adopted-policy, routing, rust-migration)
-- [decision] `project:ax` Migration-aware ax team routing: As of 2026-04-18, the migration-aware ax team design keeps the current workspace lineup (`ax.cli`, `ax.config`, `ax.daemon`, `ax.mcp`, `ax.runtime`, `ax.workspace`, `ax.usage`, `ax.release`) and resets ownership/routing by subsystem seam across both Go and Rust rather than by language or package tree alone. Owner expansion: `ax.cli` owns Go CLI/root plus future shipped Rust binary/docs; `ax.config` owns `internal/config` + `rs/crates/ax-config`; `ax.daemon` owns `internal/daemon`, `internal/types`, `rs/crates/ax-daemon`, `rs/crates/ax-proto`; `ax.mcp` owns `internal/mcpserver` + future Rust MCP stdio/client/tool surface; `ax.runtime` owns `internal/agent`, `cmd/run_agent.go`, `cmd/orchestrator_cli.go`, `rs/crates/ax-agent`; `ax.workspace` owns `internal/workspace`, `internal/tmux`, generated orchestrator artifacts, `rs/crates/ax-workspace`, `rs/crates/ax-tmux`; `ax.usage` owns `internal/usage`, usage docs, `rs/crates/ax-usage`; `ax.release` owns Makefile/Cargo/GoReleaser/GitHub Actions/release packaging. Routing rules: route by subsystem seam, keep one owner when Go and Rust files are on the same seam, require tasks to state current source-of-truth and whether the work is parity, cutover, or cleanup, default `rs/crates/ax-proto`/`internal/types` to `ax.daemon` unless MCP tool UX is primary, and require completion evidence to mention both Go and Rust modules touched plus explicit cutover impact. (tags: ax, go-rust, migration, routing, team)
-- [decision] `project:ax` Migration-aware ax team topology: During the active Go-to-Rust migration, the ax project should keep the current eight workspaces (`ax.cli`, `ax.config`, `ax.daemon`, `ax.mcp`, `ax.runtime`, `ax.workspace`, `ax.usage`, `ax.release`) and route work by subsystem seam rather than by language or top-level directory. No new Rust-only workspace should be added yet, and no current workspace should be renamed or retired until the shipped Rust path is primary. Each owner should own both its live Go path and target Rust counterpart: cli->Go CLI/root + future Rust shipped binary/docs; config->internal/config + rs/crates/ax-config; daemon->internal/daemon/internal/types + rs/crates/ax-daemon/ax-proto; mcp->internal/mcpserver + future Rust MCP crate/client; runtime->internal/agent/cmd run-agent/orchestrator CLI + rs/crates/ax-agent; workspace->internal/workspace/internal/tmux/generated orchestrator artifacts + rs/crates/ax-workspace/ax-tmux; usage->internal/usage/docs + rs/crates/ax-usage; release->Makefile/GoReleaser/GitHub Actions/Cargo/release packaging. Orchestrators should prefer one owner even when both Go and Rust files are involved on the same seam, and migration tasks should explicitly state the current source-of-truth path and whether the work is parity, cutover, or cleanup. (tags: routing, rust-migration, team-topology)
+- [decision] `project:ax` Stream panel fit strategy: For the ax-tui single-workspace `Stream tmux` view, the fitting bug was fixed in CLI-owned render/capture code by reflowing captured tmux rows to the current panel width and tailing visual rows after wrapping, rather than resizing the live tmux session. Residual behavior: if the source tmux session is already narrower than the panel, the stream reflects that original wrap shape. (tags: ax-tui, layout, stream, tmux, watch)
+- [decision] `project:ax` Ax team topology after 2026-04-18 self-check: As of 2026-04-18 after the ax-wide role-fit self-check, the authoritative ax workspace lineup is nine workspaces: `ax.cli`, `ax.config`, `ax.daemon`, `ax.e2e`, `ax.mcp`, `ax.release`, `ax.runtime`, `ax.usage`, and `ax.workspace`. Keep seam-first routing across both Go and Rust: choose one owner by subsystem seam rather than by language or top-level directory, and continue to require tasks to state source-of-truth plus parity/cutover/cleanup intent. The prior eight-workspace guidance is superseded specifically because `ax.e2e` is now justified as a distinct owner for the `e2e/` crate's live cross-crate scenario harness, scenario fixtures, and a narrow set of black-box public-path smoke tests; it should stay separate rather than merge into CLI, workspace, or release. No other add/remove/rename/reset is recommended now. Current notable coordination seams to watch are daemon<->workspace runtime-control calls, CLI<->runtime launch/alias normalization, MCP<->workspace reconcile helper usage in team reconfigure, release<->e2e CI policy vs scenario semantics, and stale usage docs that still describe old ownership. If local project config/artifacts drift from this nine-workspace lineup, reconcile them to this topology rather than reverting to the old eight-workspace model. (tags: ax, go-rust, migration, routing, team, team-topology)
+- [decision] `project:ax` ax.workspace role-fit decision: 2026-04-18 self-check: keep ax.workspace as a distinct workspace. It owns runtime materialization for workspaces/orchestrators: artifact emission (.mcp.json, AGENTS/CLAUDE sections, orchestrator prompts), desired-state/reconcile logic, lifecycle/dispatch, and tmux session glue. ax.config remains owner of static config/schema/tree/validation; ax.runtime (ax-agent) remains owner of runtime bootstrap/CODEX_HOME implementation that ax.workspace invokes at lifecycle boundaries; ax.e2e remains owner of sandbox/live harness and integration coverage that exercises ax.workspace public APIs but does not own the underlying behavior. (tags: ax.config, ax.e2e, ax.runtime, ax.workspace, ownership)
+- [decision] `project:ax` ax.cli remains a distinct CLI-surface workspace: 2026-04-18 self-check by ax.cli: keep `ax.cli` as a distinct workspace in the Rust-era lineup. Its seam is the shipped/user-facing `ax` surface: root command parsing/dispatch in `crates/ax-cli`, CLI UX wrappers (`init`, `status`, `tasks`, `workspace`, `refresh`), root entrypoints/docs fallback ownership, and the cross-subsystem watch/top TUI surface in `crates/ax-tui`. Boundaries remain explicit: `ax.runtime` owns runtime bootstrap/resume/CODEX_HOME semantics, `ax.workspace` owns lifecycle/reconcile/orchestrator artifacts and tmux policy, `ax.release` owns root build/release meta, and `ax.e2e` owns harness/scenarios/e2e-only deps. `ax-tui` consuming daemon/workspace/tmux/config is an argument for a surface owner, not against one. Current gaps (for example partial TUI lifecycle wiring or doc/feature drift such as `ax shell` mentions) stay inside the ax.cli surface and do not justify merging owners. (tags: ax, ax.cli, boundary, ownership, team-topology, tui)
 
 ## 위임 전용 원칙 (중요)
 오케스트레이터는 **절대 직접 코드를 읽거나, 수정하거나, 파일을 생성하지 않습니다.** 모든 코딩 작업은 담당 워크스페이스 에이전트에게 위임합니다.
@@ -159,162 +160,181 @@ ACK 루프를 방지하기 위해 다음을 반드시 지키세요:
 
 | 이름 | ID | 설명 |
 |---|---|---|
-| **cli** | `ax.cli` | Cobra 기반 CLI와 repo root 엔트리포인트/일반 문서의 기본 fallback owner입니다. |
+| **cli** | `ax.cli` | clap 기반 CLI와 watch TUI(ax-tui), repo root 엔트리포인트/일반 문서의 기본 fallback owner입니다. |
 | **config** | `ax.config` | YAML 설정, config validation, 프로젝트 트리와 root ax config의 기본 owner입니다. |
-| **daemon** | `ax.daemon` | 데몬 코어, 메시지/작업 큐, registry, team state, 공유 타입의 기본 owner입니다. |
-| **mcp** | `ax.mcp` | MCP stdio 서버, daemon client, MCP tool surface의 기본 owner입니다. |
-| **release** | `ax.release` | 빌드, 테스트, CI/CD, 릴리스와 root build/meta 파일의 기본 owner입니다. |
-| **runtime** | `ax.runtime` | 에이전트 런타임과 Codex/Claude 실행 어댑터의 기본 owner입니다. |
+| **daemon** | `ax.daemon` | 데몬 코어, 메시지/작업 큐, registry, team state, wire 프로토콜(ax-proto)의 기본 owner입니다. |
+| **e2e** | `ax.e2e` | 크로스-크레이트 라이브 시나리오 기반 통합 테스트 harness의 기본 owner입니다. |
+| **mcp** | `ax.mcp` | MCP stdio 서버, daemon client, MCP tool surface, planner의 기본 owner입니다. |
+| **release** | `ax.release` | 빌드, 테스트, CI/CD, 릴리스와 Cargo/rust-toolchain 등 root build/meta 파일의 기본 owner입니다. |
+| **runtime** | `ax.runtime` | 에이전트 런타임과 Codex/Claude 실행 어댑터(ax-agent 크레이트)의 기본 owner입니다. |
 | **usage** | `ax.usage` | transcript 기반 usage 집계와 usage 설계 문서의 기본 owner입니다. |
 | **workspace** | `ax.workspace` | 워크스페이스 lifecycle, orchestrator artifacts, reconcile, tmux lifecycle glue의 기본 owner입니다. |
 
 ## 워크스페이스 상세 지침
 
 ### cli (`ax.cli`)
-- Cobra 기반 CLI와 repo root 엔트리포인트/일반 문서의 기본 fallback owner입니다.
-  cmd/ 패키지를 담당합니다.
+- clap 기반 CLI와 watch TUI(ax-tui), repo root 엔트리포인트/일반 문서의 기본 fallback owner입니다.
+  crates/ax-cli/ 크레이트를 담당합니다.
   
   주요 파일:
-  - cmd/root.go — 루트 커맨드, 글로벌 플래그(--socket, --config)
-  - cmd/up.go — ax up (데몬+워크스페이스 시작)
-  - cmd/down.go — ax down (워크스페이스 종료)
-  - cmd/init_cmd.go — ax init (설정 초기화)
-  - cmd/status.go — ax status (상태 조회)
-  - cmd/watch_model.go, watch_sidebar.go, watch_streams.go, watch_view.go, watch_cache.go — ax watch TUI와 실시간 스트림 표시
-  - cmd/claude.go, codex.go, orchestrator_cli.go — ax claude / ax codex (루트 오케스트레이터 CLI 포그라운드 실행)
-  - cmd/messages.go — ax messages (메시지 조회)
-  - cmd/send.go — ax send (메시지 전송)
-  - cmd/workspace.go — ax workspace (워크스페이스 관리)
-  - cmd/tasks.go, team_reconfigure.go, root_orchestrator.go — task 관측, reconfigure 보조, 루트 오케스트레이터 상태 관리
-  - cmd/run_agent.go — ax run-agent (에이전트 실행, 내부용)
-  - cmd/daemon.go — ax daemon (데몬 시작, 내부용)
-  - cmd/mcpserver.go — ax mcp-server (MCP 서버 시작, 내부용)
+  - src/main.rs — 루트 커맨드, 서브커맨드 dispatch, 글로벌 플래그
+  - src/init.rs — ax init (설정 초기화, --reconfigure, --axis)
+  - src/status.rs — ax status
+  - src/tasks.rs — ax tasks
+  - src/workspace.rs — ax workspace
+  - src/refresh.rs — ax refresh
+  - src/daemon_client.rs — CLI에서 daemon 호출 helper
   
   원칙:
-  - 새 커맨드는 cmd/ 디렉토리에 파일 생성 후 init()에서 rootCmd.AddCommand() 호출
-  - 사용자 향 커맨드와 내부용 커맨드를 구분 (run-agent, daemon, mcp-server는 내부용)
-  - resolveConfigPath() 헬퍼를 통해 설정 경로를 일관되게 해석
+  - 새 서브커맨드는 src/에 모듈 추가 후 main.rs에서 dispatch
+  - 사용자 향 커맨드와 내부용 커맨드를 분리 (daemon/mcp-server는 내부용)
   
   fallback ownership:
-  - main.go, README.md, DEVELOPER_GUIDE.md, 사용자-facing 일반 문서는 ax.cli가 기본 owner입니다.
+  - crates/ax-tui/ (watch/stream/sidebar TUI)는 ax.cli가 owner입니다. ax-tui는 usage/registry 같은 소비 지점을 많이 엮으므로 변경 시 ax.usage/ax.daemon과 공동 조율합니다.
+  - README.md, DEVELOPER_GUIDE.md, 사용자-facing 일반 문서는 ax.cli가 기본 owner입니다.
   - 특정 subsystem owner가 명확하지 않은 repo root 문서/엔트리포인트는 ax.cli로 먼저 라우팅합니다.
 
 ### config (`ax.config`)
 - YAML 설정, config validation, 프로젝트 트리와 root ax config의 기본 owner입니다.
-  internal/config/ 패키지를 담당합니다.
+  crates/ax-config/ 크레이트를 담당합니다.
   
   주요 파일:
-  - internal/config/config.go — Config/Workspace/Child 구조체, Load(), FindConfigFile(), Save()
-  - internal/config/config_test.go — 설정 로딩 테스트
-  - internal/config/tree.go — ProjectNode 계층 트리 구성
+  - src/schema.rs — Config/Workspace/Child 구조체
+  - src/lib.rs — Load/Save 진입점
+  - src/paths.rs — 설정 파일 경로 해석(FindConfigFile)
+  - src/tree.rs — ProjectNode 계층 트리 구성
+  - src/overlay.rs — managed overlay 정책
+  - src/validate.rs — config validation 규칙
   
   원칙:
-  - 설정 파일 경로: .ax/config.yaml (기본) 또는 ax.yaml (레거시)
+  - 설정 파일 경로: .ax/config.yaml (레거시 ax.yaml 지원)
   - children을 통한 재귀적 설정 병합 시 순환 참조 감지 필수
-  - Workspace 구조체 필드 추가 시 YAML 태그와 함께 config.go에 정의
-  - 테스트: go test ./internal/config/...
+  - Workspace 구조체 필드 추가 시 serde 태그와 함께 schema.rs에 정의
+  - 테스트: cargo test -p ax-config
   
   fallback ownership:
   - .ax/config.yaml, managed overlay 정책, config validation 규칙은 ax.config가 owner입니다.
   - 어떤 파일을 어느 workspace가 소유하는지 정하는 규칙 자체도 ax.config가 관리합니다.
 
 ### daemon (`ax.daemon`)
-- 데몬 코어, 메시지/작업 큐, registry, team state, 공유 타입의 기본 owner입니다.
-  internal/daemon/ 패키지를 담당합니다.
+- 데몬 코어, 메시지/작업 큐, registry, team state, wire 프로토콜(ax-proto)의 기본 owner입니다.
+  crates/ax-daemon/ 크레이트를 담당합니다.
   
   주요 파일:
-  - internal/daemon/daemon.go — Unix 소켓 데몬, 커넥션 핸들링, 메시지 라우팅
-  - internal/daemon/protocol.go — Envelope/Payload 타입 및 메시지 타입 상수
-  - internal/daemon/msgqueue.go — 워크스페이스별 메시지 큐
-  - internal/daemon/registry.go — 워크스페이스 등록/조회/상태 관리
-  - internal/daemon/history.go — 메시지 히스토리 영속화
-  - internal/daemon/taskstore.go, taskref.go — task 영속화와 task reference 유틸
-  - internal/daemon/team_reconfigure.go, teamstate_store.go — team reconfigure state/overlay 관리
+  - src/server.rs — Unix 소켓 데몬, 커넥션 핸들링
+  - src/handlers.rs — 메시지 라우팅
+  - src/queue.rs, memory.rs, shared_values.rs — 메시지/공유 큐와 in-memory 상태
+  - src/registry.rs, session_manager.rs — 워크스페이스/세션 등록과 상태 관리
+  - src/history.rs, atomicfile.rs — 메시지 히스토리 영속화
+  - src/task_store.rs, task_helpers.rs — task 영속화와 helper
+  - src/team_reconfigure.rs, team_state_store.rs — team reconfigure state/overlay
+  - src/usage_trends.rs, wake_scheduler.rs — usage trend와 wake 스케줄러
+  - src/socket_path.rs, daemonutil.rs — 소켓 경로와 데몬 유틸
   
   원칙:
-  - 메시지 프로토콜 변경 시 protocol.go의 타입과 daemon.go의 handleEnvelope를 함께 수정
-  - 테스트: go test ./internal/daemon/...
+  - 메시지 프로토콜 변경 시 ax-proto의 타입과 handlers.rs를 함께 수정
+  - 테스트: cargo test -p ax-daemon
   
   fallback ownership:
-  - internal/types/는 cwd가 달라도 ax.daemon이 owner입니다.
+  - crates/ax-proto/ (Envelope, Payload, message 타입, wire 프로토콜)는 ax.daemon이 owner입니다.
   - 메시지 큐, registry, task 모델, daemon wire protocol, team state 저장소는 ax.daemon이 우선 owner입니다.
 
-### mcp (`ax.mcp`)
-- MCP stdio 서버, daemon client, MCP tool surface의 기본 owner입니다.
-  internal/mcpserver/ 패키지를 담당합니다.
+### e2e (`ax.e2e`)
+- 크로스-크레이트 라이브 시나리오 기반 통합 테스트 harness의 기본 owner입니다.
+  e2e/ 크레이트(ax-e2e)를 담당합니다.
   
   주요 파일:
-  - internal/mcpserver/server.go — MCP stdio 서버 진입점
-  - internal/mcpserver/client.go — daemon 소켓 클라이언트
-  - internal/mcpserver/tools.go — MCP 도구 등록 및 공통 라우팅
-  - internal/mcpserver/tools_messages.go, tools_tasks.go, tools_usage.go — 도메인별 MCP tool 핸들러
-  - internal/mcpserver/team_reconfigure.go — team reconfigure MCP surface
+  - src/harness.rs — 통합 테스트 harness (임시 홈, 데몬 부트스트랩, 시나리오 실행)
+  - tests/init_live.rs — ax init --axis 라이브 시나리오
+  - tests/orchestration_live.rs — 라이브 오케스트레이션 시나리오
+  - tests/daemon_roundtrip.rs — daemon 왕복 테스트
+  - tests/config_safety_caps.rs — config safety cap 테스트
+  - scenarios/ — init_role_auto, init_domain_auto, init_domain_force_role, init_reconfigure_add, delegated_split, hello_workspace 등 시나리오 픽스처
   
   원칙:
-  - MCP 도구 추가/수정 시 tools.go 등록, client.go 대응 메서드, daemon handler 계약을 함께 검토
+  - 시나리오 추가 시 scenarios/에 디렉토리 + tests/에 실행 케이스 추가
+  - 크레이트 경계/프로토콜이 변할 때 harness 업데이트 필요 (daemon 부트스트랩, MCP 연결, tmux mock)
+  - 테스트: cargo test -p ax-e2e
+  
+  fallback ownership:
+  - 라이브/통합 시나리오 harness, 시나리오 픽스처, e2e-only dev-dependency 관리는 ax.e2e가 owner입니다.
+  - 각 subsystem 동작 변화가 시나리오 기대값을 깨는 경우 해당 subsystem owner와 공동 조율합니다.
+
+### mcp (`ax.mcp`)
+- MCP stdio 서버, daemon client, MCP tool surface, planner의 기본 owner입니다.
+  crates/ax-mcp-server/ 크레이트를 담당합니다.
+  
+  주요 파일:
+  - src/server.rs — MCP stdio 서버 진입점 및 도구 등록
+  - src/daemon_client.rs — daemon 소켓 클라이언트
+  - src/planner.rs — plan_initial_team / plan_team_reconfigure MCP 도구
+  - src/memory_scope.rs — MCP 메모리 스코프
+  - src/telemetry.rs — MCP 계측
+  
+  원칙:
+  - MCP 도구 추가/수정 시 server.rs 등록, daemon_client.rs 대응 메서드, daemon handler 계약을 함께 검토
   - 사용자 노출 MCP schema, 입력 validation, tool naming은 ax.mcp가 owner입니다.
-  - 테스트: go test ./internal/mcpserver/...
+  - 테스트: cargo test -p ax-mcp-server
   
   fallback ownership:
   - MCP 도구 UX, tool naming, MCP client/server glue는 ax.mcp가 owner입니다.
-  - daemon protocol 또는 shared type 변경이 필요한 경우 ax.daemon과 공동 조율합니다.
+  - wire 프로토콜(ax-proto) 또는 shared type 변경이 필요한 경우 ax.daemon과 공동 조율합니다.
 
 ### release (`ax.release`)
-- 빌드, 테스트, CI/CD, 릴리스와 root build/meta 파일의 기본 owner입니다.
+- 빌드, 테스트, CI/CD, 릴리스와 Cargo/rust-toolchain 등 root build/meta 파일의 기본 owner입니다.
   빌드/릴리스 관련 파일을 담당합니다.
   
   주요 파일:
   - Makefile — build, test, snapshot, release 타겟
-  - .goreleaser.yaml — GoReleaser 설정 (크로스 컴파일, 릴리스 아티팩트)
-  - .github/workflows/release.yaml — GitHub Actions 릴리스 워크플로우
-  - go.mod, go.sum — 의존성 관리
+  - Cargo.toml, Cargo.lock — Rust workspace 정의와 lockfile
+  - rust-toolchain.toml — 툴체인 고정
+  - rustfmt.toml — 포매터 설정
+  - .github/workflows/*.yaml — GitHub Actions 워크플로우
   
   원칙:
   - 릴리스는 git tag 기반: make release {patch|minor|major|dev}
-  - 버전은 cmd/root.go의 version 변수에 ldflags로 주입
-  - 전체 테스트: go test ./...
-  - 의존성 추가 시 go mod tidy 실행
+  - 전체 테스트: cargo test --workspace
+  - 의존성 추가 시 cargo update 후 Cargo.lock 커밋
   
   fallback ownership:
-  - Makefile, go.mod, go.sum, .goreleaser.yaml, .gitignore, .github/workflows/*는 ax.release가 owner입니다.
+  - Makefile, Cargo.toml, Cargo.lock, rust-toolchain.toml, rustfmt.toml, .gitignore, .github/workflows/*는 ax.release가 owner입니다.
   - 빌드/릴리스 관점의 repo root 메타 파일은 ax.release로 우선 라우팅합니다.
 
 ### runtime (`ax.runtime`)
-- 에이전트 런타임과 Codex/Claude 실행 어댑터의 기본 owner입니다.
-  internal/agent/ 패키지를 담당합니다.
+- 에이전트 런타임과 Codex/Claude 실행 어댑터(ax-agent 크레이트)의 기본 owner입니다.
+  crates/ax-agent/ 크레이트를 담당합니다.
   
   주요 파일:
-  - internal/agent/runtime.go — Runtime 인터페이스 정의 및 Get() 팩토리
-  - internal/agent/claude.go, codex.go, shell.go — 런타임 구현체
-  - internal/agent/codex_home.go — workspace별 CODEX_HOME 생성/정리
-  - internal/agent/shell.go — 런타임 명령 셸 quoting 유틸
+  - src/runtime.rs — Runtime 트레이트 정의 및 팩토리
+  - src/claude.rs, codex.rs — 런타임 구현체
+  - src/launch.rs — 런타임 CLI 부트스트랩과 CODEX_HOME 격리
+  - src/shell.rs — 런타임 명령 셸 quoting 유틸
   
   원칙:
-  - 새 런타임 추가 시 Runtime 인터페이스를 구현하고 runtime.go의 Get()에 등록
+  - 새 런타임 추가 시 Runtime 트레이트 구현 + runtime.rs 팩토리에 등록
   - 런타임 CLI 인자 passthrough, resume/continue semantics, CODEX_HOME 격리는 ax.runtime가 owner입니다.
-  - 테스트: go test ./internal/agent/...
+  - 테스트: cargo test -p ax-agent
   
   fallback ownership:
   - 런타임별 CLI bootstrap, transcript/runtime 홈 디렉터리 격리, 런타임 공통 helper는 ax.runtime가 owner입니다.
-  - cmd/claude.go, codex.go, orchestrator_cli.go처럼 런타임 passthrough와 맞물린 CLI glue는 ax.runtime와 ax.cli가 공동 조율합니다.
+  - ax-cli의 런타임 passthrough glue는 ax.runtime와 ax.cli가 공동 조율합니다.
 
 ### usage (`ax.usage`)
 - transcript 기반 usage 집계와 usage 설계 문서의 기본 owner입니다.
-  internal/usage/ 패키지와 usage 설계 문서를 담당합니다.
+  crates/ax-usage/ 크레이트와 usage 설계 문서를 담당합니다.
   
   주요 파일:
-  - internal/usage/usage.go — 공개 usage 타입(Tokens, WorkspaceUsage, MCP proxy metrics) 정의
-  - internal/usage/parse.go — Claude/Codex transcript JSONL 레코드 파싱
-  - internal/usage/history.go — transcript 히스토리 조회와 workspace/agent 귀속 로직
-  - internal/usage/aggregator.go — usage 집계와 snapshot 계산
-  - internal/usage/trend.go — 시간 버킷 기반 usage trend 계산
-  - internal/usage/path.go, tailer.go — transcript 경로 해석과 증분 추적
+  - src/lib.rs — 공개 usage 타입(Tokens, WorkspaceUsage 등) 정의
+  - src/parse.rs — Claude/Codex transcript JSONL 레코드 파싱
+  - src/codex.rs — Codex transcript 전용 경로/레코드 처리
+  - src/history.rs — transcript 히스토리 조회와 workspace/agent 귀속 로직
+  - src/aggregator.rs — usage 집계와 snapshot 계산
   - docs/design/workspace-usage.md — usage 추적 설계 문서
   
   원칙:
-  - transcript 포맷 변경 시 parse.go, history.go, trend.go를 함께 검토
-  - usage 모델 변경 시 mcp/daemon 응답 타입과 watch/status 소비 지점을 같이 확인
-  - 테스트: go test ./internal/usage/...
+  - transcript 포맷 변경 시 parse.rs, codex.rs, history.rs를 함께 검토
+  - usage 모델 변경 시 ax-daemon/ax-mcp-server 응답 타입과 ax-tui 소비 지점을 같이 확인
+  - 테스트: cargo test -p ax-usage
   
   fallback ownership:
   - docs/design/workspace-usage.md와 usage 관련 설계 문서는 ax.usage가 owner입니다.
@@ -322,22 +342,22 @@ ACK 루프를 방지하기 위해 다음을 반드시 지키세요:
 
 ### workspace (`ax.workspace`)
 - 워크스페이스 lifecycle, orchestrator artifacts, reconcile, tmux lifecycle glue의 기본 owner입니다.
-  internal/workspace/ 패키지를 담당합니다.
+  crates/ax-workspace/ 크레이트를 담당합니다.
   
   주요 파일:
-  - internal/workspace/workspace.go — Manager: Create/Destroy/CreateAll/DestroyAll
-  - internal/workspace/reconcile.go — runtime desired state reconcile
-  - internal/workspace/orchestrator.go — 오케스트레이터 프롬프트 생성
-  - internal/workspace/instructions.go — 에이전트 지시 파일(CLAUDE.md 등) 생성
-  - internal/workspace/mcpconfig.go — .mcp.json 생성
-  - internal/workspace/state.go — orchestrator/workspace artifact state 정리
+  - src/manager.rs — Manager: Create/Destroy/CreateAll/DestroyAll
+  - src/lifecycle.rs, dispatch.rs — 워크스페이스 lifecycle과 메시지 dispatch
+  - src/reconcile.rs — runtime desired state reconcile
+  - src/orchestrator.rs, orchestrator_prompt.rs — 오케스트레이터와 프롬프트 생성
+  - src/instructions.rs — 에이전트 지시 파일(CLAUDE.md/AGENTS.md) 생성
+  - src/mcp_config.rs — .mcp.json 생성
   
   원칙:
   - workspace/orchestrator artifact 생성 경로, prompt 파일, reconcile state는 ax.workspace가 owner입니다.
   - 워크스페이스 생성/파괴와 세션 lifecycle에서 tmux 호출 경계는 ax.workspace가 우선 owner입니다.
-  - 테스트: go test ./internal/workspace/...
+  - 테스트: cargo test -p ax-workspace
   
   fallback ownership:
-  - internal/tmux/는 cwd가 달라도 ax.workspace가 owner입니다.
+  - crates/ax-tmux/는 cwd가 달라도 ax.workspace가 owner입니다.
   - tmux session naming, create/destroy/attach/interrupt 정책은 ax.workspace가 owner입니다.
 
