@@ -256,7 +256,7 @@ async fn update_enforces_permissions_and_transitions() {
             &UpdateTaskPayload {
                 id: created.task.id.clone(),
                 status: Some(TaskStatus::Completed),
-                result: Some("done".into()),
+                result: Some("done; remaining owned dirty files=<none>".into()),
                 log: None,
             },
         )
@@ -345,7 +345,7 @@ async fn parent_rollup_refreshes_on_child_completion() {
             &UpdateTaskPayload {
                 id: child.task.id.clone(),
                 status: Some(TaskStatus::Completed),
-                result: Some("ok".into()),
+                result: Some("ok; remaining owned dirty files=<none>".into()),
                 log: None,
             },
         )

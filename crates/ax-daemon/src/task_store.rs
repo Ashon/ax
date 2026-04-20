@@ -56,6 +56,14 @@ pub enum TaskStoreError {
     AlreadyTerminal(String, String),
     #[error("task {0:?} must be completed, failed, or cancelled before remove")]
     NotTerminalForRemove(String),
+    #[error(
+        "task {0:?} cannot be marked completed without a leftover-scope declaration. \
+         Call update_task again with result containing either \
+         `remaining owned dirty files=<none>` (nothing left) or \
+         `remaining owned dirty files=<paths>; residual scope=<why work remains>` \
+         (more to do). See the Completion Reporting Contract in this workspace's instructions."
+    )]
+    MissingCompletionEvidence(String),
     #[error("read {path:?}: {source}")]
     Read {
         path: PathBuf,
@@ -589,7 +597,27 @@ fn validate_task_update(
             status_label(new_status).to_owned(),
         ));
     }
+    if matches!(new_status, TaskStatus::Completed)
+        && !matches!(task.status, TaskStatus::Completed)
+    {
+        let effective = result.unwrap_or(task.result.as_str());
+        if !has_leftover_scope_declaration(effective) {
+            return Err(TaskStoreError::MissingCompletionEvidence(task.id.clone()));
+        }
+    }
     Ok(())
+}
+
+/// The Completion Reporting Contract (see
+/// `crates/ax-workspace/src/instructions.rs::completion_reporting_instruction_contract`)
+/// requires every completion result to declare what owned files, if
+/// any, are still dirty. Daemon enforcement keeps that contract
+/// load-bearing instead of advisory: an assignee that marks
+/// `status=completed` without the marker gets rejected with a clear
+/// remediation path.
+fn has_leftover_scope_declaration(result: &str) -> bool {
+    const MARKER: &str = "remaining owned dirty files=";
+    result.contains(MARKER)
 }
 
 fn validate_task_control(
@@ -903,5 +931,186 @@ fn rollup_equal(a: Option<&TaskRollup>, b: Option<&TaskRollup>) -> bool {
                 && x.summary == y.summary
                 && x.last_child_update_at == y.last_child_update_at
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_store() -> Arc<TaskStore> {
+        TaskStore::in_memory()
+    }
+
+    fn seed_in_progress_task(store: &TaskStore) -> Task {
+        let task = store
+            .create(CreateTaskInput {
+                title: "t".into(),
+                description: String::new(),
+                assignee: "worker".into(),
+                created_by: "orch".into(),
+                parent_task_id: String::new(),
+                start_mode: TaskStartMode::Default,
+                workflow_mode: TaskWorkflowMode::Parallel,
+                priority: TaskPriority::Normal,
+                stale_after_seconds: 0,
+                dispatch_body: String::new(),
+                dispatch_config_path: String::new(),
+            })
+            .expect("create");
+        store
+            .update(
+                &task.id,
+                Some(TaskStatus::InProgress),
+                None,
+                None,
+                "worker",
+            )
+            .expect("to in_progress");
+        store.get(&task.id).expect("task")
+    }
+
+    #[test]
+    fn completion_without_marker_is_rejected() {
+        let store = make_store();
+        let task = seed_in_progress_task(&store);
+
+        let err = store
+            .update(
+                &task.id,
+                Some(TaskStatus::Completed),
+                Some("done".into()),
+                None,
+                "worker",
+            )
+            .expect_err("should reject");
+        assert!(
+            matches!(err, TaskStoreError::MissingCompletionEvidence(ref id) if id == &task.id),
+            "expected MissingCompletionEvidence, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn completion_with_none_marker_is_accepted() {
+        let store = make_store();
+        let task = seed_in_progress_task(&store);
+
+        let updated = store
+            .update(
+                &task.id,
+                Some(TaskStatus::Completed),
+                Some("wired the validator; remaining owned dirty files=<none>".into()),
+                None,
+                "worker",
+            )
+            .expect("should accept");
+        assert!(matches!(updated.status, TaskStatus::Completed));
+    }
+
+    #[test]
+    fn completion_with_paths_and_residual_scope_is_accepted() {
+        let store = make_store();
+        let task = seed_in_progress_task(&store);
+
+        let body = "partial pass; remaining owned dirty files=src/foo.rs; residual scope=finish foo refactor in follow-up";
+        let updated = store
+            .update(
+                &task.id,
+                Some(TaskStatus::Completed),
+                Some(body.into()),
+                None,
+                "worker",
+            )
+            .expect("should accept");
+        assert!(matches!(updated.status, TaskStatus::Completed));
+    }
+
+    #[test]
+    fn completion_marker_can_live_in_prior_result() {
+        // Agents can split the workflow: set result with the marker
+        // first, then flip status to completed without passing result
+        // again. Enforcing only on the effective result keeps that
+        // path open instead of forcing every completion into a single
+        // call.
+        let store = make_store();
+        let task = seed_in_progress_task(&store);
+        store
+            .update(
+                &task.id,
+                None,
+                Some("prep; remaining owned dirty files=<none>".into()),
+                None,
+                "worker",
+            )
+            .expect("set result");
+
+        let updated = store
+            .update(
+                &task.id,
+                Some(TaskStatus::Completed),
+                None,
+                None,
+                "worker",
+            )
+            .expect("should accept");
+        assert!(matches!(updated.status, TaskStatus::Completed));
+    }
+
+    #[test]
+    fn failed_status_does_not_require_marker() {
+        let store = make_store();
+        let task = seed_in_progress_task(&store);
+
+        let updated = store
+            .update(
+                &task.id,
+                Some(TaskStatus::Failed),
+                Some("blocked by missing dependency".into()),
+                None,
+                "worker",
+            )
+            .expect("failed without marker is fine");
+        assert!(matches!(updated.status, TaskStatus::Failed));
+    }
+
+    #[test]
+    fn already_completed_noop_update_skips_marker_check() {
+        let store = make_store();
+        let task = seed_in_progress_task(&store);
+        store
+            .update(
+                &task.id,
+                Some(TaskStatus::Completed),
+                Some("first pass; remaining owned dirty files=<none>".into()),
+                None,
+                "worker",
+            )
+            .expect("initial complete");
+
+        // Same-status update that only appends a log should not
+        // re-trigger the marker requirement. The transition guard is
+        // scoped to the Pending/InProgress -> Completed edge.
+        let updated = store
+            .update(
+                &task.id,
+                Some(TaskStatus::Completed),
+                None,
+                Some("post-completion note".into()),
+                "worker",
+            )
+            .expect("noop completed update should succeed");
+        assert!(matches!(updated.status, TaskStatus::Completed));
+    }
+
+    #[test]
+    fn has_leftover_scope_declaration_matches_contract_shapes() {
+        assert!(has_leftover_scope_declaration(
+            "remaining owned dirty files=<none>"
+        ));
+        assert!(has_leftover_scope_declaration(
+            "result text; remaining owned dirty files=src/a.rs; residual scope=x"
+        ));
+        assert!(!has_leftover_scope_declaration("just a plain summary"));
+        assert!(!has_leftover_scope_declaration(""));
     }
 }
