@@ -108,6 +108,16 @@ impl Daemon {
             MemoryStore::load(state_dir).map_err(|e| DaemonError::LoadState(e.to_string()))?;
         self.task_store =
             TaskStore::load(state_dir).map_err(|e| DaemonError::LoadState(e.to_string()))?;
+        let recovered = self
+            .task_store
+            .recover_stale_in_progress(ax_tmux::session_exists);
+        if !recovered.is_empty() {
+            tracing::info!(
+                count = recovered.len(),
+                tasks = ?recovered,
+                "reset in_progress tasks with dead assignee sessions on startup"
+            );
+        }
         let team_store =
             TeamStateStore::load(state_dir).map_err(|e| DaemonError::LoadState(e.to_string()))?;
         self.team_controller = TeamController::new(

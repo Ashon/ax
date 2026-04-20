@@ -159,6 +159,84 @@ impl TaskStore {
         }))
     }
 
+    /// Reset tasks the daemon left in `InProgress` whose assignee has
+    /// no live session.
+    ///
+    /// Between a daemon restart and the next successful dispatch, an
+    /// `InProgress` task with a dead tmux session is a lie: the agent
+    /// isn't actually working on it and no completion signal will ever
+    /// arrive. Without this sweep the task sits forever, its rollup
+    /// drags the parent open, and the stale detector keeps re-firing
+    /// wake attempts at a session that will never answer. Fleet-shell
+    /// solves the same problem with `recoverStaleTasks()`; this is the
+    /// daemon-side equivalent.
+    ///
+    /// Only touches `InProgress` tasks — `Blocked` stays alone because
+    /// it often encodes an explicit human-held state.
+    ///
+    /// Returns the IDs that were reset so the caller can log or
+    /// telemeter them.
+    pub fn recover_stale_in_progress<F>(&self, is_session_live: F) -> Vec<String>
+    where
+        F: Fn(&str) -> bool,
+    {
+        let mut inner = self.inner.lock().expect("task store poisoned");
+        let now = Utc::now();
+
+        let candidate_ids: Vec<String> = inner
+            .values()
+            .filter(|t| {
+                t.removed_at.is_none()
+                    && matches!(t.status, TaskStatus::InProgress)
+                    && !t.assignee.is_empty()
+                    && !is_session_live(&t.assignee)
+            })
+            .map(|t| t.id.clone())
+            .collect();
+
+        if candidate_ids.is_empty() {
+            return Vec::new();
+        }
+
+        let mut parent_ids: Vec<String> = Vec::new();
+        for id in &candidate_ids {
+            let Some(task) = inner.get_mut(id) else {
+                continue;
+            };
+            let assignee = task.assignee.clone();
+            task.status = TaskStatus::Pending;
+            clear_task_claim(task);
+            let _ = clear_task_retry_state(task);
+            task.logs.push(TaskLog {
+                timestamp: now,
+                workspace: OPERATOR_WORKSPACE_NAME.to_owned(),
+                message: format!(
+                    "Recovery on startup: assignee session {assignee:?} not found; \
+                     reset in_progress -> pending"
+                ),
+            });
+            task.version += 1;
+            task.updated_at = now;
+            if !task.parent_task_id.is_empty() {
+                parent_ids.push(task.parent_task_id.clone());
+            }
+        }
+
+        parent_ids.sort();
+        parent_ids.dedup();
+        for parent_id in &parent_ids {
+            refresh_parent_rollup(&mut inner, parent_id, now);
+        }
+
+        // Best-effort persist: a failing write here leaves the store
+        // correctly reset in memory and will persist on the next
+        // mutation. We surface nothing because startup shouldn't fail
+        // on a recovery-only write — real faults will show up on the
+        // next normal operation.
+        let _ = self.persist_locked(&inner);
+        candidate_ids
+    }
+
     pub fn create(&self, input: CreateTaskInput) -> Result<Task, TaskStoreError> {
         let mut inner = self.inner.lock().expect("task store poisoned");
 
@@ -1112,5 +1190,143 @@ mod tests {
         ));
         assert!(!has_leftover_scope_declaration("just a plain summary"));
         assert!(!has_leftover_scope_declaration(""));
+    }
+
+    #[test]
+    fn recover_stale_in_progress_resets_only_dead_sessions() {
+        let store = make_store();
+        let alive = seed_in_progress_task(&store); // assignee "worker"
+        let dead = seed_in_progress_task(&store); // assignee "worker"
+
+        // Pending task must never be touched.
+        let pending = store
+            .create(CreateTaskInput {
+                title: "untouched".into(),
+                description: String::new(),
+                assignee: "worker".into(),
+                created_by: "orch".into(),
+                parent_task_id: String::new(),
+                start_mode: TaskStartMode::Default,
+                workflow_mode: TaskWorkflowMode::Parallel,
+                priority: TaskPriority::Normal,
+                stale_after_seconds: 0,
+                dispatch_body: String::new(),
+                dispatch_config_path: String::new(),
+            })
+            .expect("create pending");
+
+        // Simulate "alive" by returning true only for the first task's
+        // assignee. seed_in_progress_task uses the same assignee name
+        // for both, so this test steers on task id instead — bind the
+        // closure to the live id.
+        let live_id = alive.id.clone();
+        let live_map: std::collections::HashMap<String, bool> = {
+            let mut m = std::collections::HashMap::new();
+            m.insert(live_id.clone(), true);
+            m
+        };
+        // Because both tasks share the same assignee, the recovery
+        // sweep actually treats them as a single liveness question. To
+        // test the "one alive, one dead" shape we need distinct
+        // assignees. Rewrite `dead`'s assignee in-place for the test.
+        {
+            let mut inner = store.inner.lock().expect("lock");
+            let t = inner.get_mut(&dead.id).expect("dead task");
+            "worker-dead".clone_into(&mut t.assignee);
+        }
+        let _ = live_map;
+
+        let reset = store.recover_stale_in_progress(|ws| ws == "worker");
+        assert_eq!(reset, vec![dead.id.clone()]);
+
+        let after_alive = store.get(&alive.id).expect("alive");
+        assert!(matches!(after_alive.status, TaskStatus::InProgress));
+        let after_dead = store.get(&dead.id).expect("dead");
+        assert!(matches!(after_dead.status, TaskStatus::Pending));
+        assert!(after_dead.claimed_at.is_none());
+        assert!(after_dead
+            .logs
+            .last()
+            .is_some_and(|l| l.message.contains("Recovery on startup")));
+
+        let after_pending = store.get(&pending.id).expect("pending");
+        assert!(matches!(after_pending.status, TaskStatus::Pending));
+    }
+
+    #[test]
+    fn recover_stale_in_progress_skips_terminal_tasks() {
+        let store = make_store();
+        let task = seed_in_progress_task(&store);
+        store
+            .update(
+                &task.id,
+                Some(TaskStatus::Completed),
+                Some("done; remaining owned dirty files=<none>".into()),
+                None,
+                "worker",
+            )
+            .expect("complete");
+
+        let reset = store.recover_stale_in_progress(|_ws| false);
+        assert!(reset.is_empty());
+        let reloaded = store.get(&task.id).expect("task");
+        assert!(matches!(reloaded.status, TaskStatus::Completed));
+    }
+
+    #[test]
+    fn recover_stale_in_progress_refreshes_parent_rollup() {
+        let store = make_store();
+        let parent = store
+            .create(CreateTaskInput {
+                title: "parent".into(),
+                description: String::new(),
+                assignee: "orch".into(),
+                created_by: "orch".into(),
+                parent_task_id: String::new(),
+                start_mode: TaskStartMode::Default,
+                workflow_mode: TaskWorkflowMode::Parallel,
+                priority: TaskPriority::Normal,
+                stale_after_seconds: 0,
+                dispatch_body: String::new(),
+                dispatch_config_path: String::new(),
+            })
+            .expect("parent");
+        let child = store
+            .create(CreateTaskInput {
+                title: "child".into(),
+                description: String::new(),
+                assignee: "worker".into(),
+                created_by: "orch".into(),
+                parent_task_id: parent.id.clone(),
+                start_mode: TaskStartMode::Default,
+                workflow_mode: TaskWorkflowMode::Parallel,
+                priority: TaskPriority::Normal,
+                stale_after_seconds: 0,
+                dispatch_body: String::new(),
+                dispatch_config_path: String::new(),
+            })
+            .expect("child");
+        store
+            .update(
+                &child.id,
+                Some(TaskStatus::InProgress),
+                None,
+                None,
+                "worker",
+            )
+            .expect("to in_progress");
+
+        let parent_before = store.get(&parent.id).expect("parent");
+        let rollup_before = parent_before.rollup.expect("rollup");
+        assert_eq!(rollup_before.in_progress_children, 1);
+        assert_eq!(rollup_before.pending_children, 0);
+
+        let reset = store.recover_stale_in_progress(|_ws| false);
+        assert_eq!(reset, vec![child.id.clone()]);
+
+        let parent_after = store.get(&parent.id).expect("parent");
+        let rollup_after = parent_after.rollup.expect("rollup");
+        assert_eq!(rollup_after.in_progress_children, 0);
+        assert_eq!(rollup_after.pending_children, 1);
     }
 }
