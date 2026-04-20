@@ -21,4 +21,5 @@ sha1.workspace = true
 thiserror = { workspace = true }
 
 [dev-dependencies]
+chrono = { workspace = true }
 tempfile = "3"

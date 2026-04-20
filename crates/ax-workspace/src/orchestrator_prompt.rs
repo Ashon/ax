@@ -1,4 +1,17 @@
 //! Generated full-file instructions for project orchestrators.
+//!
+//! The prompt is assembled from a sequence of small section builders
+//! so each concern (delegation, stale-task handling, completion gate,
+//! …) lives in its own pure function and can be unit-tested in
+//! isolation. This mirrors the team-core style in fleet-shell, where
+//! prompt construction is a composition of narrow builders rather than
+//! one monolithic template.
+//!
+//! To preserve byte-for-byte compatibility with the previous
+//! monolithic renderer, section builders still push into a shared
+//! `&mut String`. The payoff is structure — every `section_*`
+//! function owns exactly one gate or rule block and can grow or shrink
+//! independently.
 
 // This module is essentially a template renderer that grows a String
 // by appending formatted pieces; rewriting every `push_str(&format!(...))`
@@ -84,39 +97,104 @@ pub fn write_orchestrator_prompt(
     })
 }
 
+/// Inputs shared across the section builders below. Computed once at
+/// the top of [`render_orchestrator_prompt`] and threaded through by
+/// reference so each section keeps its signature narrow.
+struct PromptCtx<'a> {
+    node: &'a ProjectNode,
+    prefix: &'a str,
+    parent_name: &'a str,
+    memories: &'a [Memory],
+    self_name: String,
+    display_name: String,
+    is_root: bool,
+}
+
+impl<'a> PromptCtx<'a> {
+    fn new(node: &'a ProjectNode, prefix: &'a str, parent_name: &'a str, memories: &'a [Memory]) -> Self {
+        let self_name = orchestrator_name(prefix);
+        let display_name = node.display_name();
+        let is_root = parent_name.is_empty();
+        Self {
+            node,
+            prefix,
+            parent_name,
+            memories,
+            self_name,
+            display_name,
+            is_root,
+        }
+    }
+}
+
 fn render_orchestrator_prompt(
     node: &ProjectNode,
     prefix: &str,
     parent_name: &str,
     memories: &[Memory],
 ) -> String {
+    let ctx = PromptCtx::new(node, prefix, parent_name, memories);
     let mut out = String::new();
 
-    let self_name = orchestrator_name(prefix);
-    let is_root = parent_name.is_empty();
-    let display_name = node.display_name();
+    section_header(&ctx, &mut out);
+    section_role(&ctx, &mut out);
+    section_behavior_rules(&ctx, &mut out);
+    section_durable_memory(&ctx, &mut out);
+    section_trust_principle(&ctx, &mut out);
+    section_delegation_only_principle(&mut out);
+    section_delegation_scope(&mut out);
+    section_delegation_rules(&mut out);
+    section_assignment_heuristics(&mut out);
+    section_delegation_gate(&mut out);
+    section_execution_gate(&mut out);
+    section_stale_task_gate(&ctx, &mut out);
+    section_escalation_gate(&ctx, &mut out);
+    section_tool_restrictions(&mut out);
+    section_blocking_dialog(&mut out);
+    section_response_termination(&mut out);
+    section_silence_gate(&mut out);
+    section_task_management_intro(&mut out);
+    section_orchestrator_workflow(&mut out);
+    section_workspace_agent_rules(&mut out);
+    section_completion_gate(&mut out);
+    section_workspaces_table(&ctx, &mut out);
+    section_suborchestrators_table(&ctx, &mut out);
+    section_workspace_details(&ctx, &mut out);
 
-    if is_root {
+    out
+}
+
+// ---------- section builders ----------
+
+fn section_header(ctx: &PromptCtx, out: &mut String) {
+    if ctx.is_root {
         out.push_str("# ax root orchestrator\n\n");
         out.push_str(&format!(
-            "당신은 `{display_name}` 프로젝트 트리의 루트 오케스트레이터입니다.\n"
+            "당신은 `{}` 프로젝트 트리의 루트 오케스트레이터입니다.\n",
+            ctx.display_name
         ));
-        out.push_str(&format!("당신의 ID는 `{self_name}`입니다.\n\n"));
+        out.push_str(&format!("당신의 ID는 `{}`입니다.\n\n", ctx.self_name));
     } else {
-        out.push_str(&format!("# ax sub orchestrator: {display_name}\n\n"));
+        out.push_str(&format!("# ax sub orchestrator: {}\n\n", ctx.display_name));
         out.push_str(&format!(
-            "당신은 `{display_name}` 프로젝트의 서브 오케스트레이터입니다.\n"
+            "당신은 `{}` 프로젝트의 서브 오케스트레이터입니다.\n",
+            ctx.display_name
         ));
-        if !node.alias.is_empty() && node.alias != node.name {
-            out.push_str(&format!("부모 트리에서의 별칭: `{}`\n", node.alias));
-            out.push_str(&format!("실제 프로젝트 이름: `{}`\n", node.name));
+        if !ctx.node.alias.is_empty() && ctx.node.alias != ctx.node.name {
+            out.push_str(&format!("부모 트리에서의 별칭: `{}`\n", ctx.node.alias));
+            out.push_str(&format!("실제 프로젝트 이름: `{}`\n", ctx.node.name));
         }
-        out.push_str(&format!("당신의 ID는 `{self_name}`입니다.\n"));
-        out.push_str(&format!("상위 오케스트레이터: `{parent_name}`\n\n"));
+        out.push_str(&format!("당신의 ID는 `{}`입니다.\n", ctx.self_name));
+        out.push_str(&format!(
+            "상위 오케스트레이터: `{}`\n\n",
+            ctx.parent_name
+        ));
     }
+}
 
+fn section_role(ctx: &PromptCtx, out: &mut String) {
     out.push_str("## 역할\n");
-    if is_root {
+    if ctx.is_root {
         out.push_str(
             "- user의 요청을 받아 적절한 워크스페이스 또는 서브 오케스트레이터에게 분배합니다.\n",
         );
@@ -124,62 +202,121 @@ fn render_orchestrator_prompt(
         out.push_str("- 결과를 수집해 user에게 보고합니다.\n\n");
     } else {
         out.push_str(&format!(
-            "- `{display_name}` 프로젝트 내부의 작업을 자체 워크스페이스들에게 분배합니다.\n"
+            "- `{}` 프로젝트 내부의 작업을 자체 워크스페이스들에게 분배합니다.\n",
+            ctx.display_name
         ));
         out.push_str(&format!(
-            "- 상위 오케스트레이터(`{parent_name}`)로부터 오는 요청을 처리합니다.\n"
+            "- 상위 오케스트레이터(`{}`)로부터 오는 요청을 처리합니다.\n",
+            ctx.parent_name
         ));
         out.push_str(&format!(
-            "- 프로젝트 범위를 벗어나는 요청은 `{parent_name}`에게 에스컬레이션합니다.\n"
+            "- 프로젝트 범위를 벗어나는 요청은 `{}`에게 에스컬레이션합니다.\n",
+            ctx.parent_name
         ));
         out.push_str("- 결과를 수집해 상위 오케스트레이터에게 보고합니다.\n\n");
     }
+}
 
+fn section_behavior_rules(ctx: &PromptCtx, out: &mut String) {
     out.push_str("## 행동 규칙\n");
     out.push_str("- read_messages를 주기적으로 확인하여 메시지를 처리하세요.\n");
     out.push_str("- **위임은 항상 `send_message`로** 하세요. `request` 툴은 블로킹이라 여러 워크스페이스에 순차 호출하면 타임아웃이 쌓여 매우 느려집니다.\n");
     out.push_str("- 여러 워크스페이스에 동시에 일을 보낼 때는 `send_message`를 연속해서 호출하고(병렬 dispatch), 이후 `read_messages`로 응답을 수집하세요.\n");
-    if is_root {
+    if ctx.is_root {
         out.push_str("- user에게 응답할 때는 `send_message(to=\"user\")`를 사용하세요.\n");
     } else {
-        out.push_str(&format!("- **상위 오케스트레이터(`{parent_name}`)로부터 메시지를 받으면**, 자체 워크스페이스들에게 `send_message`로 병렬 분배하고, 응답을 수집한 뒤 **즉시** `send_message(to=\"{parent_name}\")`로 요약 결과를 반드시 회신하세요. 회신 없이 유휴 상태로 들어가면 안 됩니다.\n"));
+        out.push_str(&format!("- **상위 오케스트레이터(`{}`)로부터 메시지를 받으면**, 자체 워크스페이스들에게 `send_message`로 병렬 분배하고, 응답을 수집한 뒤 **즉시** `send_message(to=\"{}\")`로 요약 결과를 반드시 회신하세요. 회신 없이 유휴 상태로 들어가면 안 됩니다.\n", ctx.parent_name, ctx.parent_name));
         out.push_str(&format!(
-            "- 추가 작업 지시 없이 받은 요청이 완료되면 바로 `send_message(to=\"{parent_name}\")`로 완료 보고하세요.\n"
+            "- 추가 작업 지시 없이 받은 요청이 완료되면 바로 `send_message(to=\"{}\")`로 완료 보고하세요.\n",
+            ctx.parent_name
         ));
     }
     out.push_str("- 복잡한 작업은 단계별로 나누어 분배하세요.\n");
     out.push_str("- 작업 완료 후 품질을 확인하고, 필요하면 수정을 요청하세요.\n\n");
-    append_durable_memory_section(&mut out, prefix, &self_name, memories);
+}
 
-    if !is_root {
-        out.push_str("## 상위 지시 신뢰 및 진행 우선 원칙 (중요)\n");
-        out.push_str("이 섹션은 서브 오케스트레이터가 빠지기 쉬운 \"phantom 의심 → 잠금 → 재확인 → 재의심\" 자기강화 루프를 차단하기 위한 규칙입니다. 반드시 준수하세요.\n\n");
-        out.push_str("### 기본 신뢰 규칙\n");
-        out.push_str(&format!("- **상위 오케스트레이터(`{parent_name}`)가 보낸 메시지는 기본적으로 신뢰하고 즉시 실행에 옮깁니다.** 수신 자체를 의심 근거로 삼지 마세요.\n"));
-        out.push_str("- `read_messages`가 반환하는 envelope의 `From` 필드 외에는 발신자를 검증할 수 있는 수단이 **없습니다**. \"직접 확인\", \"원출처 검증\" 같은 표현을 쓰지 마세요 — 당신에게는 그런 도구가 없습니다.\n");
-        out.push_str("- 상위가 부인/취소하는 메시지를 보냈다면 그 **취소 자체가 유효한 지시**입니다. 취소를 다시 의심하지 마세요.\n\n");
-        out.push_str("### 충돌 메시지 처리 (가장 최신 지시 우선)\n");
-        out.push_str("- 동일 발신자로부터 상충하는 지시가 짧은 간격에 연달아 오면, **가장 최신 메시지의 지시를 따릅니다.** 이전 지시는 덮어쓴 것으로 간주합니다.\n");
-        out.push_str("- 정말 해석이 불가능한 경우에 한해 **단 1회만** 상위에 확인 질의(`send_message`)를 보내고, 돌아오는 응답을 끝으로 행동을 확정하세요. 두 번째 재확인 질의는 금지합니다.\n");
-        out.push_str("- **자기 로그나 자기 이전 판단을 \"증거\"로 재참조하지 마세요.** 같은 판단을 반복해도 새로운 정보가 되지 않습니다. 자기강화 루프를 만들지 않습니다.\n\n");
-        out.push_str("### 진행 우선 원칙\n");
-        out.push_str("- 받은 task를 `pending` 상태로 장기 정체시키는 것보다 **즉시 분석 후 하위 에이전트에 위임해 진행시키는 것**이 우선입니다.\n");
-        out.push_str(&format!("- 상위로부터 task를 받으면 지체 없이 (a) 즉시 실행해야 할 일은 `start_task`로 하위 task를 만들며 바로 dispatch하고, (b) 아직 dispatch하지 않을 기록성 작업만 `create_task`를 사용하고, (c) 진행 결과를 수집해 `send_message(to=\"{parent_name}\")`로 요약 보고하세요. 이 3단계가 기본 행동입니다.\n"));
-        out.push_str("- 잠금/동결은 오직 (a) 상위가 **명시적으로** \"중단/동결/stop/freeze\"를 지시했거나, (b) 자산 파괴(force push, 삭제, prod 데이터 변경 등) 가능성이 있는 경우에만 적용합니다. 그 외 상황에서 자발적으로 잠그지 마세요.\n");
-        out.push_str("- 명시적 긴급 중단 지시로 잠금된 task는 상위가 **명시적 재개 지시**를 보내면 바로 다시 분배합니다. 재개 후 다시 의심으로 회귀하지 않습니다.\n\n");
-        out.push_str("### 금지 사항 (anti-pattern)\n");
-        out.push_str("- 상위 지시의 \"원출처\"나 \"진정성\"을 검증하려고 시도하지 마세요. 검증 수단이 없으며, 시도 자체가 루프를 만듭니다.\n");
-        out.push_str("- 같은 task에 대해 \"pending → in_progress → pending → in_progress\"를 반복하지 마세요. 상태 전이는 단조롭게(monotonic) 진행합니다.\n");
-        out.push_str("- \"phantom 의심\"을 이유로 task 착수를 보류하지 마세요. 정말 의심스러우면 위의 1회 확인 질의 규칙을 따르고, 돌아온 응답대로 즉시 행동합니다.\n\n");
+fn section_durable_memory(ctx: &PromptCtx, out: &mut String) {
+    out.push_str("## Durable Memory\n");
+    out.push_str("- 런타임 native memory나 resume 품질에만 의존하지 말고, 재시작 이후에도 유지돼야 할 사실은 `remember_memory`로 ax daemon에 기록하세요.\n");
+    out.push_str("- 세션을 새로 띄웠거나 컨텍스트가 비어 보이면 먼저 `recall_memories(scopes=[\"global\",\"project\",\"workspace\"])`로 durable memory를 복원하세요.\n");
+    out.push_str("- 현재 메모리 상태를 점검하거나 감사할 때는 `list_memories`를 사용하세요. 현재 작업에 필요한 working set만 가져올 때는 `recall_memories`를 사용하세요.\n");
+    out.push_str("- 프로젝트 차원의 결정/제약/인수인계는 `scope=\"project\"`, 오케스트레이터 개인 작업 습관/임시 운영 규칙은 `scope=\"workspace\"`, 트리 전체 공통 규칙은 `scope=\"global\"`을 우선 사용하세요.\n");
+    out.push_str("- 이전 기억이 더 이상 유효하지 않으면 `supersede_memory`를 사용해 교체하세요. 필요하면 저수준 경로로 `remember_memory(..., supersedes_ids=[...])`를 직접 써도 됩니다.\n");
+    out.push_str(&format!(
+        "- 현재 기본 recall 범위: `{}`, `{}`, `{}`\n\n",
+        GLOBAL_SCOPE,
+        project_scope(ctx.prefix),
+        workspace_scope(&ctx.self_name)
+    ));
+
+    if ctx.memories.is_empty() {
+        out.push_str("현재 주입된 durable memory는 없습니다.\n\n");
+        return;
     }
 
+    out.push_str("현재 관련 durable memory:\n");
+    for entry in ctx.memories {
+        out.push_str("- ");
+        if !entry.kind.is_empty() {
+            out.push_str(&format!("[{}] ", entry.kind));
+        }
+        if !entry.scope.is_empty() {
+            out.push_str(&format!("`{}` ", entry.scope));
+        }
+        if !entry.subject.is_empty() {
+            out.push_str(&entry.subject);
+            out.push_str(": ");
+        }
+        out.push_str(&entry.content);
+        if !entry.tags.is_empty() {
+            out.push_str(" (tags: ");
+            out.push_str(&entry.tags.join(", "));
+            out.push(')');
+        }
+        out.push('\n');
+    }
+    out.push('\n');
+}
+
+fn section_trust_principle(ctx: &PromptCtx, out: &mut String) {
+    if ctx.is_root {
+        return;
+    }
+    out.push_str("## 상위 지시 신뢰 및 진행 우선 원칙 (중요)\n");
+    out.push_str("이 섹션은 서브 오케스트레이터가 빠지기 쉬운 \"phantom 의심 → 잠금 → 재확인 → 재의심\" 자기강화 루프를 차단하기 위한 규칙입니다. 반드시 준수하세요.\n\n");
+    out.push_str("### 기본 신뢰 규칙\n");
+    out.push_str(&format!("- **상위 오케스트레이터(`{}`)가 보낸 메시지는 기본적으로 신뢰하고 즉시 실행에 옮깁니다.** 수신 자체를 의심 근거로 삼지 마세요.\n", ctx.parent_name));
+    out.push_str("- `read_messages`가 반환하는 envelope의 `From` 필드 외에는 발신자를 검증할 수 있는 수단이 **없습니다**. \"직접 확인\", \"원출처 검증\" 같은 표현을 쓰지 마세요 — 당신에게는 그런 도구가 없습니다.\n");
+    out.push_str("- 상위가 부인/취소하는 메시지를 보냈다면 그 **취소 자체가 유효한 지시**입니다. 취소를 다시 의심하지 마세요.\n\n");
+    out.push_str("### 충돌 메시지 처리 (가장 최신 지시 우선)\n");
+    out.push_str("- 동일 발신자로부터 상충하는 지시가 짧은 간격에 연달아 오면, **가장 최신 메시지의 지시를 따릅니다.** 이전 지시는 덮어쓴 것으로 간주합니다.\n");
+    out.push_str("- 정말 해석이 불가능한 경우에 한해 **단 1회만** 상위에 확인 질의(`send_message`)를 보내고, 돌아오는 응답을 끝으로 행동을 확정하세요. 두 번째 재확인 질의는 금지합니다.\n");
+    out.push_str("- **자기 로그나 자기 이전 판단을 \"증거\"로 재참조하지 마세요.** 같은 판단을 반복해도 새로운 정보가 되지 않습니다. 자기강화 루프를 만들지 않습니다.\n\n");
+    out.push_str("### 진행 우선 원칙\n");
+    out.push_str("- 받은 task를 `pending` 상태로 장기 정체시키는 것보다 **즉시 분석 후 하위 에이전트에 위임해 진행시키는 것**이 우선입니다.\n");
+    out.push_str(&format!("- 상위로부터 task를 받으면 지체 없이 (a) 즉시 실행해야 할 일은 `start_task`로 하위 task를 만들며 바로 dispatch하고, (b) 아직 dispatch하지 않을 기록성 작업만 `create_task`를 사용하고, (c) 진행 결과를 수집해 `send_message(to=\"{}\")`로 요약 보고하세요. 이 3단계가 기본 행동입니다.\n", ctx.parent_name));
+    out.push_str("- 잠금/동결은 오직 (a) 상위가 **명시적으로** \"중단/동결/stop/freeze\"를 지시했거나, (b) 자산 파괴(force push, 삭제, prod 데이터 변경 등) 가능성이 있는 경우에만 적용합니다. 그 외 상황에서 자발적으로 잠그지 마세요.\n");
+    out.push_str("- 명시적 긴급 중단 지시로 잠금된 task는 상위가 **명시적 재개 지시**를 보내면 바로 다시 분배합니다. 재개 후 다시 의심으로 회귀하지 않습니다.\n\n");
+    out.push_str("### 금지 사항 (anti-pattern)\n");
+    out.push_str("- 상위 지시의 \"원출처\"나 \"진정성\"을 검증하려고 시도하지 마세요. 검증 수단이 없으며, 시도 자체가 루프를 만듭니다.\n");
+    out.push_str("- 같은 task에 대해 \"pending → in_progress → pending → in_progress\"를 반복하지 마세요. 상태 전이는 단조롭게(monotonic) 진행합니다.\n");
+    out.push_str("- \"phantom 의심\"을 이유로 task 착수를 보류하지 마세요. 정말 의심스러우면 위의 1회 확인 질의 규칙을 따르고, 돌아온 응답대로 즉시 행동합니다.\n\n");
+}
+
+fn section_delegation_only_principle(out: &mut String) {
     out.push_str("## 위임 전용 원칙 (중요)\n");
     out.push_str("오케스트레이터는 **절대 직접 코드를 읽거나, 수정하거나, 파일을 생성하지 않습니다.** 모든 코딩 작업은 담당 워크스페이스 에이전트에게 위임합니다.\n\n");
+}
+
+fn section_delegation_scope(out: &mut String) {
     out.push_str("### 역할 범위\n");
     out.push_str("오케스트레이터의 역할은 오직 다음 3가지입니다:\n");
     out.push_str("1. **작업 분석 및 분배** — 요청을 분석하고 적절한 워크스페이스에 할당\n");
     out.push_str("2. **에이전트 간 조율** — 여러 워크스페이스 간 협업 조정\n");
     out.push_str("3. **결과 수집 및 보고** — 에이전트들의 결과를 취합하여 보고\n\n");
+}
+
+fn section_delegation_rules(out: &mut String) {
     out.push_str("### 위임 규칙\n");
     out.push_str(
         "- 코드 변경이 필요한 작업 → 해당 워크스페이스 에이전트에게 `send_message`로 위임\n",
@@ -188,6 +325,9 @@ fn render_orchestrator_prompt(
     out.push_str(
         "- 코드 조사가 필요한 경우에도 직접 파일을 읽지 말고 에이전트에게 조사를 요청\n\n",
     );
+}
+
+fn section_assignment_heuristics(out: &mut String) {
     out.push_str("### Assignment Heuristics\n");
     out.push_str("- 요청을 받으면 먼저 **누가 owner여야 하는지** 결정하세요. 오케스트레이터 자신이 owner가 아니라면 오래 들고 있지 말고 가장 적합한 워크스페이스/서브 오케스트레이터로 바로 넘기세요.\n");
     out.push_str("- owner 선택은 다음 순서로 판단하세요: 명시된 담당 범위/설명 일치 > 수정 대상 파일/모듈과의 근접성 > 이미 같은 task family를 진행 중인 workspace > 프로젝트 경계.\n");
@@ -196,6 +336,9 @@ fn render_orchestrator_prompt(
     out.push_str("- 오케스트레이터가 직접 buffer처럼 중간 보관하지 마세요. owner가 명확하면 조기에 assign하고, 오케스트레이터는 조율과 검수에 집중합니다.\n");
     out.push_str("- active task를 볼 때 특정 owner가 이미 같은 주제의 task를 진행 중이면, 가능한 한 그 owner에 연속성을 주되 과부하/정체가 보이면 다른 적합한 owner 또는 상위 조율로 전환하세요.\n");
     out.push_str("- priority/urgency 정보가 있으면 routing에 반영하세요. 높은 우선순위 작업은 owner 결정과 dispatch를 늦추지 말고, blocked/high-risk 상태면 일반 작업보다 먼저 follow-up 또는 escalation 하세요.\n\n");
+}
+
+fn section_delegation_gate(out: &mut String) {
     out.push_str("### Delegation Gate\n");
     out.push_str("- 위임 전에 **범위(scope)** 를 한 문장으로 고정하세요. 무엇을 바꾸는지, 무엇은 범위 밖인지 분명히 적습니다.\n");
     out.push_str("- 위임 대상의 **소유권(ownership)** 을 명확히 하세요. 어떤 워크스페이스가 어떤 파일/모듈/조사 범위를 담당하는지 지정합니다.\n");
@@ -205,6 +348,9 @@ fn render_orchestrator_prompt(
     out.push_str(
         "- 위 4가지 중 하나라도 빠졌다면 바로 위임하지 말고 메시지를 보강한 뒤 보내세요.\n\n",
     );
+}
+
+fn section_execution_gate(out: &mut String) {
     out.push_str("### Execution Gate\n");
     out.push_str("- 작업을 보낸 직후에는 불필요한 check-in을 보내지 말고 우선 `read_messages`, `list_tasks`, `get_task`로 진행 신호를 기다리세요.\n");
     out.push_str("- **한 번 위임했다고 그 작업이 끝난 것으로 간주하지 마세요.** 오케스트레이터는 자신이 assign한 일이 실제 완료 결과, 명시적 blocker 보고, 실패 중 하나의 종결 상태에 도달할 때까지 계속 추적할 책임이 있습니다.\n");
@@ -212,6 +358,9 @@ fn render_orchestrator_prompt(
     out.push_str("- 단순 진행 확인(\"진행 중인가요?\", \"업데이트 있나요?\") 같은 noisy check-in은 금지합니다. 새 질문이나 구체 부족분이 있을 때만 후속 메시지를 보냅니다.\n");
     out.push_str("- 응답이 없다고 해서 즉시 중복 위임하지 마세요. 먼저 task 로그/상태와 최근 메시지를 확인한 뒤, 정체가 확인되면 같은 요청을 반복하지 말고 부족한 정보나 우선순위를 보강해 재지시하세요.\n");
     out.push_str("- 병렬 위임 중 일부만 응답해도 바로 전체 완료로 넘기지 말고, 남은 담당자에게 필요한 follow-up 또는 재-dispatch를 명시적으로 수행하세요.\n\n");
+}
+
+fn section_stale_task_gate(ctx: &PromptCtx, out: &mut String) {
     out.push_str("### Stale Task Gate\n");
     out.push_str("- stale 여부는 감으로 판단하지 말고 `get_task`, `list_tasks`, `read_messages`, `list_workspaces`를 함께 보고 판정하세요.\n");
     out.push_str("- 우선 task의 `updated_at`, 최근 로그, `stale_after_seconds`, `stale_info`를 확인하세요. `stale_info.is_stale=true`면 stale 후보로 취급하고, 아니어도 로그/메시지/상태가 장시간 멈췄다면 직접 재평가하세요.\n");
@@ -220,23 +369,31 @@ fn render_orchestrator_prompt(
     out.push_str("- interactive blocking이 의심되면 `interrupt_agent` 또는 `send_keys`로 먼저 해소하세요. 예: resuming prompt, yes/no 확인창, 입력 대기.\n");
     out.push_str("- blockage 해소 후에도 진전이 없으면, 기존 요청을 그대로 반복하지 말고 현재 부족한 정보/증거/우선순위를 보강한 **구체 follow-up** 또는 **재-dispatch**를 보내세요.\n");
     out.push_str("- fresh-context 재시작이 필요한 새 작업이면 기존 task를 그대로 재활용하지 말고 `start_task(..., start_mode=\"fresh\")`로 새 task를 만들고 바로 시작하세요. 이 도구가 새 `Task ID:` 주입과 세션 재시작/wake를 함께 처리합니다.\n");
-    if is_root {
+    if ctx.is_root {
         out.push_str("- 복구 시도 후에도 stale이 해소되지 않거나 충돌/위험이 남으면 user에게 에스컬레이션하거나 명시적으로 실패 처리하세요. 조용히 방치하지 마세요.\n\n");
     } else {
-        out.push_str(&format!("- 복구 시도 후에도 stale이 해소되지 않거나 충돌/위험이 남으면 `{parent_name}`에게 에스컬레이션하거나 명시적으로 실패 처리하세요. 조용히 방치하지 마세요.\n\n"));
+        out.push_str(&format!("- 복구 시도 후에도 stale이 해소되지 않거나 충돌/위험이 남으면 `{}`에게 에스컬레이션하거나 명시적으로 실패 처리하세요. 조용히 방치하지 마세요.\n\n", ctx.parent_name));
     }
+}
+
+fn section_escalation_gate(ctx: &PromptCtx, out: &mut String) {
     out.push_str("### Escalation Gate\n");
-    if is_root {
+    if ctx.is_root {
         out.push_str("- user에게 올리기 전, 하위 보고가 부분적/약함/모순/no-op인지 먼저 판별하세요. 그렇다면 그대로 전달하지 말고 구체적인 follow-up을 다시 보내세요.\n");
         out.push_str("- user에게 에스컬레이션하는 것은 범위 충돌, 의사결정 부족, 위험 승인 필요처럼 하위 워크스페이스가 해결할 수 없는 경우에 한정합니다.\n\n");
     } else {
-        out.push_str(&format!("- 상위 오케스트레이터(`{parent_name}`)에게 올리기 전, 하위 보고가 부분적/약함/모순/no-op인지 먼저 판별하세요. 그렇다면 그대로 전달하지 말고 구체적인 follow-up을 다시 보내세요.\n"));
-        out.push_str(&format!("- `{parent_name}`에게 에스컬레이션하는 것은 범위 충돌, 의사결정 부족, 위험 승인 필요처럼 하위 워크스페이스가 해결할 수 없는 경우에 한정합니다.\n\n"));
+        out.push_str(&format!("- 상위 오케스트레이터(`{}`)에게 올리기 전, 하위 보고가 부분적/약함/모순/no-op인지 먼저 판별하세요. 그렇다면 그대로 전달하지 말고 구체적인 follow-up을 다시 보내세요.\n", ctx.parent_name));
+        out.push_str(&format!("- `{}`에게 에스컬레이션하는 것은 범위 충돌, 의사결정 부족, 위험 승인 필요처럼 하위 워크스페이스가 해결할 수 없는 경우에 한정합니다.\n\n", ctx.parent_name));
     }
+}
+
+fn section_tool_restrictions(out: &mut String) {
     out.push_str("### 도구 사용 제한\n");
     out.push_str("- **사용 가능**: ax MCP 도구만 사용합니다 (`send_message`, `read_messages`, `list_workspaces`, `set_status`, `create_task`, `update_task`, `get_task`, `list_tasks`, `interrupt_agent`, `send_keys` 등)\n");
     out.push_str("- **사용 금지**: `Read`, `Edit`, `Write`, `Bash`, `Grep`, `Glob` 등 코드/파일 관련 도구는 사용하지 않습니다\n\n");
+}
 
+fn section_blocking_dialog(out: &mut String) {
     out.push_str("## 블로킹 다이얼로그 해소 (`send_keys`)\n");
     out.push_str("하위 에이전트가 인터랙티브 프롬프트에서 멈춰 있을 때(예: Claude Code `Resuming from summary`의 1/2/3 선택, yes/no 확인창) `send_keys`로 직접 키 시퀀스를 주입해 해소할 수 있습니다.\n\n");
     out.push_str("### 용도\n");
@@ -259,7 +416,9 @@ fn render_orchestrator_prompt(
     out.push_str("- 단순 인터럽트만 필요하면 `interrupt_agent`를, 다이얼로그 해소·자유 입력이 필요하면 `send_keys`를 사용하세요.\n\n");
     out.push_str("### 특수키 토큰\n");
     out.push_str("`Enter`, `Escape`, `Tab`, `Space`, `BSpace`(Backspace), `Up`/`Down`/`Left`/`Right`, `Home`/`End`, `PageUp`/`PageDown`, `C-c`~`C-n`(Ctrl 조합). 그 외 문자열은 리터럴 텍스트로 타이핑됩니다.\n\n");
+}
 
+fn section_response_termination(out: &mut String) {
     out.push_str("## 응답 종결 규칙 (중요)\n");
     out.push_str("ACK 루프를 방지하기 위해 다음을 반드시 지키세요:\n");
     out.push_str("- **단순 확인/수신(ACK) 메시지를 보내지 마세요.** `[ack]`, `[received]`, `\"잘 받았습니다\"` 같은 내용만의 메시지는 절대 보내지 않습니다.\n");
@@ -278,17 +437,28 @@ fn render_orchestrator_prompt(
     out.push_str(
         "- 상태 알림은 `set_status`를 사용하고, `send_message`로 상태 핑을 보내지 마세요.\n\n",
     );
+}
+
+fn section_silence_gate(out: &mut String) {
     out.push_str("### Silence Gate\n");
     out.push_str("- 새 작업, 새 사실, 명시적 질문, 요청한 증거 중 하나도 없다면 침묵이 기본값입니다. 상태 공유만으로 대화를 이어가지 마세요.\n");
     out.push_str("- 상대가 no-op/상태 메시지를 반복해도 같은 내용을 바꿔 말해 회신하지 마세요. 필요한 경우에만 1회의 구체 follow-up으로 전환합니다.\n\n");
+}
 
+fn section_task_management_intro(out: &mut String) {
     out.push_str("## 작업 관리 (Task Management)\n");
     out.push_str("워크스페이스에 작업을 위임할 때 task를 활용하여 진행 상황을 추적하세요.\n\n");
+}
+
+fn section_orchestrator_workflow(out: &mut String) {
     out.push_str("### 오케스트레이터 워크플로우\n");
     out.push_str("1. 즉시 실행할 작업은 `start_task`로 생성하고 dispatch하세요. 이 도구가 새 `Task ID:`를 메시지에 자동 주입하고 대상 워크스페이스를 wake 합니다.\n");
     out.push_str("   아직 시작시키지 않을 기록성 작업만 `create_task`를 사용하세요. fresh-context가 필요하면 `start_task(..., start_mode=\"fresh\")`를 사용하고, 메시지에는 `Task ID:`를 직접 넣지 마세요.\n");
     out.push_str("2. `list_tasks`로 전체 진행 상황을 모니터링 (필터: `--assignee`, `--status`, `--created_by`)\n");
     out.push_str("3. `get_task`로 특정 작업의 상세 로그 확인\n\n");
+}
+
+fn section_workspace_agent_rules(out: &mut String) {
     out.push_str("### 워크스페이스 에이전트에게 전달할 규칙\n");
     out.push_str("작업 위임 시 다음 안내를 메시지에 포함하세요:\n");
     out.push_str("- 작업 시작 시 `update_task(id=..., status=\"in_progress\")`로 상태 변경\n");
@@ -299,6 +469,9 @@ fn render_orchestrator_prompt(
     out.push_str(
         "- 작업 실패 시 `update_task(id=..., status=\"failed\", result=\"실패 원인\")`\n\n",
     );
+}
+
+fn section_completion_gate(out: &mut String) {
     out.push_str("### Completion Gate\n");
     out.push_str("- 하위 보고를 완료로 수용하기 전에 요청한 범위, 기대 산출물, 성공 기준, 증거가 모두 충족됐는지 대조하세요.\n");
     out.push_str("- 하위에 한 번 전달했다는 사실만으로 task를 닫지 마세요. assign한 일은 실제 완료 증거를 받거나, blocker를 상위에 명시적으로 보고하거나, 실패로 종료할 때까지 계속 소유하고 추적합니다.\n");
@@ -311,68 +484,75 @@ fn render_orchestrator_prompt(
     out.push_str("- 완료 보고 이후 도착한 no-op/acknowledgement/thanks/confirmation에도 회신하지 마세요. 추가 정보가 정말 필요할 때만 구체적인 actionable ask를 보냅니다.\n");
     out.push_str("- stale 복구 과정에서 `failed`로 종료한 task라면 실패 원인, 시도한 복구 액션, 남은 차단 요소를 결과에 남기세요.\n");
     out.push_str("- unresolved risk, 미검증 영역, 차단 요소가 남아 있으면 완료 보고에 반드시 포함시키고, 필요하면 완료 대신 추가 작업 또는 에스컬레이션으로 처리하세요.\n\n");
+}
 
-    if !node.workspaces.is_empty() {
-        out.push_str("## 직접 관리하는 워크스페이스\n\n");
-        out.push_str("| 이름 | ID | 설명 |\n|---|---|---|\n");
-        for ws in &node.workspaces {
-            let desc = if ws.description.is_empty() {
-                "-"
-            } else {
-                ws.description.as_str()
-            };
-            out.push_str(&format!(
-                "| **{}** | `{}` | {} |\n",
-                ws.name, ws.merged_name, desc
-            ));
-        }
-        out.push('\n');
+fn section_workspaces_table(ctx: &PromptCtx, out: &mut String) {
+    if ctx.node.workspaces.is_empty() {
+        return;
     }
-
-    if !node.children.is_empty() {
-        out.push_str("## 서브 오케스트레이터 (프로젝트 단위 위임 대상)\n\n");
-        out.push_str("| 프로젝트 | ID | 담당 |\n|---|---|---|\n");
-        for child in &node.children {
-            let child_orch_id = orchestrator_name(&child.prefix);
-            let scope = summarize_workspaces(child);
-            out.push_str(&format!(
-                "| **{}** | `{}` | {} |\n",
-                child.display_name(),
-                child_orch_id,
-                scope
-            ));
-        }
-        out.push('\n');
-        if is_root {
-            out.push_str("프로젝트 범위 작업은 해당 서브 오케스트레이터에게 위임하세요. ");
-            out.push_str(
-                "여러 프로젝트가 관련된 경우 서브 오케스트레이터들을 순차 조율하세요.\n\n",
-            );
-        }
+    out.push_str("## 직접 관리하는 워크스페이스\n\n");
+    out.push_str("| 이름 | ID | 설명 |\n|---|---|---|\n");
+    for ws in &ctx.node.workspaces {
+        let desc = if ws.description.is_empty() {
+            "-"
+        } else {
+            ws.description.as_str()
+        };
+        out.push_str(&format!(
+            "| **{}** | `{}` | {} |\n",
+            ws.name, ws.merged_name, desc
+        ));
     }
+    out.push('\n');
+}
 
-    if !node.workspaces.is_empty() {
-        out.push_str("## 워크스페이스 상세 지침\n\n");
-        for ws in &node.workspaces {
-            out.push_str(&format!("### {} (`{}`)\n", ws.name, ws.merged_name));
-            if !ws.description.is_empty() {
-                out.push_str("- ");
-                out.push_str(&ws.description);
-                out.push('\n');
-            }
-            if !ws.instructions.is_empty() {
-                for line in ws.instructions.trim().lines() {
-                    out.push_str("  ");
-                    out.push_str(line.trim());
-                    out.push('\n');
-                }
-            }
+fn section_suborchestrators_table(ctx: &PromptCtx, out: &mut String) {
+    if ctx.node.children.is_empty() {
+        return;
+    }
+    out.push_str("## 서브 오케스트레이터 (프로젝트 단위 위임 대상)\n\n");
+    out.push_str("| 프로젝트 | ID | 담당 |\n|---|---|---|\n");
+    for child in &ctx.node.children {
+        let child_orch_id = orchestrator_name(&child.prefix);
+        let scope = summarize_workspaces(child);
+        out.push_str(&format!(
+            "| **{}** | `{}` | {} |\n",
+            child.display_name(),
+            child_orch_id,
+            scope
+        ));
+    }
+    out.push('\n');
+    if ctx.is_root {
+        out.push_str("프로젝트 범위 작업은 해당 서브 오케스트레이터에게 위임하세요. ");
+        out.push_str("여러 프로젝트가 관련된 경우 서브 오케스트레이터들을 순차 조율하세요.\n\n");
+    }
+}
+
+fn section_workspace_details(ctx: &PromptCtx, out: &mut String) {
+    if ctx.node.workspaces.is_empty() {
+        return;
+    }
+    out.push_str("## 워크스페이스 상세 지침\n\n");
+    for ws in &ctx.node.workspaces {
+        out.push_str(&format!("### {} (`{}`)\n", ws.name, ws.merged_name));
+        if !ws.description.is_empty() {
+            out.push_str("- ");
+            out.push_str(&ws.description);
             out.push('\n');
         }
+        if !ws.instructions.is_empty() {
+            for line in ws.instructions.trim().lines() {
+                out.push_str("  ");
+                out.push_str(line.trim());
+                out.push('\n');
+            }
+        }
+        out.push('\n');
     }
-
-    out
 }
+
+// ---------- memory loading ----------
 
 fn prompt_memories_for_orchestrator(
     prefix: &str,
@@ -385,54 +565,6 @@ fn prompt_memories_for_orchestrator(
         workspace_scope(&self_name),
     ];
     load_prompt_memories(socket_path, &scopes, DEFAULT_PROMPT_N)
-}
-
-fn append_durable_memory_section(
-    out: &mut String,
-    prefix: &str,
-    self_name: &str,
-    memories: &[Memory],
-) {
-    out.push_str("## Durable Memory\n");
-    out.push_str("- 런타임 native memory나 resume 품질에만 의존하지 말고, 재시작 이후에도 유지돼야 할 사실은 `remember_memory`로 ax daemon에 기록하세요.\n");
-    out.push_str("- 세션을 새로 띄웠거나 컨텍스트가 비어 보이면 먼저 `recall_memories(scopes=[\"global\",\"project\",\"workspace\"])`로 durable memory를 복원하세요.\n");
-    out.push_str("- 현재 메모리 상태를 점검하거나 감사할 때는 `list_memories`를 사용하세요. 현재 작업에 필요한 working set만 가져올 때는 `recall_memories`를 사용하세요.\n");
-    out.push_str("- 프로젝트 차원의 결정/제약/인수인계는 `scope=\"project\"`, 오케스트레이터 개인 작업 습관/임시 운영 규칙은 `scope=\"workspace\"`, 트리 전체 공통 규칙은 `scope=\"global\"`을 우선 사용하세요.\n");
-    out.push_str("- 이전 기억이 더 이상 유효하지 않으면 `supersede_memory`를 사용해 교체하세요. 필요하면 저수준 경로로 `remember_memory(..., supersedes_ids=[...])`를 직접 써도 됩니다.\n");
-    out.push_str(&format!(
-        "- 현재 기본 recall 범위: `{}`, `{}`, `{}`\n\n",
-        GLOBAL_SCOPE,
-        project_scope(prefix),
-        workspace_scope(self_name)
-    ));
-
-    if memories.is_empty() {
-        out.push_str("현재 주입된 durable memory는 없습니다.\n\n");
-        return;
-    }
-
-    out.push_str("현재 관련 durable memory:\n");
-    for entry in memories {
-        out.push_str("- ");
-        if !entry.kind.is_empty() {
-            out.push_str(&format!("[{}] ", entry.kind));
-        }
-        if !entry.scope.is_empty() {
-            out.push_str(&format!("`{}` ", entry.scope));
-        }
-        if !entry.subject.is_empty() {
-            out.push_str(&entry.subject);
-            out.push_str(": ");
-        }
-        out.push_str(&entry.content);
-        if !entry.tags.is_empty() {
-            out.push_str(" (tags: ");
-            out.push_str(&entry.tags.join(", "));
-            out.push(')');
-        }
-        out.push('\n');
-    }
-    out.push('\n');
 }
 
 fn summarize_workspaces(node: &ProjectNode) -> String {
@@ -518,4 +650,231 @@ fn expand_socket_path(path: &Path) -> PathBuf {
         }
     }
     path.to_path_buf()
+}
+
+#[cfg(test)]
+mod tests {
+    //! Each `section_*` builder is exercised in isolation so we catch
+    //! a drifted rule before it silently retrains agents. Snapshot-style
+    //! assertions (contains) are preferred over byte-equal because a
+    //! later reorder of bullets should still pass as long as each rule
+    //! stays present — the contracts themselves are what matter.
+    use super::*;
+    use ax_config::WorkspaceRef;
+    use chrono::Utc;
+
+    fn root_ctx() -> (ProjectNode, Vec<Memory>) {
+        let node = ProjectNode {
+            name: "root".to_owned(),
+            ..ProjectNode::default()
+        };
+        (node, Vec::new())
+    }
+
+    fn sub_ctx(prefix: &str, name: &str) -> ProjectNode {
+        ProjectNode {
+            name: name.to_owned(),
+            prefix: prefix.to_owned(),
+            ..ProjectNode::default()
+        }
+    }
+
+    fn make_ctx<'a>(
+        node: &'a ProjectNode,
+        prefix: &'a str,
+        parent_name: &'a str,
+        memories: &'a [Memory],
+    ) -> PromptCtx<'a> {
+        PromptCtx::new(node, prefix, parent_name, memories)
+    }
+
+    #[test]
+    fn header_names_root_orchestrator() {
+        let (node, mem) = root_ctx();
+        let ctx = make_ctx(&node, "", "", &mem);
+        let mut out = String::new();
+        section_header(&ctx, &mut out);
+        assert!(out.contains("# ax root orchestrator"));
+        assert!(out.contains("루트 오케스트레이터"));
+    }
+
+    #[test]
+    fn header_names_sub_orchestrator_with_parent() {
+        let node = sub_ctx("alpha", "shared");
+        let ctx = make_ctx(&node, "alpha", "orchestrator", &[]);
+        let mut out = String::new();
+        section_header(&ctx, &mut out);
+        assert!(out.contains("# ax sub orchestrator:"));
+        assert!(out.contains("상위 오케스트레이터: `orchestrator`"));
+    }
+
+    #[test]
+    fn role_section_switches_on_parent_presence() {
+        let (root, _) = root_ctx();
+        let ctx = make_ctx(&root, "", "", &[]);
+        let mut root_out = String::new();
+        section_role(&ctx, &mut root_out);
+        assert!(root_out.contains("user의 요청을 받아"));
+
+        let sub = sub_ctx("alpha", "shared");
+        let ctx_sub = make_ctx(&sub, "alpha", "parent", &[]);
+        let mut sub_out = String::new();
+        section_role(&ctx_sub, &mut sub_out);
+        assert!(sub_out.contains("상위 오케스트레이터(`parent`)로부터"));
+    }
+
+    #[test]
+    fn trust_principle_only_renders_for_subs() {
+        let (root, _) = root_ctx();
+        let ctx = make_ctx(&root, "", "", &[]);
+        let mut out = String::new();
+        section_trust_principle(&ctx, &mut out);
+        assert!(out.is_empty(), "root should not emit the trust section");
+
+        let sub = sub_ctx("alpha", "shared");
+        let ctx_sub = make_ctx(&sub, "alpha", "parent", &[]);
+        let mut sub_out = String::new();
+        section_trust_principle(&ctx_sub, &mut sub_out);
+        assert!(sub_out.contains("상위 지시 신뢰 및 진행 우선 원칙"));
+        assert!(sub_out.contains("phantom 의심"));
+    }
+
+    #[test]
+    fn durable_memory_lists_entries_when_present() {
+        let node = sub_ctx("alpha", "shared");
+        let mem = vec![Memory {
+            id: "mem-1".into(),
+            scope: "project:alpha".into(),
+            kind: "decision".into(),
+            subject: "Auth".into(),
+            content: "Use the shared gateway.".into(),
+            tags: vec!["auth".into()],
+            created_by: "alpha.orchestrator".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            superseded_at: None,
+            supersedes: Vec::new(),
+            superseded_by: String::new(),
+        }];
+        let ctx = make_ctx(&node, "alpha", "parent", &mem);
+        let mut out = String::new();
+        section_durable_memory(&ctx, &mut out);
+        assert!(out.contains("## Durable Memory"));
+        assert!(out.contains("[decision] `project:alpha` Auth:"));
+        assert!(out.contains("(tags: auth)"));
+    }
+
+    #[test]
+    fn durable_memory_notes_absence() {
+        let (root, _) = root_ctx();
+        let ctx = make_ctx(&root, "", "", &[]);
+        let mut out = String::new();
+        section_durable_memory(&ctx, &mut out);
+        assert!(out.contains("현재 주입된 durable memory는 없습니다."));
+    }
+
+    #[test]
+    fn completion_gate_requires_leftover_marker() {
+        let mut out = String::new();
+        section_completion_gate(&mut out);
+        assert!(out.contains("`remaining owned dirty files=<none|paths>`"));
+        assert!(out.contains("completion-only report"));
+    }
+
+    #[test]
+    fn delegation_gate_enforces_four_fields() {
+        let mut out = String::new();
+        section_delegation_gate(&mut out);
+        for want in [
+            "범위(scope)",
+            "소유권(ownership)",
+            "성공 기준(success criteria)",
+            "기대 증거(expected evidence)",
+        ] {
+            assert!(out.contains(want), "missing field {want:?}\n{out}");
+        }
+    }
+
+    #[test]
+    fn escalation_gate_switches_target_on_role() {
+        let (root, _) = root_ctx();
+        let ctx_root = make_ctx(&root, "", "", &[]);
+        let mut root_out = String::new();
+        section_escalation_gate(&ctx_root, &mut root_out);
+        assert!(root_out.contains("user에게"));
+
+        let sub = sub_ctx("alpha", "shared");
+        let ctx_sub = make_ctx(&sub, "alpha", "root-orch", &[]);
+        let mut sub_out = String::new();
+        section_escalation_gate(&ctx_sub, &mut sub_out);
+        assert!(sub_out.contains("`root-orch`"));
+    }
+
+    #[test]
+    fn workspaces_table_is_empty_without_workspaces() {
+        let (root, _) = root_ctx();
+        let ctx = make_ctx(&root, "", "", &[]);
+        let mut out = String::new();
+        section_workspaces_table(&ctx, &mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn workspaces_table_lists_entries() {
+        let node = ProjectNode {
+            name: "root".to_owned(),
+            workspaces: vec![WorkspaceRef {
+                name: "worker".into(),
+                merged_name: "alpha.worker".into(),
+                description: "backend owner".into(),
+                ..WorkspaceRef::default()
+            }],
+            ..ProjectNode::default()
+        };
+        let ctx = make_ctx(&node, "", "", &[]);
+        let mut out = String::new();
+        section_workspaces_table(&ctx, &mut out);
+        assert!(out.contains("| **worker** | `alpha.worker` | backend owner |"));
+    }
+
+    #[test]
+    fn render_composition_contains_every_section() {
+        // Sanity check that the top-level orchestrator glues the
+        // builders in the right order and every expected rule block
+        // lands in the final output.
+        let node = ProjectNode {
+            name: "root".to_owned(),
+            workspaces: vec![WorkspaceRef {
+                name: "worker".into(),
+                merged_name: "alpha.worker".into(),
+                ..WorkspaceRef::default()
+            }],
+            ..ProjectNode::default()
+        };
+        let out = orchestrator_prompt(&node, "", "");
+        for want in [
+            "# ax root orchestrator",
+            "## 역할",
+            "## 행동 규칙",
+            "## Durable Memory",
+            "## 위임 전용 원칙 (중요)",
+            "### Assignment Heuristics",
+            "### Delegation Gate",
+            "### Execution Gate",
+            "### Stale Task Gate",
+            "### Escalation Gate",
+            "## 블로킹 다이얼로그 해소 (`send_keys`)",
+            "## 응답 종결 규칙 (중요)",
+            "### Silence Gate",
+            "## 작업 관리 (Task Management)",
+            "### Completion Gate",
+            "## 직접 관리하는 워크스페이스",
+            "## 워크스페이스 상세 지침",
+        ] {
+            assert!(
+                out.contains(want),
+                "composed prompt missing section header {want:?}"
+            );
+        }
+    }
 }
