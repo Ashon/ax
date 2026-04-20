@@ -224,9 +224,11 @@ impl Drop for DaemonProc {
 pub fn start_daemon(sandbox: &Sandbox, ax: &Path) -> Result<DaemonProc, HarnessError> {
     let sock = sandbox.socket().to_path_buf();
     let mut cmd = Command::new(ax);
-    cmd.args(["--socket"])
+    // `--socket` is a subcommand-level flag on the CLI, not a global.
+    // Putting it before `daemon` makes the parser reject it as an
+    // unknown command.
+    cmd.args(["daemon", "start", "--socket"])
         .arg(&sock)
-        .args(["daemon", "start"])
         .current_dir(sandbox.project().parent().unwrap_or(sandbox.root()))
         .env_clear()
         .envs(sandbox.env().iter().map(|(k, v)| (k, v)))
@@ -265,11 +267,11 @@ pub fn ax_up(sandbox: &Sandbox, ax: &Path) -> Result<(), HarnessError> {
     run_logged(
         ax.to_string_lossy().as_ref(),
         [
+            "up",
             "--config",
             sandbox.config_path().to_string_lossy().as_ref(),
             "--socket",
             sandbox.socket().to_string_lossy().as_ref(),
-            "up",
         ]
         .iter()
         .copied(),
@@ -282,11 +284,11 @@ pub fn ax_down(sandbox: &Sandbox, ax: &Path) {
     let _ = run_logged(
         ax.to_string_lossy().as_ref(),
         [
+            "down",
             "--config",
             sandbox.config_path().to_string_lossy().as_ref(),
             "--socket",
             sandbox.socket().to_string_lossy().as_ref(),
-            "down",
         ]
         .iter()
         .copied(),
