@@ -182,7 +182,11 @@ impl Daemon {
         let flusher = queue.spawn_flusher();
         let wake_loop = wake_scheduler.clone().spawn();
         let idle_loop = spawn_idle_sleep_loop(session_manager.clone());
-        let reconcile_loop = spawn_stranded_task_reconciler(task_store.clone());
+        let reconcile_loop = spawn_stranded_task_reconciler(
+            task_store.clone(),
+            queue.clone(),
+            wake_scheduler.clone(),
+        );
         let join = tokio::spawn(run_accept_loop(
             listener,
             AcceptLoopCtx {
@@ -213,6 +217,19 @@ impl Daemon {
 
 const IDLE_SLEEP_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 const STRANDED_TASK_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+/// An `InProgress` task whose assignee is idle for this long without
+/// sending any update is presumed to have silently exited its turn
+/// without calling `update_task`. Short enough that a stuck agent
+/// gets nudged within a few minutes; long enough that an agent
+/// genuinely in the middle of a multi-step operation isn't
+/// interrupted.
+const SILENT_TASK_STALE_THRESHOLD_SECS: i64 = 180;
+/// Upper bound on how many nudges a single silent task can accrue
+/// before the reconciler gives up. Each successful nudge bumps the
+/// task's `dispatch_count` via `record_dispatch`, so this doubles as
+/// the escalation trigger: if a task needs more nudges than this, a
+/// human should intervene.
+const SILENT_TASK_NUDGE_CAP: i64 = 5;
 
 /// Handle the idle-sleep background task owns. Mirrors the flusher /
 /// wake-loop pattern so shutdown is graceful.
@@ -288,13 +305,29 @@ fn spawn_idle_sleep_loop(session_manager: Arc<SessionManager<RealTmux>>) -> Idle
     }
 }
 
-/// Catch tasks whose assignee tmux session has disappeared while the
-/// daemon stayed up — the in-flight counterpart to the startup
-/// recovery sweep in `Daemon::with_state_dir`. Without it a crashed
-/// agent leaves its task `InProgress` forever, the parent rollup
-/// keeps lying, and the wake scheduler has no reason to fire because
-/// the inbox is empty.
-fn spawn_stranded_task_reconciler(task_store: Arc<TaskStore>) -> ReconcileLoopHandle {
+/// Two sweeps on one ticker:
+///
+/// 1. **Dead-session recovery** — `recover_stale_in_progress` resets
+///    any `InProgress` task whose assignee tmux session is gone.
+///    This is the in-flight counterpart to `Daemon::with_state_dir`'s
+///    startup sweep; without it, a crashed agent strands its task
+///    until the daemon is bounced.
+///
+/// 2. **Silent-exit nudge** — catches the subtler case where the
+///    assignee *is* alive and idle but never called `update_task`.
+///    The wake scheduler can't help because its trigger is an inbox
+///    message; with no inbox traffic an idle agent that forgot to
+///    close its task just sits there. The reconciler enqueues a
+///    reminder message, wakes the session, and bumps
+///    `last_dispatch_at` via `record_dispatch`. Subsequent ticks skip
+///    the task until it goes stale again, and once its
+///    `dispatch_count` hits `SILENT_TASK_NUDGE_CAP` the reconciler
+///    hands off to a human.
+fn spawn_stranded_task_reconciler(
+    task_store: Arc<TaskStore>,
+    queue: Arc<MessageQueue>,
+    wake_scheduler: Arc<WakeScheduler<RealWakeBackend>>,
+) -> ReconcileLoopHandle {
     use std::sync::atomic::{AtomicBool, Ordering};
     let stop = Arc::new(AtomicBool::new(false));
     let stop_task = stop.clone();
@@ -307,28 +340,79 @@ fn spawn_stranded_task_reconciler(task_store: Arc<TaskStore>) -> ReconcileLoopHa
                 break;
             }
             let store = task_store.clone();
-            // The liveness probe shells out to tmux, so hop onto a
-            // blocking thread. The sweep itself is CPU-cheap — it's
-            // the N tmux has-session calls that make this worth
-            // offloading.
-            let recovered = tokio::task::spawn_blocking(move || {
-                store.recover_stale_in_progress(ax_tmux::session_exists)
-            })
-            .await
-            .unwrap_or_default();
-            if !recovered.is_empty() {
-                tracing::info!(
-                    count = recovered.len(),
-                    tasks = ?recovered,
-                    "reconciled stranded in_progress tasks with dead assignee sessions"
-                );
-            }
+            let q = queue.clone();
+            let ws = wake_scheduler.clone();
+            // tmux liveness/idle checks shell out, so hop onto a
+            // blocking thread. Both passes share this one offload.
+            tokio::task::spawn_blocking(move || reconcile_once(&store, &q, &ws))
+                .await
+                .ok();
         }
     });
     ReconcileLoopHandle {
         stop,
         join: Some(join),
     }
+}
+
+fn reconcile_once(
+    task_store: &TaskStore,
+    queue: &MessageQueue,
+    wake_scheduler: &WakeScheduler<RealWakeBackend>,
+) {
+    let recovered = task_store.recover_stale_in_progress(ax_tmux::session_exists);
+    if !recovered.is_empty() {
+        tracing::info!(
+            count = recovered.len(),
+            tasks = ?recovered,
+            "reconciled stranded in_progress tasks with dead assignee sessions"
+        );
+    }
+
+    let now = chrono::Utc::now();
+    let threshold = chrono::Duration::seconds(SILENT_TASK_STALE_THRESHOLD_SECS);
+    for task in task_store.list_silent_in_progress(now, threshold) {
+        if task.dispatch_count >= SILENT_TASK_NUDGE_CAP {
+            // Escalation boundary: further nudges are just noise.
+            // Leaving the task as-is lets a human notice via
+            // `list_tasks` / TUI filters.
+            continue;
+        }
+        if !ax_tmux::session_exists(&task.assignee) {
+            continue; // handled by the recovery pass above
+        }
+        if !ax_tmux::is_idle(&task.assignee) {
+            continue;
+        }
+        if queue.pending_count(&task.assignee) > 0 {
+            continue; // wake scheduler will handle the existing traffic
+        }
+
+        let body = ax_daemon_helpers::build_task_reminder_message(
+            &task,
+            "Assignee looks idle but the task is still `in_progress`. \
+             Call `update_task` to report progress, mark it `completed` \
+             with the leftover-scope declaration, or `failed` with a \
+             reason — don't leave the task open.",
+        );
+        let msg = ax_daemon_helpers::task_aware_message("reconciler", &task.assignee, &body);
+        queue.enqueue(msg);
+        let _ = task_store.record_dispatch(&task.id, &task.assignee, now);
+        wake_scheduler.schedule(&task.assignee, "reconciler");
+        tracing::info!(
+            task_id = %task.id,
+            assignee = %task.assignee,
+            dispatch_count = task.dispatch_count + 1,
+            "nudged silent in_progress task"
+        );
+    }
+}
+
+// Thin alias so the reconciler doesn't depend on the task_helpers
+// module path shape — the helpers are `pub(crate)` and calling them
+// directly keeps the boundary explicit.
+mod ax_daemon_helpers {
+    pub(super) use crate::task_helpers::{build_task_reminder_message, task_aware_message};
 }
 
 /// Hook the session manager into the wake scheduler's missing-session

@@ -580,6 +580,37 @@ impl TaskStore {
         Some(snapshot)
     }
 
+    /// List `InProgress` tasks whose assignee is set and whose most
+    /// recent update is older than `stale_threshold`. Caller is
+    /// responsible for liveness/idle/inbox checks and for deciding
+    /// whether to nudge — this is a read-only selector so it can be
+    /// called from background loops without locking against writer
+    /// paths for long.
+    ///
+    /// Compared to `recover_stale_in_progress`, which resets tasks
+    /// whose assignee is *gone*, this selector targets the subtler
+    /// "assignee is alive but forgot to close the loop" case.
+    pub fn list_silent_in_progress(
+        &self,
+        now: DateTime<Utc>,
+        stale_threshold: chrono::Duration,
+    ) -> Vec<Task> {
+        let inner = self.inner.lock().expect("task store poisoned");
+        inner
+            .values()
+            .filter(|task| {
+                if task.removed_at.is_some()
+                    || !matches!(task.status, TaskStatus::InProgress)
+                    || task.assignee.is_empty()
+                {
+                    return false;
+                }
+                now.signed_duration_since(task.updated_at) >= stale_threshold
+            })
+            .cloned()
+            .collect()
+    }
+
     pub fn runnable_by_assignee(&self, assignee: &str, now: DateTime<Utc>) -> Vec<Task> {
         let inner = self.inner.lock().expect("task store poisoned");
         inner
@@ -1271,6 +1302,76 @@ mod tests {
         assert!(reset.is_empty());
         let reloaded = store.get(&task.id).expect("task");
         assert!(matches!(reloaded.status, TaskStatus::Completed));
+    }
+
+    #[test]
+    fn list_silent_in_progress_matches_idle_shape() {
+        let store = make_store();
+        let task = seed_in_progress_task(&store);
+        // Freshly-updated task: inside the threshold, should not match.
+        let now = Utc::now();
+        let fresh = store.list_silent_in_progress(now, chrono::Duration::seconds(60));
+        assert!(fresh.is_empty(), "fresh task must not appear silent");
+
+        // Reach in and age the task past the threshold. This mimics
+        // the real condition where the agent's last update was
+        // minutes ago.
+        {
+            let mut inner = store.inner.lock().expect("lock");
+            let t = inner.get_mut(&task.id).expect("task");
+            t.updated_at = now - chrono::Duration::seconds(200);
+        }
+        let stale = store.list_silent_in_progress(now, chrono::Duration::seconds(60));
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].id, task.id);
+    }
+
+    #[test]
+    fn list_silent_in_progress_excludes_terminal_and_pending_and_removed() {
+        let store = make_store();
+        // Pending: never matches.
+        let pending = seed_in_progress_task(&store);
+        {
+            let mut inner = store.inner.lock().expect("lock");
+            let t = inner.get_mut(&pending.id).expect("task");
+            t.status = TaskStatus::Pending;
+            t.updated_at = Utc::now() - chrono::Duration::seconds(500);
+        }
+
+        // Completed: never matches.
+        let completed = seed_in_progress_task(&store);
+        store
+            .update(
+                &completed.id,
+                Some(TaskStatus::Completed),
+                Some("done; remaining owned dirty files=<none>".into()),
+                None,
+                "worker",
+            )
+            .expect("complete");
+
+        // Removed: never matches even if in_progress + old.
+        let removed = seed_in_progress_task(&store);
+        {
+            let mut inner = store.inner.lock().expect("lock");
+            let t = inner.get_mut(&removed.id).expect("task");
+            t.removed_at = Some(Utc::now());
+            t.updated_at = Utc::now() - chrono::Duration::seconds(500);
+        }
+
+        // Empty-assignee in_progress: never matches (shouldn't happen
+        // in normal flow but the filter should hold anyway).
+        let orphan = seed_in_progress_task(&store);
+        {
+            let mut inner = store.inner.lock().expect("lock");
+            let t = inner.get_mut(&orphan.id).expect("task");
+            t.assignee.clear();
+            t.updated_at = Utc::now() - chrono::Duration::seconds(500);
+        }
+
+        let silent = store
+            .list_silent_in_progress(Utc::now(), chrono::Duration::seconds(60));
+        assert!(silent.is_empty(), "selector should reject all fixtures");
     }
 
     #[test]
