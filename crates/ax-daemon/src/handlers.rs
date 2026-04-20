@@ -175,9 +175,17 @@ fn handle_send_message_with_dispatch<B: DispatchBackend + Clone>(
         .decode_payload()
         .map_err(|e| HandlerError::DecodePayload("send_message", e))?;
     require_registered(workspace)?;
-    if payload.to == workspace {
-        return Err(HandlerError::Logic("cannot send message to self".into()));
-    }
+
+    let plan = crate::pure_decisions::plan_send_message(workspace, &payload.to, &payload.config_path);
+    let ensure_runnable_path = match &plan {
+        crate::pure_decisions::SendMessagePlan::Reject { reason } => {
+            return Err(HandlerError::Logic(reason.clone()));
+        }
+        crate::pure_decisions::SendMessagePlan::Enqueue => None,
+        crate::pure_decisions::SendMessagePlan::EnqueueAndEnsureRunnable { config_path } => {
+            Some(config_path.clone())
+        }
+    };
 
     let msg = Message {
         id: format!("msg-{}", Uuid::new_v4()),
@@ -193,12 +201,11 @@ fn handle_send_message_with_dispatch<B: DispatchBackend + Clone>(
     push_if_registered(ctx, &payload.to, &msg);
     ctx.wake_scheduler.schedule(&payload.to, workspace);
 
-    let config_path = payload.config_path.trim();
-    if !config_path.is_empty() {
+    if let Some(config_path) = ensure_runnable_path {
         dispatch_runnable_work(
             dispatch,
             &ctx.socket_path,
-            Path::new(config_path),
+            Path::new(&config_path),
             ax_bin,
             &payload.to,
             workspace,
@@ -454,12 +461,25 @@ fn dispatch_task_start(
     task: &Task,
     _workspace: &str,
 ) -> Result<TaskDispatch, HandlerError> {
-    if task.dispatch_message.trim().is_empty() {
-        return Ok(TaskDispatch {
-            message_id: String::new(),
-            status: "waiting_for_input".into(),
-        });
-    }
+    use crate::pure_decisions::{plan_task_start_dispatch, TaskStartDispatchPlan};
+
+    let plan = plan_task_start_dispatch(task);
+    let config_path_to_ensure = match plan {
+        TaskStartDispatchPlan::WaitingForInput => {
+            return Ok(TaskDispatch {
+                message_id: String::new(),
+                status: "waiting_for_input".into(),
+            });
+        }
+        TaskStartDispatchPlan::Skip { reason } => {
+            return Err(HandlerError::Logic(format!(
+                "task {} cannot be dispatched: {reason}",
+                task.id
+            )));
+        }
+        TaskStartDispatchPlan::Queue { config_path, .. } => config_path,
+    };
+
     let msg = task_aware_message(&task.created_by, &task.assignee, &task.dispatch_message);
     let msg = ctx.queue.enqueue(msg);
     ctx.task_store
@@ -468,10 +488,9 @@ fn dispatch_task_start(
     push_if_registered(ctx, &task.assignee, &msg);
     ctx.wake_scheduler
         .schedule(&task.assignee, &task.created_by);
-    let config_path = task.dispatch_config_path.trim();
-    if !config_path.is_empty() {
+    if let Some(config_path) = config_path_to_ensure {
         ctx.session_manager
-            .ensure_runnable(config_path, &task.assignee, &task.created_by, false)
+            .ensure_runnable(&config_path, &task.assignee, &task.created_by, false)
             .map_err(|e| {
                 HandlerError::Logic(format!(
                     "dispatch task {} -> {}: {e}",

@@ -17,7 +17,7 @@
 //! `decideTaskRun` / `decideTeamFinalization` / `decideHookFollowUp`
 //! keep the routing logic testable in isolation.
 
-use ax_proto::types::Task;
+use ax_proto::types::{Task, TaskStatus};
 
 /// Sub-action the `intervene_task` handler should run. The string
 /// on the wire is user-supplied, so an unknown action surfaces as
@@ -86,10 +86,99 @@ where
     }
 }
 
+/// Outcome of validating + classifying a `send_message` payload. The
+/// three success branches describe how far the handler needs to go in
+/// dispatch terms — enqueue-only, enqueue plus tmux `send_keys` wake,
+/// or enqueue plus `ensure_runnable` (config-path driven restart).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SendMessagePlan {
+    /// Transport-level rejection (e.g. self-addressed message). The
+    /// handler should surface this as a logic error.
+    Reject { reason: String },
+    /// Normal enqueue + wake schedule. No need to (re)start sessions.
+    Enqueue,
+    /// Same as [`Self::Enqueue`] but the caller also passed a config
+    /// path, so the dispatch backend should ensure the recipient's
+    /// tmux session is alive.
+    EnqueueAndEnsureRunnable { config_path: String },
+}
+
+/// Classify an incoming `send_message`. The payload fields are passed
+/// raw because the handler already decoded them; this function keeps
+/// the "can we even send it" and "do we need to wake the session"
+/// branches in one place instead of letting them bleed into the
+/// dispatch code path.
+pub(crate) fn plan_send_message(sender: &str, to: &str, config_path: &str) -> SendMessagePlan {
+    if to.trim().is_empty() {
+        return SendMessagePlan::Reject {
+            reason: "missing recipient".into(),
+        };
+    }
+    if to == sender {
+        return SendMessagePlan::Reject {
+            reason: "cannot send message to self".into(),
+        };
+    }
+    let config_path = config_path.trim();
+    if config_path.is_empty() {
+        SendMessagePlan::Enqueue
+    } else {
+        SendMessagePlan::EnqueueAndEnsureRunnable {
+            config_path: config_path.to_owned(),
+        }
+    }
+}
+
+/// Outcome of preparing a task's initial dispatch. Mirrors
+/// fleet-shell's `decideTaskRun`: a `pending` task with no payload is
+/// parked as `WaitingForInput`; anything else is queued for the
+/// assignee, optionally with a config-driven `ensure_runnable` so the
+/// session comes back up if it had exited.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TaskStartDispatchPlan {
+    /// Task created but no dispatch message yet. The handler should
+    /// return `waiting_for_input` and leave the task parked; no queue
+    /// mutation, no wake.
+    WaitingForInput,
+    /// Queue the dispatch message for the assignee. If
+    /// `config_path` is `Some`, the handler must also call
+    /// `ensure_runnable` so the session exists before delivery.
+    Queue {
+        assignee: String,
+        config_path: Option<String>,
+    },
+    /// Task is not eligible for a dispatch (already terminal, etc.).
+    /// Surfaces as a logic error on the handler side.
+    Skip { reason: String },
+}
+
+/// Decide how `start_task` should carry out its initial dispatch. The
+/// task itself is already persisted; this only picks the dispatch
+/// branch based on its shape (empty body → wait, non-empty → queue,
+/// optionally ensure a config-driven session).
+pub(crate) fn plan_task_start_dispatch(task: &Task) -> TaskStartDispatchPlan {
+    match &task.status {
+        TaskStatus::Pending | TaskStatus::InProgress => {}
+        other => {
+            return TaskStartDispatchPlan::Skip {
+                reason: format!("task already in terminal state {other:?}"),
+            };
+        }
+    }
+    if task.dispatch_message.trim().is_empty() {
+        return TaskStartDispatchPlan::WaitingForInput;
+    }
+    let config_path = task.dispatch_config_path.trim();
+    TaskStartDispatchPlan::Queue {
+        assignee: task.assignee.clone(),
+        config_path: (!config_path.is_empty()).then(|| config_path.to_owned()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ax_proto::types::{TaskStartMode, TaskStatus};
+    use ax_proto::types::TaskStartMode;
     use chrono::Utc;
 
     fn task_with(assignee: &str, config_path: &str) -> Task {
@@ -201,5 +290,97 @@ mod tests {
                 assignee: "worker".into()
             }
         );
+    }
+
+    // ---------- send_message ----------
+
+    #[test]
+    fn send_message_rejects_empty_recipient() {
+        match plan_send_message("alice", "   ", "") {
+            SendMessagePlan::Reject { reason } => assert!(reason.contains("missing recipient")),
+            other => panic!("expected Reject, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn send_message_rejects_self_addressed() {
+        match plan_send_message("alice", "alice", "") {
+            SendMessagePlan::Reject { reason } => assert!(reason.contains("cannot send")),
+            other => panic!("expected Reject, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn send_message_enqueue_without_config_path() {
+        assert_eq!(
+            plan_send_message("alice", "bob", ""),
+            SendMessagePlan::Enqueue
+        );
+        // whitespace-only counts as absent
+        assert_eq!(
+            plan_send_message("alice", "bob", "   "),
+            SendMessagePlan::Enqueue
+        );
+    }
+
+    #[test]
+    fn send_message_ensures_runnable_when_config_path_present() {
+        assert_eq!(
+            plan_send_message("alice", "bob", "/etc/team.yaml"),
+            SendMessagePlan::EnqueueAndEnsureRunnable {
+                config_path: "/etc/team.yaml".into(),
+            }
+        );
+    }
+
+    // ---------- task_start_dispatch ----------
+
+    fn task_start_fixture(status: TaskStatus, body: &str, config_path: &str) -> Task {
+        let mut task = task_with("worker", config_path);
+        task.status = status;
+        task.dispatch_message = body.into();
+        task
+    }
+
+    #[test]
+    fn start_dispatch_waits_when_body_empty() {
+        let task = task_start_fixture(TaskStatus::Pending, "", "");
+        assert_eq!(
+            plan_task_start_dispatch(&task),
+            TaskStartDispatchPlan::WaitingForInput
+        );
+    }
+
+    #[test]
+    fn start_dispatch_queues_without_ensure_runnable_when_no_config() {
+        let task = task_start_fixture(TaskStatus::Pending, "please implement X", "");
+        assert_eq!(
+            plan_task_start_dispatch(&task),
+            TaskStartDispatchPlan::Queue {
+                assignee: "worker".into(),
+                config_path: None,
+            }
+        );
+    }
+
+    #[test]
+    fn start_dispatch_requests_ensure_runnable_with_config_path() {
+        let task = task_start_fixture(TaskStatus::Pending, "please implement X", "/etc/ax.yaml");
+        assert_eq!(
+            plan_task_start_dispatch(&task),
+            TaskStartDispatchPlan::Queue {
+                assignee: "worker".into(),
+                config_path: Some("/etc/ax.yaml".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn start_dispatch_skips_terminal_task() {
+        let task = task_start_fixture(TaskStatus::Completed, "irrelevant", "");
+        match plan_task_start_dispatch(&task) {
+            TaskStartDispatchPlan::Skip { reason } => assert!(reason.contains("Completed")),
+            other => panic!("expected Skip, got {other:?}"),
+        }
     }
 }
