@@ -694,6 +694,7 @@ pub(crate) fn handle_update_task(
         )
         .map_err(|e| HandlerError::Logic(e.to_string()))?;
     ctx.registry.touch(workspace, Utc::now());
+    apply_task_state_followup(ctx, &task);
     response(&env.id, &TaskResponse { task })
 }
 
@@ -716,10 +717,7 @@ pub(crate) fn handle_cancel_task(
         )
         .map_err(|e| HandlerError::Logic(e.to_string()))?;
     ctx.registry.touch(workspace, Utc::now());
-    ctx.queue.remove_task_messages(&task.assignee, &task.id);
-    if ctx.queue.pending_count(&task.assignee) == 0 {
-        ctx.wake_scheduler.cancel(&task.assignee);
-    }
+    apply_task_state_followup(ctx, &task);
     response(&env.id, &TaskResponse { task })
 }
 
@@ -742,11 +740,31 @@ pub(crate) fn handle_remove_task(
         )
         .map_err(|e| HandlerError::Logic(e.to_string()))?;
     ctx.registry.touch(workspace, Utc::now());
+    // Removal is forceful — always purge assignee state regardless of
+    // the logical task status at the moment of removal.
     ctx.queue.remove_task_messages(&task.assignee, &task.id);
     if ctx.queue.pending_count(&task.assignee) == 0 {
         ctx.wake_scheduler.cancel(&task.assignee);
     }
     response(&env.id, &TaskResponse { task })
+}
+
+/// Carry out the cleanup returned by
+/// [`crate::pure_decisions::plan_task_state_followup`]. Shared between
+/// `update_task` and `cancel_task` so terminal transitions always
+/// purge the assignee's queued messages and, when the queue is empty,
+/// cancel any pending wake retry.
+fn apply_task_state_followup(ctx: &HandlerCtx, task: &Task) {
+    use crate::pure_decisions::{plan_task_state_followup, TaskStateFollowupPlan};
+    match plan_task_state_followup(task) {
+        TaskStateFollowupPlan::None => {}
+        TaskStateFollowupPlan::CleanupTerminal { assignee, task_id } => {
+            ctx.queue.remove_task_messages(&assignee, &task_id);
+            if ctx.queue.pending_count(&assignee) == 0 {
+                ctx.wake_scheduler.cancel(&assignee);
+            }
+        }
+    }
 }
 
 pub(crate) fn handle_get_team_state(

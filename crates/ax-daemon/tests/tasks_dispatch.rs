@@ -17,9 +17,10 @@ use tokio::net::UnixStream;
 use ax_daemon::{Daemon, DaemonHandle, WakeScheduler};
 use ax_proto::payloads::{
     InterveneTaskPayload, ReadMessagesPayload, RegisterPayload, StartTaskPayload,
+    UpdateTaskPayload,
 };
 use ax_proto::responses::{
-    InterveneTaskResponse, ReadMessagesResponse, StartTaskResponse, StatusResponse,
+    InterveneTaskResponse, ReadMessagesResponse, StartTaskResponse, StatusResponse, TaskResponse,
 };
 use ax_proto::types::TaskStatus;
 use ax_proto::{Envelope, MessageType, ResponsePayload};
@@ -371,5 +372,88 @@ async fn intervene_rejects_unknown_action() {
         )
         .await;
     assert!(err.contains("invalid intervene_task action"), "got: {err}");
+    f.handle.shutdown().await;
+}
+
+/// Regression for the new `plan_task_state_followup` wiring: when a
+/// task transitions to Completed via `update_task` (not just via
+/// cancel/remove), the assignee's queued task-tagged messages must be
+/// purged so the worker doesn't re-process an already-closed task.
+/// Prior to this change only `cancel_task` + `remove_task` cleaned the
+/// queue; `update_task` leaked the message and left the worker to
+/// re-read it after a restart.
+#[tokio::test]
+async fn update_task_completion_drains_pending_task_messages() {
+    let f = spawn().await;
+    let mut orch = Client::connect(f.handle.socket_path());
+    let _: StatusResponse = orch.request(MessageType::Register, &register("orch")).await;
+    let mut worker = Client::connect(f.handle.socket_path());
+    let _: StatusResponse = worker
+        .request(MessageType::Register, &register("worker"))
+        .await;
+
+    // Dispatch queues a task-aware message in worker's inbox.
+    let started: StartTaskResponse = orch
+        .request(
+            MessageType::StartTask,
+            &StartTaskPayload {
+                title: "drain me".into(),
+                description: String::new(),
+                message: "please finish and report".into(),
+                assignee: "worker".into(),
+                parent_task_id: String::new(),
+                start_mode: String::new(),
+                workflow_mode: String::new(),
+                priority: String::new(),
+                stale_after_seconds: 0,
+            },
+        )
+        .await;
+    assert_eq!(started.dispatch.status, "queued");
+
+    // Worker completes the task without ever reading the inbox — the
+    // old implementation would have left the dispatch message sitting
+    // in the queue for the now-terminal task.
+    let completed: TaskResponse = worker
+        .request(
+            MessageType::UpdateTask,
+            &UpdateTaskPayload {
+                id: started.task.id.clone(),
+                status: Some(TaskStatus::Completed),
+                result: Some(
+                    "done; remaining owned dirty files=<none>; ran `cargo test`".into(),
+                ),
+                log: None,
+                confirm: Some(true),
+            },
+        )
+        .await;
+    assert_eq!(completed.task.status, TaskStatus::Completed);
+
+    // The queue for worker should be drained — no leftover
+    // task-tagged messages after completion.
+    let drained: ReadMessagesResponse = worker
+        .request(
+            MessageType::ReadMessages,
+            &ReadMessagesPayload {
+                limit: 10,
+                from: String::new(),
+            },
+        )
+        .await;
+    assert!(
+        drained.messages.is_empty(),
+        "expected queue drained after completion, got {:?}",
+        drained.messages
+    );
+
+    // The scheduler should also have no pending wake since the inbox
+    // is empty.
+    let scheduler: &WakeScheduler = &f.daemon.wake_scheduler;
+    assert!(
+        scheduler.state("worker").is_none(),
+        "scheduler still has a pending wake after terminal transition"
+    );
+
     f.handle.shutdown().await;
 }

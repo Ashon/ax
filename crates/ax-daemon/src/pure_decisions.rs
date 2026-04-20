@@ -152,6 +152,39 @@ pub(crate) enum TaskStartDispatchPlan {
     Skip { reason: String },
 }
 
+/// What the handler should do after a task-state mutation settles.
+/// Right now the only signal is "task landed in a terminal state," so
+/// the assignee's queue and wake schedule must be cleaned up. This
+/// mirrors fleet-shell's `decideHookFollowUp`, where a state event is
+/// converted to a list of actions the caller should execute.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TaskStateFollowupPlan {
+    /// Non-terminal (still live) transition. No queue/wake work needed.
+    None,
+    /// Task reached Completed/Failed/Cancelled/Blocked and is no longer
+    /// actionable for the assignee. The handler must purge pending
+    /// messages for this task and cancel the assignee's wake schedule
+    /// if the queue ends up empty.
+    CleanupTerminal { assignee: String, task_id: String },
+}
+
+/// Decide whether a post-mutation cleanup is required. Pure function,
+/// so three different handlers (`update_task`, `cancel_task`,
+/// `remove_task`) can share the same follow-up logic without each one
+/// re-implementing the "is this terminal?" branch.
+pub(crate) fn plan_task_state_followup(task: &Task) -> TaskStateFollowupPlan {
+    match &task.status {
+        TaskStatus::Completed
+        | TaskStatus::Failed
+        | TaskStatus::Cancelled
+        | TaskStatus::Blocked => TaskStateFollowupPlan::CleanupTerminal {
+            assignee: task.assignee.clone(),
+            task_id: task.id.clone(),
+        },
+        TaskStatus::Pending | TaskStatus::InProgress => TaskStateFollowupPlan::None,
+    }
+}
+
 /// Decide how `start_task` should carry out its initial dispatch. The
 /// task itself is already persisted; this only picks the dispatch
 /// branch based on its shape (empty body → wait, non-empty → queue,
@@ -381,6 +414,40 @@ mod tests {
         match plan_task_start_dispatch(&task) {
             TaskStartDispatchPlan::Skip { reason } => assert!(reason.contains("Completed")),
             other => panic!("expected Skip, got {other:?}"),
+        }
+    }
+
+    // ---------- task_state_followup ----------
+
+    #[test]
+    fn state_followup_is_noop_for_live_statuses() {
+        for status in [TaskStatus::Pending, TaskStatus::InProgress] {
+            let mut task = task_with("worker", "");
+            task.id = "task-1".into();
+            task.status = status;
+            assert_eq!(plan_task_state_followup(&task), TaskStateFollowupPlan::None);
+        }
+    }
+
+    #[test]
+    fn state_followup_requests_cleanup_for_terminal_statuses() {
+        for status in [
+            TaskStatus::Completed,
+            TaskStatus::Failed,
+            TaskStatus::Cancelled,
+            TaskStatus::Blocked,
+        ] {
+            let mut task = task_with("worker", "");
+            task.id = "task-1".into();
+            task.status = status.clone();
+            assert_eq!(
+                plan_task_state_followup(&task),
+                TaskStateFollowupPlan::CleanupTerminal {
+                    assignee: "worker".into(),
+                    task_id: "task-1".into(),
+                },
+                "expected cleanup plan for {status:?}",
+            );
         }
     }
 }
