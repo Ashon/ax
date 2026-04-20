@@ -201,6 +201,12 @@ fn completion_reporting_instruction_contract() -> String {
         "- completion result에는 반드시 다음 둘 중 하나를 포함하세요: `remaining owned dirty files=<none>` 또는 `remaining owned dirty files=<paths>; residual scope=<why work remains>`.",
         "- commit/task slice만 끝났다면 전체 요청이 끝난 것처럼 쓰지 말고, 이번에 끝난 unit과 남은 owned work를 구분해서 적으세요.",
         "- leftover owned work가 남아 있는데 설명 없이 `completed`나 \"done\"처럼 쓰지 마세요. 후속 unit, 범위 밖 항목, blocker 중 무엇인지 명시하세요.",
+        "- `update_task(..., status=\"completed\", ..., confirm=true)`로 호출해야 daemon이 수락합니다. `confirm=true`는 다음 self-check를 마쳤다는 **명시적 affirmation**입니다 — 반사적으로 붙이지 말고 정말 확인 후에만 true로 두세요:",
+        "  1. 약속한 파일 변경이 전부 저장/커밋되었음.",
+        "  2. 관련 테스트/빌드가 통과했거나, 통과하지 않는 이유가 result에 적혀 있음.",
+        "  3. result에 `remaining owned dirty files=` 마커가 올바른 모양으로 들어가 있음.",
+        "  4. 이 task scope 안에서 남은 TODO/미해결 blocker가 없음 (있다면 failed나 후속 unit으로 넘어감).",
+        "- `confirm` 없이(또는 `confirm=false`) completion을 보내면 daemon이 `CompletionRequiresConfirmation` 에러로 거부하고 체크리스트를 돌려줍니다. 그 메시지를 읽고 실제로 점검한 뒤에 `confirm=true`로 재호출하세요.",
     ]
     .join("\n")
 }

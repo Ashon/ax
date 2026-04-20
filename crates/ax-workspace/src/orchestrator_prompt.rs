@@ -295,7 +295,7 @@ fn render_orchestrator_prompt(
     out.push_str(
         "- 주요 단계 완료 시 `update_task(id=..., log=\"진행 내용\")`으로 진행 로그 기록\n",
     );
-    out.push_str("- 작업 완료 시 `update_task(id=..., status=\"completed\", result=\"결과 요약; remaining owned dirty files=<none|paths>; residual scope=<if any>\")`\n");
+    out.push_str("- 작업 완료 시 `update_task(id=..., status=\"completed\", result=\"결과 요약; remaining owned dirty files=<none|paths>; residual scope=<if any>\", confirm=true)` — `confirm=true`는 Completion Reporting Contract 체크리스트를 실제로 점검했다는 affirmation이므로 반사적으로 붙이지 말고 확인 후에만 true로 두세요.\n");
     out.push_str(
         "- 작업 실패 시 `update_task(id=..., status=\"failed\", result=\"실패 원인\")`\n\n",
     );

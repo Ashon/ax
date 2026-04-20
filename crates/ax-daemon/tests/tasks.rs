@@ -183,6 +183,7 @@ async fn create_get_list_update_cycle() {
                 status: Some(TaskStatus::InProgress),
                 result: None,
                 log: Some("starting work".into()),
+                confirm: None,
             },
         )
         .await;
@@ -238,6 +239,7 @@ async fn update_enforces_permissions_and_transitions() {
                 status: Some(TaskStatus::InProgress),
                 result: None,
                 log: None,
+                confirm: None,
             },
         )
         .await;
@@ -258,6 +260,7 @@ async fn update_enforces_permissions_and_transitions() {
                 status: Some(TaskStatus::Completed),
                 result: Some("done; remaining owned dirty files=<none>".into()),
                 log: None,
+                confirm: Some(true),
             },
         )
         .await;
@@ -269,6 +272,7 @@ async fn update_enforces_permissions_and_transitions() {
                 status: Some(TaskStatus::InProgress),
                 result: None,
                 log: None,
+                confirm: None,
             },
         )
         .await;
@@ -347,6 +351,7 @@ async fn parent_rollup_refreshes_on_child_completion() {
                 status: Some(TaskStatus::Completed),
                 result: Some("ok; remaining owned dirty files=<none>".into()),
                 log: None,
+                confirm: Some(true),
             },
         )
         .await;

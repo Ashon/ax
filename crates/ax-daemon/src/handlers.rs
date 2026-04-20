@@ -663,11 +663,12 @@ pub(crate) fn handle_update_task(
     require_registered(workspace)?;
     let task = ctx
         .task_store
-        .update(
+        .update_with_confirm(
             &payload.id,
             payload.status,
             payload.result,
             payload.log,
+            payload.confirm,
             workspace,
         )
         .map_err(|e| HandlerError::Logic(e.to_string()))?;

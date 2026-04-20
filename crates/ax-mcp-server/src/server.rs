@@ -332,6 +332,13 @@ pub struct UpdateTaskRequest {
     /// Progress log entry to append.
     #[serde(default)]
     pub log: Option<String>,
+    /// When setting status to `completed`, pass `confirm: true` AFTER
+    /// self-verifying the Completion Reporting Contract checklist
+    /// (result format, leftover scope, evidence). The daemon rejects
+    /// unconfirmed completions with the checklist inline so you can
+    /// re-call with `confirm: true` once you've checked.
+    #[serde(default)]
+    pub confirm: Option<bool>,
 }
 
 #[derive(Debug, schemars::JsonSchema, Deserialize)]
@@ -905,6 +912,7 @@ impl Server {
             status,
             result: req.result.filter(|s| !s.is_empty()),
             log: req.log.filter(|s| !s.is_empty()),
+            confirm: req.confirm,
         };
         let resp: TaskResponse = self
             .daemon

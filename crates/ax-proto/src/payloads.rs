@@ -180,6 +180,13 @@ pub struct UpdateTaskPayload {
     pub result: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log: Option<String>,
+    /// Explicit self-verification affirmation. Required when
+    /// transitioning the task to `Completed`. The daemon returns a
+    /// `CompletionRequiresConfirmation` error otherwise, whose
+    /// message spells out the checklist to re-read before the
+    /// caller sets this to `true` and retries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

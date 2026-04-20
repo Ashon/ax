@@ -64,6 +64,18 @@ pub enum TaskStoreError {
          (more to do). See the Completion Reporting Contract in this workspace's instructions."
     )]
     MissingCompletionEvidence(String),
+    #[error(
+        "task {0:?} requires explicit self-verification before being marked completed. \
+         Re-read the Completion Reporting Contract checklist: \
+         (1) every file you said you'd change is saved and committed where it belongs; \
+         (2) tests / build pass if applicable, or you've called out why they don't; \
+         (3) `result` already contains the `remaining owned dirty files=` marker in the correct shape; \
+         (4) no TODO, skipped branch, or unresolved blocker remains inside this task's scope. \
+         Once you've walked through the checklist, call update_task again with `confirm=true`. \
+         Do not set `confirm=true` by reflex — the point of this gate is that a human reading \
+         your transcript can see you paused to self-verify."
+    )]
+    CompletionRequiresConfirmation(String),
     #[error("read {path:?}: {source}")]
     Read {
         path: PathBuf,
@@ -352,6 +364,24 @@ impl TaskStore {
         log_msg: Option<String>,
         workspace: &str,
     ) -> Result<Task, TaskStoreError> {
+        self.update_with_confirm(id, status, result, log_msg, None, workspace)
+    }
+
+    /// Full-shape update, mirroring the wire `UpdateTaskPayload`:
+    /// `confirm` is required to transition a task to `Completed`.
+    /// Kept as a separate method so unit-test call sites that don't
+    /// care about the confirm gate (pre-completion transitions, log
+    /// appends, failure paths) stay succinct.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn update_with_confirm(
+        &self,
+        id: &str,
+        status: Option<TaskStatus>,
+        result: Option<String>,
+        log_msg: Option<String>,
+        confirm: Option<bool>,
+        workspace: &str,
+    ) -> Result<Task, TaskStoreError> {
         let mut inner = self.inner.lock().expect("task store poisoned");
 
         let task = inner
@@ -362,6 +392,7 @@ impl TaskStore {
             status.as_ref(),
             result.as_deref(),
             log_msg.as_deref(),
+            confirm,
             workspace,
         )?;
 
@@ -670,6 +701,7 @@ fn validate_task_update(
     status: Option<&TaskStatus>,
     result: Option<&str>,
     _log_msg: Option<&str>,
+    confirm: Option<bool>,
     workspace: &str,
 ) -> Result<(), TaskStoreError> {
     if task.removed_at.is_some() {
@@ -712,6 +744,11 @@ fn validate_task_update(
         let effective = result.unwrap_or(task.result.as_str());
         if !has_leftover_scope_declaration(effective) {
             return Err(TaskStoreError::MissingCompletionEvidence(task.id.clone()));
+        }
+        if !confirm.unwrap_or(false) {
+            return Err(TaskStoreError::CompletionRequiresConfirmation(
+                task.id.clone(),
+            ));
         }
     }
     Ok(())
@@ -1105,11 +1142,12 @@ mod tests {
         let task = seed_in_progress_task(&store);
 
         let updated = store
-            .update(
+            .update_with_confirm(
                 &task.id,
                 Some(TaskStatus::Completed),
                 Some("wired the validator; remaining owned dirty files=<none>".into()),
                 None,
+                Some(true),
                 "worker",
             )
             .expect("should accept");
@@ -1123,11 +1161,12 @@ mod tests {
 
         let body = "partial pass; remaining owned dirty files=src/foo.rs; residual scope=finish foo refactor in follow-up";
         let updated = store
-            .update(
+            .update_with_confirm(
                 &task.id,
                 Some(TaskStatus::Completed),
                 Some(body.into()),
                 None,
+                Some(true),
                 "worker",
             )
             .expect("should accept");
@@ -1154,15 +1193,88 @@ mod tests {
             .expect("set result");
 
         let updated = store
-            .update(
+            .update_with_confirm(
                 &task.id,
                 Some(TaskStatus::Completed),
                 None,
                 None,
+                Some(true),
                 "worker",
             )
             .expect("should accept");
         assert!(matches!(updated.status, TaskStatus::Completed));
+    }
+
+    #[test]
+    fn completion_without_confirm_is_rejected_after_marker_passes() {
+        // Marker present but confirm missing: the daemon must still
+        // reject, and the error names the checklist gate so the
+        // caller knows what to do next.
+        let store = make_store();
+        let task = seed_in_progress_task(&store);
+
+        let err = store
+            .update(
+                &task.id,
+                Some(TaskStatus::Completed),
+                Some("done; remaining owned dirty files=<none>".into()),
+                None,
+                "worker",
+            )
+            .expect_err("confirm gate must trip");
+        assert!(
+            matches!(
+                err,
+                TaskStoreError::CompletionRequiresConfirmation(ref id) if id == &task.id
+            ),
+            "expected CompletionRequiresConfirmation, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn completion_gate_order_marker_runs_before_confirm() {
+        // When both preconditions fail, the caller sees the marker
+        // complaint first. Ordering matters: fixing the result shape
+        // is a structural prerequisite for the confirm step having
+        // anything meaningful to affirm.
+        let store = make_store();
+        let task = seed_in_progress_task(&store);
+
+        let err = store
+            .update_with_confirm(
+                &task.id,
+                Some(TaskStatus::Completed),
+                Some("done".into()), // no marker
+                None,
+                None, // no confirm
+                "worker",
+            )
+            .expect_err("both preconditions missing");
+        assert!(
+            matches!(err, TaskStoreError::MissingCompletionEvidence(_)),
+            "marker complaint must surface first, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn completion_with_confirm_false_still_rejected() {
+        let store = make_store();
+        let task = seed_in_progress_task(&store);
+
+        let err = store
+            .update_with_confirm(
+                &task.id,
+                Some(TaskStatus::Completed),
+                Some("done; remaining owned dirty files=<none>".into()),
+                None,
+                Some(false),
+                "worker",
+            )
+            .expect_err("explicit confirm=false must still fail");
+        assert!(
+            matches!(err, TaskStoreError::CompletionRequiresConfirmation(_)),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -1187,11 +1299,12 @@ mod tests {
         let store = make_store();
         let task = seed_in_progress_task(&store);
         store
-            .update(
+            .update_with_confirm(
                 &task.id,
                 Some(TaskStatus::Completed),
                 Some("first pass; remaining owned dirty files=<none>".into()),
                 None,
+                Some(true),
                 "worker",
             )
             .expect("initial complete");
@@ -1289,11 +1402,12 @@ mod tests {
         let store = make_store();
         let task = seed_in_progress_task(&store);
         store
-            .update(
+            .update_with_confirm(
                 &task.id,
                 Some(TaskStatus::Completed),
                 Some("done; remaining owned dirty files=<none>".into()),
                 None,
+                Some(true),
                 "worker",
             )
             .expect("complete");
@@ -1341,11 +1455,12 @@ mod tests {
         // Completed: never matches.
         let completed = seed_in_progress_task(&store);
         store
-            .update(
+            .update_with_confirm(
                 &completed.id,
                 Some(TaskStatus::Completed),
                 Some("done; remaining owned dirty files=<none>".into()),
                 None,
+                Some(true),
                 "worker",
             )
             .expect("complete");
