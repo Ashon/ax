@@ -122,9 +122,9 @@ impl CaptureCache {
     /// enough to be considered "running". Falls back to `false`
     /// (idle) when there is no capture entry yet.
     pub(crate) fn is_recently_active(&self, workspace: &str, now: Instant) -> bool {
-        self.entries
-            .get(workspace)
-            .is_some_and(|entry| now.saturating_duration_since(entry.last_changed_at) < RUNNING_WINDOW)
+        self.entries.get(workspace).is_some_and(|entry| {
+            now.saturating_duration_since(entry.last_changed_at) < RUNNING_WINDOW
+        })
     }
 
     /// Drop entries whose sessions no longer exist so the map doesn't
@@ -162,6 +162,16 @@ pub(crate) fn recent_wrapped_lines(capture: &str, rows: usize, width: usize) -> 
     if rows == 0 || width == 0 {
         return Vec::new();
     }
+    let mut visual_lines = wrapped_lines(capture, width);
+    let start = visual_lines.len().saturating_sub(rows);
+    visual_lines.drain(..start);
+    visual_lines
+}
+
+pub(crate) fn wrapped_lines(capture: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
     let trimmed_tail: Vec<&str> = capture
         .lines()
         .rev()
@@ -176,8 +186,6 @@ pub(crate) fn recent_wrapped_lines(capture: &str, rows: usize, width: usize) -> 
         wrap_capture_line(line, width, &mut visual_lines);
     }
 
-    let start = visual_lines.len().saturating_sub(rows);
-    visual_lines.drain(..start);
     visual_lines
 }
 
@@ -195,10 +203,47 @@ fn wrap_capture_line(line: &str, width: usize, out: &mut Vec<String>) {
 }
 
 fn sanitize_capture_line(line: &str) -> String {
-    line.chars()
+    strip_csi_sequences(line)
+        .chars()
         .filter(|c| !c.is_control() || matches!(c, '\t'))
         .collect::<String>()
         .replace('\t', "  ")
+}
+
+fn strip_csi_sequences(line: &str) -> String {
+    enum State {
+        Text,
+        Escape,
+        Csi,
+    }
+
+    let mut out = String::with_capacity(line.len());
+    let mut state = State::Text;
+    for ch in line.chars() {
+        match state {
+            State::Text => {
+                if ch == '\x1b' {
+                    state = State::Escape;
+                } else {
+                    out.push(ch);
+                }
+            }
+            State::Escape => {
+                if ch == '[' {
+                    state = State::Csi;
+                } else {
+                    out.push(ch);
+                    state = State::Text;
+                }
+            }
+            State::Csi => {
+                if ('@'..='~').contains(&ch) {
+                    state = State::Text;
+                }
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -253,9 +298,15 @@ mod tests {
     #[test]
     fn recent_wrapped_lines_sanitizes_controls_and_expands_tabs() {
         let capture = "ab\tcd\x1b[31m\n";
+        assert_eq!(recent_wrapped_lines(capture, 4, 4), vec!["ab  ", "cd"]);
+    }
+
+    #[test]
+    fn recent_wrapped_lines_strips_sgr_and_other_csi_sequences() {
+        let capture = "plain \x1b[31mred\x1b[0m\nnext\x1b[2K line\n";
         assert_eq!(
-            recent_wrapped_lines(capture, 4, 4),
-            vec!["ab  ", "cd[3", "1m"]
+            recent_wrapped_lines(capture, 4, 32),
+            vec!["plain red", "next line"]
         );
     }
 

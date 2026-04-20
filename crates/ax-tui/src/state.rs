@@ -21,6 +21,13 @@ pub(crate) struct PendingLifecycle {
     pub action: QuickActionId,
     pub workspace: String,
 }
+
+#[derive(Debug, Clone)]
+pub(crate) struct PendingTaskAction {
+    pub action: QuickActionId,
+    pub task_id: String,
+    pub expected_version: i64,
+}
 use crate::agents::AgentEntry;
 use crate::stream::StreamView;
 
@@ -34,9 +41,9 @@ pub(crate) enum ViewMode {
 }
 
 /// Which half of the body the keyboard is scoped to. `[`/`]` toggles
-/// between the two; Tab/1-5 pick a tab regardless of focus. Arrow
-/// keys stay *inside* the focused half so navigation never leaks
-/// across panes by accident.
+/// between the two; numeric keys pick a visible tab regardless of
+/// focus. Arrow keys stay *inside* the focused half so navigation
+/// never leaks across panes by accident.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Focus {
     /// Top half of the body — the list for the active tab. Arrows
@@ -47,6 +54,19 @@ pub(crate) enum Focus {
     /// list selection. Arrows scroll the detail (long task logs,
     /// wrapped message content, etc.).
     Detail,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RefreshNoticeSource {
+    Tmux,
+    Daemon,
+    Usage,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RefreshNotice {
+    pub(crate) source: RefreshNoticeSource,
+    pub(crate) text: String,
 }
 
 impl Focus {
@@ -118,6 +138,7 @@ pub(crate) struct App {
     pub(crate) focus: Focus,
     pub(crate) stream: StreamView,
     pub(crate) messages: Vec<HistoryEntry>,
+    pub(crate) messages_snapshot_error: Option<String>,
     /// Absolute row index of the currently-selected message (0 =
     /// oldest, `len - 1` = newest). The list highlights this row and
     /// the detail pane reads the matching entry, so list + detail
@@ -130,6 +151,7 @@ pub(crate) struct App {
     /// `G`/End re-engages it.
     pub(crate) messages_follow_tail: bool,
     pub(crate) tasks: Vec<Task>,
+    pub(crate) task_snapshot_error: Option<String>,
     pub(crate) task_cursor: PaneCursor,
     pub(crate) task_filter: TaskFilterMode,
     /// First visible row index in the tokens table. Clamped at render
@@ -151,6 +173,7 @@ pub(crate) struct App {
     /// Lifecycle action queued by the input handler; executed by the
     /// app loop (where paths are available) and cleared.
     pub(crate) pending_lifecycle: Option<PendingLifecycle>,
+    pub(crate) pending_task_action: Option<PendingTaskAction>,
     pub(crate) captures: CaptureCache,
     /// Rolled-up per-workspace token usage returned by the daemon's
     /// `usage_trends` handler. Persists across refresh ticks so the
@@ -170,9 +193,11 @@ pub(crate) struct App {
     /// streaming mode; pressing it again opens the quick-action
     /// overlay. Corresponds to `viewModeStream`.
     pub(crate) streamed_workspace: Option<String>,
+    pub(crate) stream_cursor: PaneCursor,
+    pub(crate) stream_follow_tail: bool,
     pub(crate) last_refresh: Option<Instant>,
     pub(crate) daemon_running: bool,
-    pub(crate) notice: Option<String>,
+    pub(crate) notice: Option<RefreshNotice>,
     pub(crate) quit: bool,
 }
 
@@ -190,9 +215,11 @@ impl App {
             focus: Focus::List,
             stream: StreamView::Agents,
             messages: Vec::new(),
+            messages_snapshot_error: None,
             messages_cursor: PaneCursor::default(),
             messages_follow_tail: true,
             tasks: Vec::new(),
+            task_snapshot_error: None,
             task_cursor: PaneCursor::default(),
             task_filter: TaskFilterMode::Active,
             tokens_cursor: PaneCursor::default(),
@@ -201,7 +228,10 @@ impl App {
             quick_notice: None,
             help_open: false,
             streamed_workspace: None,
+            stream_cursor: PaneCursor::default(),
+            stream_follow_tail: true,
             pending_lifecycle: None,
+            pending_task_action: None,
             captures: CaptureCache::default(),
             usage_trends: BTreeMap::new(),
             last_usage_refresh: None,
@@ -216,11 +246,13 @@ impl App {
 
     /// Step the stream tab forward (+1) or backward (-1). Used by
     /// Tab/Shift-Tab so `[/]` can stay reserved for list↔detail
-    /// toggling. Resets `detail_scroll` so the new tab's detail
-    /// opens at the top instead of inheriting the previous view's
-    /// scroll position.
+    /// toggling. The contextual Stream tab only participates after
+    /// a workspace has been pinned. Resets `detail_scroll` so the new
+    /// tab's detail opens at the top instead of inheriting the
+    /// previous view's scroll position.
     pub(crate) fn step_stream(&mut self, delta: i32) {
-        let views = StreamView::ALL;
+        self.ensure_stream_view_visible();
+        let views = self.stream_tab_views();
         let current = views.iter().position(|v| *v == self.stream).unwrap_or(0);
         let n = views.len() as i32;
         let next = ((current as i32 + delta).rem_euclid(n)) as usize;
@@ -234,10 +266,7 @@ impl App {
     /// of the handler dispatches against `self.focus`.
     pub(crate) fn cycle_focus(&mut self, delta: i32) {
         let order = Focus::ORDER;
-        let current = order
-            .iter()
-            .position(|f| *f == self.focus)
-            .unwrap_or(0) as i32;
+        let current = order.iter().position(|f| *f == self.focus).unwrap_or(0) as i32;
         let n = order.len() as i32;
         let next = current.wrapping_add(delta).rem_euclid(n) as usize;
         self.focus = order[next];
@@ -248,8 +277,22 @@ impl App {
     /// flicker the pane. Resets `detail_scroll` for the same reason
     /// as `step_stream`.
     pub(crate) fn select_stream(&mut self, idx: usize) {
-        if let Some(view) = StreamView::ALL.get(idx) {
+        self.ensure_stream_view_visible();
+        if let Some(view) = self.stream_tab_views().get(idx) {
             self.stream = *view;
+            self.detail_scroll.reset();
+        }
+    }
+
+    pub(crate) fn stream_tab_views(&self) -> &'static [StreamView] {
+        StreamView::tabs(self.streamed_workspace.is_some())
+    }
+
+    pub(crate) fn ensure_stream_view_visible(&mut self) {
+        if self.stream == StreamView::Stream && self.streamed_workspace.is_none() {
+            self.stream = StreamView::Agents;
+            self.stream_cursor.reset();
+            self.stream_follow_tail = true;
             self.detail_scroll.reset();
         }
     }
@@ -259,6 +302,10 @@ impl App {
     /// from this so cursor + render stay consistent.
     pub(crate) fn filtered_tasks(&self) -> Vec<Task> {
         crate::tasks::filter_tasks(&self.tasks, self.task_filter)
+    }
+
+    pub(crate) fn selected_task(&self) -> Option<Task> {
+        self.filtered_tasks().get(self.task_cursor.index).cloned()
     }
 
     /// Move the task-list cursor inside the Tasks stream view. Uses
@@ -346,6 +393,23 @@ impl App {
         self.tokens_cursor.jump_to(self.token_row_count());
     }
 
+    pub(crate) fn scroll_stream(&mut self, delta: i32) {
+        if delta < 0 {
+            self.stream_follow_tail = false;
+        }
+        self.stream_cursor.shift(delta);
+    }
+
+    pub(crate) fn stream_to_head(&mut self) {
+        self.stream_follow_tail = false;
+        self.stream_cursor.reset();
+    }
+
+    pub(crate) fn stream_to_tail(&mut self) {
+        self.stream_follow_tail = true;
+        self.stream_cursor.reset();
+    }
+
     /// Rows the tokens table actually renders. Mirrors the filter in
     /// `draw_tokens` so scroll bookkeeping stays in sync with what the
     /// user sees.
@@ -372,6 +436,8 @@ impl App {
     /// state. Callers trigger this after a refresh tick so selection
     /// stays in sync.
     pub(crate) fn rebuild_agents(&mut self) {
+        let previous_workspace = self.selected_workspace().map(str::to_owned);
+        let previous_index = self.selected_entry;
         self.agent_entries = crate::agents::build_entries(
             &self.sessions,
             self.tree.as_ref(),
@@ -383,9 +449,21 @@ impl App {
             self.selected_entry = 0;
             return;
         }
-        if !selectable.contains(&self.selected_entry) {
-            self.selected_entry = selectable[0];
+        if let Some(workspace) = previous_workspace {
+            if let Some(idx) = selectable
+                .iter()
+                .copied()
+                .find(|idx| self.agent_entries[*idx].workspace == workspace)
+            {
+                self.selected_entry = idx;
+                return;
+            }
         }
+        self.selected_entry = selectable
+            .iter()
+            .copied()
+            .find(|idx| *idx >= previous_index)
+            .unwrap_or_else(|| *selectable.last().expect("selectable is non-empty"));
     }
 
     pub(crate) fn move_selection(&mut self, delta: i32) {
@@ -402,8 +480,25 @@ impl App {
         self.selected_entry = selectable[next];
     }
 
-    pub(crate) fn set_notice(&mut self, text: impl Into<String>) {
-        self.notice = Some(text.into());
+    pub(crate) fn set_refresh_notice(
+        &mut self,
+        source: RefreshNoticeSource,
+        text: impl Into<String>,
+    ) {
+        self.notice = Some(RefreshNotice {
+            source,
+            text: text.into(),
+        });
+    }
+
+    pub(crate) fn clear_refresh_notice(&mut self, source: RefreshNoticeSource) {
+        if self
+            .notice
+            .as_ref()
+            .is_some_and(|notice| notice.source == source)
+        {
+            self.notice = None;
+        }
     }
 
     /// Workspace name under the agents-panel cursor, if any. Returns
@@ -611,6 +706,60 @@ mod tests {
         assert_eq!(app.tokens_cursor.index, 0);
     }
 
+    #[test]
+    fn stream_scroll_breaks_and_restores_follow_tail() {
+        let mut app = App::new();
+        assert!(app.stream_follow_tail);
+        app.stream_cursor.index = 12;
+
+        app.scroll_stream(-1);
+        assert_eq!(app.stream_cursor.index, 11);
+        assert!(!app.stream_follow_tail);
+
+        app.stream_to_tail();
+        assert!(app.stream_follow_tail);
+        assert_eq!(app.stream_cursor.index, 0);
+    }
+
+    #[test]
+    fn stream_tab_is_hidden_until_workspace_is_pinned() {
+        let mut app = App::new();
+        assert_eq!(
+            app.stream_tab_views(),
+            &[
+                StreamView::Agents,
+                StreamView::Messages,
+                StreamView::Tasks,
+                StreamView::Tokens,
+            ]
+        );
+
+        app.select_stream(4);
+        assert_eq!(
+            app.stream,
+            StreamView::Agents,
+            "hidden stream index is ignored"
+        );
+
+        app.streamed_workspace = Some("alpha".into());
+        assert_eq!(
+            app.stream_tab_views(),
+            &[
+                StreamView::Agents,
+                StreamView::Messages,
+                StreamView::Tasks,
+                StreamView::Tokens,
+                StreamView::Stream,
+            ]
+        );
+        app.select_stream(4);
+        assert_eq!(app.stream, StreamView::Stream);
+
+        app.streamed_workspace = None;
+        app.ensure_stream_view_visible();
+        assert_eq!(app.stream, StreamView::Agents);
+    }
+
     fn mock_history() -> HistoryEntry {
         HistoryEntry {
             timestamp: chrono::Utc::now(),
@@ -648,6 +797,52 @@ mod tests {
         assert_eq!(app.selected_entry, *selectable.last().unwrap());
         app.move_selection(-10);
         assert_eq!(app.selected_entry, selectable[0]);
+    }
+
+    #[test]
+    fn rebuild_agents_preserves_selected_workspace_after_insert_above() {
+        let mut app = App::new();
+        app.sessions = vec![mock_session("b")];
+        app.rebuild_agents();
+        assert_eq!(app.selected_workspace(), Some("b"));
+
+        app.sessions = vec![mock_session("a"), mock_session("b")];
+        app.rebuild_agents();
+        assert_eq!(app.selected_workspace(), Some("b"));
+    }
+
+    #[test]
+    fn rebuild_agents_falls_back_to_nearest_selectable_when_workspace_disappears() {
+        let mut app = App::new();
+        app.sessions = vec![mock_session("a"), mock_session("b")];
+        app.rebuild_agents();
+        app.selected_entry = app
+            .agent_entries
+            .iter()
+            .position(|entry| entry.workspace == "b")
+            .expect("b row");
+
+        app.sessions = vec![mock_session("a")];
+        app.rebuild_agents();
+        assert_eq!(app.selected_workspace(), Some("a"));
+        assert!(app
+            .agent_entries
+            .get(app.selected_entry)
+            .is_some_and(|entry| !entry.group));
+    }
+
+    #[test]
+    fn refresh_notices_clear_only_matching_source() {
+        let mut app = App::new();
+        app.set_refresh_notice(RefreshNoticeSource::Tmux, "tmux failed");
+        app.clear_refresh_notice(RefreshNoticeSource::Daemon);
+        assert_eq!(
+            app.notice.as_ref().map(|notice| notice.text.as_str()),
+            Some("tmux failed")
+        );
+
+        app.clear_refresh_notice(RefreshNoticeSource::Tmux);
+        assert!(app.notice.is_none());
     }
 
     fn mock_session(name: &str) -> SessionInfo {

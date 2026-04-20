@@ -17,7 +17,6 @@ use throbber_widgets_tui::{Throbber, WhichUse, BRAILLE_SIX};
 
 use ax_proto::types::AgentStatus;
 
-use crate::actions::QuickActionId;
 use crate::agents::AgentEntry;
 use crate::state::{App, Focus};
 use crate::stream::{format_message_line, StreamView};
@@ -44,7 +43,7 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
         draw_quick_actions(f, area, list_area, app);
     }
     if app.help_open {
-        draw_help(f, area);
+        draw_help(f, area, app);
     }
 
     draw_footer(f, chunks[2], app);
@@ -67,7 +66,9 @@ fn split_body_inner(body_area: Rect) -> (Rect, Rect) {
         body_area.width.saturating_sub(2),
         body_area.height.saturating_sub(2),
     );
-    let list_h = (inner.height * 45 / 100).max(3).min(inner.height.saturating_sub(3));
+    let list_h = (inner.height * 45 / 100)
+        .max(3)
+        .min(inner.height.saturating_sub(3));
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(list_h), Constraint::Min(3)])
@@ -79,22 +80,29 @@ fn split_body_inner(body_area: Rect) -> (Rect, Rect) {
 /// context, dismissed via `?` or `Esc`. Reuses the `Clear` + framed
 /// block pattern from `draw_quick_actions` so the visual language
 /// stays consistent.
-fn draw_help(f: &mut Frame, frame: Rect) {
-    const SECTIONS: &[(&str, &[(&str, &str)])] = &[
+fn draw_help(f: &mut Frame, frame: Rect, app: &App) {
+    let stream_pinned = app.streamed_workspace.is_some();
+    let tab_keys = if stream_pinned { "1-5" } else { "1-4" };
+    let tab_desc = if stream_pinned {
+        "agents · messages · tasks · tokens · stream"
+    } else {
+        "agents · messages · tasks · tokens"
+    };
+    let mut sections: Vec<(&str, Vec<(&str, &str)>)> = vec![
         (
             "global",
-            &[
+            vec![
                 ("?", "toggle this help"),
                 ("q / ctrl-c", "quit"),
                 ("[ / ]", "switch pane (list ↔ detail)"),
-                ("Tab / Shift-Tab", "cycle tab"),
-                ("1-5", "agents · messages · tasks · tokens · stream"),
+                ("Tab / Shift-Tab", "cycle visible tab"),
+                (tab_keys, tab_desc),
                 ("f", "cycle task filter"),
             ],
         ),
         (
             "list · agents",
-            &[
+            vec![
                 ("↑ ↓ / j k", "move agent cursor"),
                 ("Enter", "open action menu"),
                 ("wheel", "scroll list"),
@@ -102,14 +110,14 @@ fn draw_help(f: &mut Frame, frame: Rect) {
         ),
         (
             "list · tasks",
-            &[
+            vec![
                 ("↑ ↓ / j k", "move selected task"),
                 ("wheel", "scroll list"),
             ],
         ),
         (
             "list · messages / tokens",
-            &[
+            vec![
                 ("↑ ↓ / j k", "scroll"),
                 ("PgUp / PgDn", "scroll by page"),
                 ("g / G", "head / tail"),
@@ -118,7 +126,7 @@ fn draw_help(f: &mut Frame, frame: Rect) {
         ),
         (
             "detail",
-            &[
+            vec![
                 ("↑ ↓ / j k", "scroll detail"),
                 ("PgUp / PgDn", "scroll by page"),
                 ("g", "top"),
@@ -127,21 +135,55 @@ fn draw_help(f: &mut Frame, frame: Rect) {
         ),
         (
             "action menu",
-            &[
+            vec![
                 ("↑ ↓", "select action"),
                 ("Enter", "run (re-press to confirm destructive ops)"),
                 ("Esc", "close"),
             ],
         ),
     ];
+    if stream_pinned {
+        sections.insert(
+            4,
+            (
+                "list · stream",
+                vec![
+                    ("↑ ↓ / j k", "scroll / freeze"),
+                    ("PgUp / PgDn", "scroll by page"),
+                    ("g / G", "top / follow tail"),
+                ],
+            ),
+        );
+    }
 
-    let total_rows: u16 = SECTIONS
-        .iter()
-        .map(|(_, rows)| rows.len() as u16 + 1)
-        .sum();
-    let height = (total_rows + 2)
-        .min(frame.height.saturating_sub(2))
-        .max(6);
+    let key_col = 18usize;
+    let mut lines: Vec<Line> = Vec::new();
+    for (idx, (section, rows)) in sections.iter().enumerate() {
+        if idx > 0 {
+            // Blank separator between sections so the cheatsheet reads
+            // as a vertically-stacked set of groups rather than one
+            // long table.
+            lines.push(Line::from(Span::raw("")));
+        }
+        lines.push(Line::from(Span::styled(
+            format!(" {section}"),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for (key, desc) in rows {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {key:<width$}", width = key_col),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(*desc),
+            ]));
+        }
+    }
+
+    let total_rows = lines.len() as u16;
+    let height = (total_rows + 2).min(frame.height.saturating_sub(2)).max(6);
     let width: u16 = 56;
     let width = width.min(frame.width.saturating_sub(2));
 
@@ -159,32 +201,13 @@ fn draw_help(f: &mut Frame, frame: Rect) {
         return;
     }
 
-    let key_col = 18usize;
-    let mut lines: Vec<Line> = Vec::with_capacity(total_rows as usize);
-    for (idx, (section, rows)) in SECTIONS.iter().enumerate() {
-        if idx > 0 {
-            // Blank separator between sections so the cheatsheet reads
-            // as a vertically-stacked set of groups rather than one
-            // long table.
-            lines.push(Line::from(Span::raw("")));
-        }
-        lines.push(Line::from(Span::styled(
-            format!(" {section}"),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )));
-        for (key, desc) in *rows {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("  {key:<width$}", width = key_col),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(*desc),
-            ]));
-        }
+    let mut visible: Vec<Line> = lines.into_iter().take(inner.height as usize).collect();
+    if total_rows as usize > inner.height as usize && !visible.is_empty() {
+        *visible.last_mut().expect("visible is non-empty") = Line::from(Span::styled(
+            "  ... resize terminal for more help",
+            Style::default().add_modifier(Modifier::DIM),
+        ));
     }
-    let visible: Vec<Line> = lines.into_iter().take(inner.height as usize).collect();
     f.render_widget(Paragraph::new(visible), inner);
 }
 
@@ -196,7 +219,15 @@ fn draw_help(f: &mut Frame, frame: Rect) {
 /// outer block). The agents list reserves 1 row for its column
 /// header, then paints rows from `list_area.y + 1` down.
 fn draw_quick_actions(f: &mut Frame, frame: Rect, list_area: Rect, app: &App) {
-    let workspace = app.selected_workspace().unwrap_or("");
+    let target = if app.quick_actions.target_task_id.is_empty() {
+        if app.quick_actions.target_workspace.is_empty() {
+            app.selected_workspace().unwrap_or("").to_owned()
+        } else {
+            app.quick_actions.target_workspace.clone()
+        }
+    } else {
+        crate::tasks::short_task_id(&app.quick_actions.target_task_id)
+    };
     let action_count = app.quick_actions.actions.len() as u16;
     // Content rows: confirm mode is a two-line prompt, normal mode
     // is one line per action plus a footer hint. Borders contribute
@@ -212,19 +243,31 @@ fn draw_quick_actions(f: &mut Frame, frame: Rect, list_area: Rect, app: &App) {
     let width: u16 = 42;
     let width = width.min(frame.width.saturating_sub(2));
 
-    // Reproduce the agents-panel layout so the popup appears *below*
-    // the row under the cursor (even when the list has scrolled off
-    // the top). The list pane reserves 1 row for its column header
-    // before the agent rows start.
-    let rows_height = list_area.height.saturating_sub(1);
-    let viewport = compute_viewport(
-        app.agent_entries.len(),
-        app.selected_entry,
-        rows_height as usize,
-    );
-    let rows_y = list_area.y.saturating_add(1);
-    let rel = (app.selected_entry.saturating_sub(viewport.start)) as u16;
-    let selected_row = rows_y.saturating_add(rel);
+    let selected_row = if app.quick_actions.target_task_id.is_empty() {
+        // Reproduce the agents-panel layout so the popup appears
+        // below the row under the cursor. The list pane reserves 1
+        // row for its column header before agent rows start.
+        let rows_height = list_area.height.saturating_sub(1);
+        let viewport = compute_viewport(
+            app.agent_entries.len(),
+            app.selected_entry,
+            rows_height as usize,
+        );
+        let rows_y = list_area.y.saturating_add(1);
+        let rel = (app.selected_entry.saturating_sub(viewport.start)) as u16;
+        rows_y.saturating_add(rel)
+    } else {
+        // Task action overlay anchors to the selected task row. The
+        // tasks list reserves up to 3 rows for filter/summary/header.
+        let header_height = list_area.height.min(3);
+        let body_height = list_area.height.saturating_sub(header_height);
+        let filtered_len = app.filtered_tasks().len();
+        let selected = app.task_cursor.index.min(filtered_len.saturating_sub(1));
+        let viewport = compute_viewport(filtered_len, selected, body_height as usize);
+        let rows_y = list_area.y.saturating_add(header_height);
+        let rel = selected.saturating_sub(viewport.start) as u16;
+        rows_y.saturating_add(rel)
+    };
 
     let anchor_x = list_area.x + 2;
     let below = selected_row.saturating_add(1);
@@ -245,13 +288,15 @@ fn draw_quick_actions(f: &mut Frame, frame: Rect, list_area: Rect, app: &App) {
     let area = Rect::new(x, y, width, height);
     f.render_widget(ratatui::widgets::Clear, area);
 
-    let title = format!(" {workspace} actions ");
+    let title = format!(" {target} actions ");
     let block = Block::default().borders(Borders::ALL).title(title);
 
     let mut lines: Vec<Line> = Vec::with_capacity(app.quick_actions.actions.len() + 2);
     if app.quick_actions.confirm {
         let action = app.quick_actions.current().map(|a| a.id);
-        let prompt = action.map_or("", QuickActionId::confirm_prompt);
+        let prompt = action
+            .map(|id| id.confirm_prompt(&target))
+            .unwrap_or_default();
         lines.push(Line::from(Span::styled(
             prompt,
             Style::default().add_modifier(Modifier::BOLD),
@@ -304,16 +349,28 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
         .filter(|t| {
             matches!(
                 t.status,
-                ax_proto::types::TaskStatus::Pending | ax_proto::types::TaskStatus::InProgress
+                ax_proto::types::TaskStatus::Pending
+                    | ax_proto::types::TaskStatus::InProgress
+                    | ax_proto::types::TaskStatus::Blocked
             )
         })
         .count();
+    let blocked_tasks = app
+        .tasks
+        .iter()
+        .filter(|t| matches!(t.status, ax_proto::types::TaskStatus::Blocked))
+        .count();
+    let blocked_segment = if blocked_tasks > 0 {
+        format!(" · blocked: {blocked_tasks}")
+    } else {
+        String::new()
+    };
     // Collapse segments so the line stays under a single terminal row
     // even on narrow windows. `agents: 0/0` and an empty task set are
     // common on a freshly-booted repo, so keep them visible as a cue
     // that the surface is wired up.
     let text = format!(
-        "ax · daemon: {daemon} · agents: {online}/{total_agents} · tasks: {active_tasks} active / {total_tasks} · sessions: {sessions} · filter: {filter}",
+        "ax · daemon: {daemon} · agents: {online}/{total_agents} · tasks: {active_tasks} active / {total_tasks}{blocked_segment} · sessions: {sessions} · filter: {filter}",
         total_tasks = app.tasks.len(),
         sessions = app.sessions.len(),
         filter = app.task_filter.label(),
@@ -504,7 +561,10 @@ fn agent_row<'a>(
         // the third number instead of leaving the column blank.
         let total_all = (t.total.cache_read + t.total.cache_creation + t.total.input) as f64;
         (
-            format!("↑{}", crate::tokens::format_token_count(t.total.input as f64)),
+            format!(
+                "↑{}",
+                crate::tokens::format_token_count(t.total.input as f64)
+            ),
             format!(
                 "↓{}",
                 crate::tokens::format_token_count(t.total.output as f64)
@@ -562,6 +622,7 @@ fn pad_or_trunc(s: &str, width: usize) -> String {
 }
 
 fn draw_body(f: &mut Frame, area: Rect, app: &mut App) {
+    app.ensure_stream_view_visible();
     // Outer body block carries the tab strip in its top border so the
     // layout doesn't burn a row on a standalone tab row. The inner
     // area splits vertically into a list pane (top) and a detail
@@ -661,7 +722,7 @@ fn detail_title(app: &App) -> Line<'static> {
 fn tabs_title(app: &App) -> Line<'static> {
     let focused = app.focus == Focus::Detail;
     let mut spans: Vec<Span<'static>> = Vec::new();
-    for (idx, view) in StreamView::ALL.iter().enumerate() {
+    for (idx, view) in app.stream_tab_views().iter().enumerate() {
         if idx > 0 {
             // Use the same horizontal glyph as the surrounding block
             // border so the divider melts into the top edge instead
@@ -723,18 +784,46 @@ fn draw_stream(f: &mut Frame, area: Rect, app: &mut App) {
     // Give the header a single-row caption so the streaming target
     // stays identifiable even though the tab strip only says
     // "stream". Mirrors the old hijack-mode title.
-    let caption = Paragraph::new(format!("  {workspace} · tmux mirror"))
-        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+    let mode = if app.stream_follow_tail {
+        "follow"
+    } else {
+        "frozen"
+    };
+    let caption = Paragraph::new(format!("  {workspace} · tmux mirror · {mode}")).style(
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    );
     let caption_area = Rect::new(area.x, area.y, area.width, 1);
     f.render_widget(caption, caption_area);
-    let body_area = Rect::new(area.x, area.y + 1, area.width, area.height.saturating_sub(1));
+    let body_area = Rect::new(
+        area.x,
+        area.y + 1,
+        area.width,
+        area.height.saturating_sub(1),
+    );
     if body_area.height == 0 {
         return;
     }
 
-    let rows = body_area.height as usize;
     let width = body_area.width as usize;
-    let lines: Vec<Line> = crate::captures::recent_wrapped_lines(capture, rows, width)
+    let visual_lines = crate::captures::wrapped_lines(capture, width);
+    let rows = body_area.height as usize;
+    let visible = rows.min(visual_lines.len());
+    let max_scroll = visual_lines.len().saturating_sub(visible);
+    if app.stream_follow_tail {
+        app.stream_cursor.index = max_scroll;
+    } else {
+        app.stream_cursor.clamp(max_scroll);
+        if app.stream_cursor.index == max_scroll {
+            app.stream_follow_tail = true;
+        }
+    }
+    let start = app.stream_cursor.index.min(max_scroll);
+    let end = (start + visible).min(visual_lines.len());
+    let lines: Vec<Line> = visual_lines[start..end]
+        .iter()
+        .cloned()
         .into_iter()
         .map(|line| Line::from(Span::raw(line)))
         .collect();
@@ -787,10 +876,31 @@ fn focus_border_style(app: &App, panel: Focus) -> Style {
 fn draw_messages(f: &mut Frame, area: Rect, app: &App) {
     // `area` is the body list pane — outer border + tab strip are
     // already painted by `draw_body`. Render raw rows into it.
+    let mut list_area = area;
+    if let Some(error) = &app.messages_snapshot_error {
+        let warning_area = Rect::new(area.x, area.y, area.width, area.height.min(1));
+        f.render_widget(
+            Paragraph::new(crate::tasks::truncate(
+                &format!("  snapshot error: {error}"),
+                warning_area.width as usize,
+            ))
+            .style(Style::default().fg(Color::Red)),
+            warning_area,
+        );
+        list_area = Rect::new(
+            area.x,
+            area.y.saturating_add(1),
+            area.width,
+            area.height.saturating_sub(1),
+        );
+    }
     if app.messages.is_empty() {
-        let para =
-            Paragraph::new("  (no messages yet)").style(Style::default().add_modifier(Modifier::DIM));
-        f.render_widget(para, area);
+        if app.messages_snapshot_error.is_some() {
+            return;
+        }
+        let para = Paragraph::new("  (no messages yet)")
+            .style(Style::default().add_modifier(Modifier::DIM));
+        f.render_widget(para, list_area);
         return;
     }
 
@@ -800,8 +910,8 @@ fn draw_messages(f: &mut Frame, area: Rect, app: &App) {
         .messages_cursor
         .index
         .min(app.messages.len().saturating_sub(1));
-    let viewport = compute_viewport(app.messages.len(), cursor, area.height as usize);
-    let content_area = viewport.content_area(area);
+    let viewport = compute_viewport(app.messages.len(), cursor, list_area.height as usize);
+    let content_area = viewport.content_area(list_area);
     let content_width = content_area.width as usize;
 
     let list_focused = app.focus == Focus::List;
@@ -830,7 +940,7 @@ fn draw_messages(f: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
     f.render_widget(Paragraph::new(lines), content_area);
-    render_scrollbar(f, area, viewport);
+    render_scrollbar(f, list_area, viewport);
 }
 
 fn draw_tokens(f: &mut Frame, area: Rect, app: &App) {
@@ -872,13 +982,22 @@ fn draw_tokens(f: &mut Frame, area: Rect, app: &App) {
     // Paragraphs on the top of the inner area so the per-workspace
     // grid below can lean on a real Layout split (needed for the
     // inline Sparkline).
-    let caption = Paragraph::new(" last 24h · ▁▂▃▄▅▆▇ = rolling usage per 5-min bucket")
-        .style(Style::default().add_modifier(Modifier::DIM));
-    let header = Paragraph::new(format!(
-        " {:<24} {:<14} {:<9} {:<9} {:<9} {:<7} {:<12}  TREND",
-        "WORKSPACE", "MODEL", "INPUT", "OUTPUT", "CACHE", "TURNS", "LAST"
-    ))
+    let compact = inner.width < 96;
+    let caption = Paragraph::new(if compact {
+        " last 24h · compact token usage"
+    } else {
+        " last 24h · ▁▂▃▄▅▆▇ = rolling usage per 5-min bucket"
+    })
     .style(Style::default().add_modifier(Modifier::DIM));
+    let header_text = if compact {
+        format!(" {:<24} {:<9} {:<12}  TREND", "WORKSPACE", "TOTAL", "LAST")
+    } else {
+        format!(
+            " {:<24} {:<14} {:<9} {:<9} {:<9} {:<7} {:<12}  TREND",
+            "WORKSPACE", "MODEL", "INPUT", "OUTPUT", "CACHE", "TURNS", "LAST"
+        )
+    };
+    let header = Paragraph::new(header_text).style(Style::default().add_modifier(Modifier::DIM));
 
     let header_rows = 2_u16;
     if inner.height <= header_rows {
@@ -914,7 +1033,7 @@ fn draw_tokens(f: &mut Frame, area: Rect, app: &App) {
     // Text column reserves a fixed width; the sparkline absorbs the
     // rest (with a lower bound so it isn't degenerate on narrow
     // panes).
-    let text_width: u16 = 94;
+    let text_width: u16 = if compact { 48 } else { 94 };
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -968,16 +1087,25 @@ fn draw_tokens(f: &mut Frame, area: Rect, app: &App) {
             Style::default()
         };
 
-        let row = format!(
-            " {:<24} {:<14} {:<9} {:<9} {:<9} {:<7} {:<12}",
-            crate::tasks::truncate(&trend.workspace, 24),
-            crate::tasks::truncate(&short_model(&model), 14),
-            input,
-            output,
-            cache,
-            turns_display,
-            last,
-        );
+        let row = if compact {
+            format!(
+                " {:<24} {:<9} {:<12}",
+                crate::tasks::truncate(&trend.workspace, 24),
+                crate::tokens::format_token_count(total),
+                last,
+            )
+        } else {
+            format!(
+                " {:<24} {:<14} {:<9} {:<9} {:<9} {:<7} {:<12}",
+                crate::tasks::truncate(&trend.workspace, 24),
+                crate::tasks::truncate(&short_model(&model), 14),
+                input,
+                output,
+                cache,
+                turns_display,
+                last,
+            )
+        };
         f.render_widget(
             Paragraph::new(Span::styled(
                 crate::tasks::truncate(&row, text_col.width as usize),
@@ -1022,7 +1150,10 @@ fn short_model(model: &str) -> String {
 /// Human-friendly "last seen" label relative to `now`. Falls back to
 /// a YYYY-MM-DD stamp for anything older than a day so the column
 /// stays parseable at a glance.
-fn format_last_activity(now: chrono::DateTime<chrono::Utc>, ts: chrono::DateTime<chrono::Utc>) -> String {
+fn format_last_activity(
+    now: chrono::DateTime<chrono::Utc>,
+    ts: chrono::DateTime<chrono::Utc>,
+) -> String {
     let delta = now.signed_duration_since(ts);
     if delta.num_seconds() < 0 {
         return "just now".to_owned();
@@ -1046,8 +1177,18 @@ fn format_last_activity(now: chrono::DateTime<chrono::Utc>, ts: chrono::DateTime
 fn draw_tasks_list_only(f: &mut Frame, area: Rect, app: &App) {
     let filtered = app.filtered_tasks();
     if app.tasks.is_empty() {
-        let para = Paragraph::new("  (no tasks yet)")
-            .style(Style::default().add_modifier(Modifier::DIM));
+        let (text, style) = if let Some(error) = &app.task_snapshot_error {
+            (
+                crate::tasks::truncate(&format!("  snapshot error: {error}"), area.width as usize),
+                Style::default().fg(Color::Red),
+            )
+        } else {
+            (
+                "  (no tasks yet)".to_owned(),
+                Style::default().add_modifier(Modifier::DIM),
+            )
+        };
+        let para = Paragraph::new(text).style(style);
         f.render_widget(para, area);
         return;
     }
@@ -1087,6 +1228,17 @@ fn draw_tasks_list(f: &mut Frame, area: Rect, app: &App, filtered: &[ax_proto::t
         filtered.len().min(app.task_cursor.index.saturating_add(1)),
         filtered.len(),
     );
+    let summary_line = if let Some(error) = &app.task_snapshot_error {
+        Line::from(Span::styled(
+            crate::tasks::truncate(&format!("snapshot error: {error}"), inner_width.max(1)),
+            Style::default().fg(Color::Red),
+        ))
+    } else {
+        Line::from(Span::styled(
+            crate::tasks::truncate(&format_task_summary_compact(&summary), inner_width.max(1)),
+            Style::default().add_modifier(Modifier::BOLD),
+        ))
+    };
     let header_lines = vec![
         Line::from(Span::styled(
             crate::tasks::truncate(&title_line, inner_width.max(1)),
@@ -1098,10 +1250,7 @@ fn draw_tasks_list(f: &mut Frame, area: Rect, app: &App, filtered: &[ax_proto::t
                 })
                 .add_modifier(Modifier::BOLD),
         )),
-        Line::from(Span::styled(
-            crate::tasks::truncate(&format_task_summary_compact(&summary), inner_width.max(1)),
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
+        summary_line,
         Line::from(Span::styled(
             crate::tasks::truncate(
                 "ID       STATE         OWNER        TITLE",
@@ -1175,7 +1324,11 @@ fn draw_task_detail(f: &mut Frame, area: Rect, app: &App, filtered: &[ax_proto::
     let max_scroll = total.saturating_sub(visible);
     let scroll = app.detail_scroll.index.min(max_scroll);
     let end = (scroll + visible).min(total);
-    let window: Vec<Line> = all_lines.into_iter().skip(scroll).take(end - scroll).collect();
+    let window: Vec<Line> = all_lines
+        .into_iter()
+        .skip(scroll)
+        .take(end - scroll)
+        .collect();
     f.render_widget(Paragraph::new(window), area);
 }
 
@@ -1197,10 +1350,7 @@ fn draw_agents_detail(f: &mut Frame, area: Rect, app: &App) {
         .entries
         .get(&workspace)
         .map_or("", |e| e.content.as_str());
-    let session = app
-        .sessions
-        .iter()
-        .find(|s| s.workspace == workspace);
+    let session = app.sessions.iter().find(|s| s.workspace == workspace);
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(Line::from(vec![
@@ -1269,7 +1419,10 @@ fn draw_agents_detail(f: &mut Frame, area: Rect, app: &App) {
             "recent tmux:".to_owned(),
             Style::default().add_modifier(Modifier::DIM),
         )));
-        let rows_budget = area.height.saturating_sub(lines.len() as u16).saturating_sub(1) as usize;
+        let rows_budget = area
+            .height
+            .saturating_sub(lines.len() as u16)
+            .saturating_sub(1) as usize;
         if rows_budget > 0 {
             for line in
                 crate::captures::recent_wrapped_lines(capture, rows_budget, area.width as usize)
@@ -1401,7 +1554,9 @@ fn draw_tokens_detail(f: &mut Frame, area: Rect, app: &App) {
             "cache creat".to_owned(),
             Style::default().add_modifier(Modifier::DIM),
         ),
-        Span::raw(crate::tokens::format_token_count(t.total.cache_creation as f64)),
+        Span::raw(crate::tokens::format_token_count(
+            t.total.cache_creation as f64,
+        )),
     ]));
     if let Some(last) = t.last_activity {
         lines.push(Line::from(vec![
@@ -1439,10 +1594,7 @@ fn draw_stream_detail(f: &mut Frame, area: Rect, app: &App) {
         return;
     };
     let info = app.workspace_infos.get(&workspace);
-    let session = app
-        .sessions
-        .iter()
-        .find(|s| s.workspace == workspace);
+    let session = app.sessions.iter().find(|s| s.workspace == workspace);
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(Line::from(vec![
@@ -1603,6 +1755,9 @@ fn format_task_summary_compact(summary: &crate::tasks::TaskSummary) -> String {
         format!("pend {}", summary.pending),
         format!("stale {}", summary.stale),
     ];
+    if summary.blocked > 0 {
+        parts.push(format!("block {}", summary.blocked));
+    }
     if summary.failed > 0 {
         parts.push(format!("fail {}", summary.failed));
     }
@@ -1803,14 +1958,20 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
         };
         (notice.text.clone(), s)
     } else if let Some(msg) = &app.notice {
-        (msg.clone(), Style::default().add_modifier(Modifier::DIM))
+        (
+            msg.text.clone(),
+            Style::default().add_modifier(Modifier::DIM),
+        )
     } else if app.quick_actions.open {
         (
             "↑↓ action · enter run · esc close · q quit".to_owned(),
             Style::default().add_modifier(Modifier::DIM),
         )
     } else {
-        (focus_footer_hint(app), Style::default().add_modifier(Modifier::DIM))
+        (
+            focus_footer_hint(app),
+            Style::default().add_modifier(Modifier::DIM),
+        )
     };
     let footer = Paragraph::new(text).style(style);
     f.render_widget(footer, area);
@@ -1822,15 +1983,24 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
 /// uniform scroll/esc line since every detail uses the shared
 /// `detail_scroll` cursor.
 fn focus_footer_hint(app: &App) -> String {
-    let base = "[/] pane · Tab/1-5 view · f filter · ? help · q quit";
+    let numeric_range = if app.streamed_workspace.is_some() {
+        "1-5"
+    } else {
+        "1-4"
+    };
+    let base = format!("[/] pane · Tab/{numeric_range} view · f filter · ? help · q quit");
     let scoped = match app.focus {
         Focus::List => match app.stream {
             StreamView::Agents => "↑↓/jk agent · enter actions",
             StreamView::Tasks => "↑↓/jk task",
-            StreamView::Messages | StreamView::Tokens => {
-                "↑↓/jk scroll · g/G head/tail"
+            StreamView::Messages | StreamView::Tokens => "↑↓/jk scroll · g/G head/tail",
+            StreamView::Stream => {
+                if app.stream_follow_tail {
+                    "↑↓/jk freeze scroll · g/G top/follow"
+                } else {
+                    "↑↓/jk scroll · G follow tail"
+                }
             }
-            StreamView::Stream => "live tmux mirror",
         },
         Focus::Detail => "↑↓/jk scroll · g reset · esc list",
     };
@@ -1872,6 +2042,7 @@ mod tests {
             in_progress: 2,
             completed: 4,
             failed: 1,
+            blocked: 1,
             stale: 2,
             diverged: 1,
             queued_messages: 9,
@@ -1880,7 +2051,7 @@ mod tests {
         };
         assert_eq!(
             format_task_summary_compact(&summary),
-            "tot 12 · run 2 · pend 3 · stale 2 · fail 1 · done 4 · msg 9 · div 1 · hi 2"
+            "tot 12 · run 2 · pend 3 · stale 2 · block 1 · fail 1 · done 4 · msg 9 · div 1 · hi 2"
         );
     }
 
@@ -1891,6 +2062,18 @@ mod tests {
         task.stale_after_seconds = 1;
         task.updated_at = chrono::Utc::now() - chrono::Duration::seconds(5);
         assert_eq!(format_task_state(&task), "running stale");
+    }
+
+    #[test]
+    fn footer_hint_only_advertises_stream_shortcut_when_pinned() {
+        let mut app = App::new();
+        let hint = focus_footer_hint(&app);
+        assert!(hint.contains("Tab/1-4 view"));
+        assert!(!hint.contains("Tab/1-5 view"));
+
+        app.streamed_workspace = Some("alpha".into());
+        let hint = focus_footer_hint(&app);
+        assert!(hint.contains("Tab/1-5 view"));
     }
 
     fn mock_task() -> Task {

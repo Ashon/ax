@@ -4,10 +4,10 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::actions::{
-    apply_outcomes, default_actions, move_overlay_selection, run_selected, ActionOutcome,
-    QuickActionId,
+    apply_outcomes, contextual_actions, move_overlay_selection, run_selected, task_actions,
+    ActionOutcome, Notice, QuickActionId,
 };
-use crate::state::{App, Focus, PendingLifecycle};
+use crate::state::{App, Focus, PendingLifecycle, PendingTaskAction};
 use crate::stream::StreamView;
 
 pub(crate) fn handle_key(app: &mut App, event: KeyEvent) {
@@ -44,6 +44,8 @@ pub(crate) fn handle_key(app: &mut App, event: KeyEvent) {
         return;
     }
 
+    app.ensure_stream_view_visible();
+
     // `?` toggles the help overlay from any non-overlay context. It's
     // global so operators can reach it without first parking focus on
     // a specific panel.
@@ -55,8 +57,9 @@ pub(crate) fn handle_key(app: &mut App, event: KeyEvent) {
     // Global bindings — active regardless of which panel is focused.
     // Arrow keys are deliberately *not* global: each panel owns them
     // so a stray ↑/↓ can't leak across scopes. Tab switching moves to
-    // its own dedicated keys (Tab/Shift-Tab + 1-4) so operators can
-    // flip views without losing their place in Agents.
+    // its own dedicated keys (Tab/Shift-Tab + visible numeric tabs)
+    // so operators can flip views without losing their place in
+    // Agents.
     match event.code {
         KeyCode::Char('[') | KeyCode::Char(']') => {
             app.cycle_focus(1);
@@ -108,6 +111,7 @@ fn handle_list_key(app: &mut App, event: KeyEvent) {
         StreamView::Tasks => match event.code {
             KeyCode::Up | KeyCode::Char('k') => app.move_task_selection(-1),
             KeyCode::Down | KeyCode::Char('j') => app.move_task_selection(1),
+            KeyCode::Enter => open_task_overlay(app),
             _ => {}
         },
         // Messages is a cursor-selected list: ↑ moves the selection
@@ -133,10 +137,18 @@ fn handle_list_key(app: &mut App, event: KeyEvent) {
             KeyCode::End | KeyCode::Char('G') => app.tokens_to_tail(),
             _ => {}
         },
-        // Stream's "list" is the live capture tail — no manual scroll
-        // surface yet; follow-up slice adds it alongside a scroll
-        // cursor on the capture buffer.
-        StreamView::Stream => {}
+        // Stream defaults to live-follow, then freezes on the first
+        // scroll away from the tail until the operator jumps back with
+        // G/End.
+        StreamView::Stream => match event.code {
+            KeyCode::Up | KeyCode::Char('k') => app.scroll_stream(-1),
+            KeyCode::Down | KeyCode::Char('j') => app.scroll_stream(1),
+            KeyCode::PageUp => app.scroll_stream(-10),
+            KeyCode::PageDown => app.scroll_stream(10),
+            KeyCode::Home | KeyCode::Char('g') => app.stream_to_head(),
+            KeyCode::End | KeyCode::Char('G') => app.stream_to_tail(),
+            _ => {}
+        },
     }
 }
 
@@ -169,6 +181,7 @@ pub(crate) fn handle_scroll(app: &mut App, direction: i32) {
         // help cheatsheet is visible.
         return;
     }
+    app.ensure_stream_view_visible();
     match app.focus {
         Focus::List => match app.stream {
             StreamView::Agents => app.move_selection(direction),
@@ -178,8 +191,7 @@ pub(crate) fn handle_scroll(app: &mut App, direction: i32) {
             // flip needed now that messages use absolute indices.
             StreamView::Messages => app.scroll_messages(direction),
             StreamView::Tokens => app.scroll_tokens(direction),
-            // Stream is a live tail — no manual scroll surface yet.
-            StreamView::Stream => {}
+            StreamView::Stream => app.scroll_stream(direction),
         },
         Focus::Detail => app.detail_scroll.shift(direction),
     }
@@ -187,12 +199,47 @@ pub(crate) fn handle_scroll(app: &mut App, direction: i32) {
 
 fn open_overlay(app: &mut App) {
     if app.selected_workspace().is_none() {
+        app.quick_notice = Some(Notice::new("No workspace selected".into(), true));
         return;
     }
-    app.quick_actions.actions = default_actions();
+    let has_session = app
+        .agent_entries
+        .get(app.selected_entry)
+        .is_some_and(|entry| entry.session_index.is_some());
+    app.quick_actions.actions = contextual_actions(has_session);
+    app.quick_notice = None;
+    app.quick_actions.target_workspace = app.selected_workspace().unwrap_or("").to_owned();
+    app.quick_actions.target_task_id.clear();
+    app.quick_actions.target_task_version = 0;
     app.quick_actions.selected = 0;
     app.quick_actions.confirm = false;
     app.quick_actions.open = true;
+}
+
+fn open_task_overlay(app: &mut App) {
+    let Some(task) = app.selected_task() else {
+        app.quick_notice = Some(Notice::new("No task selected".into(), true));
+        return;
+    };
+    let actions = task_actions(&task);
+    if actions.is_empty() {
+        app.quick_notice = Some(Notice::new(
+            format!(
+                "No remediation actions for task {}",
+                crate::tasks::short_task_id(&task.id)
+            ),
+            true,
+        ));
+        return;
+    }
+    app.quick_actions.actions = actions;
+    app.quick_actions.selected = 0;
+    app.quick_actions.confirm = false;
+    app.quick_actions.open = true;
+    app.quick_actions.target_workspace.clear();
+    app.quick_actions.target_task_id = task.id;
+    app.quick_actions.target_task_version = task.version;
+    app.quick_notice = None;
 }
 
 fn handle_overlay_key(app: &mut App, event: KeyEvent) {
@@ -214,11 +261,38 @@ fn handle_overlay_key(app: &mut App, event: KeyEvent) {
 }
 
 fn activate_overlay(app: &mut App) {
-    let Some(target) = app.selected_workspace().map(str::to_owned) else {
-        app.quick_actions.open = false;
+    let Some(action) = app.quick_actions.current() else {
         return;
     };
-    let Some(action) = app.quick_actions.current() else {
+    if action.id.is_task_action() {
+        if action.id.requires_confirmation() && !app.quick_actions.confirm {
+            apply_outcomes(app, vec![ActionOutcome::NeedsConfirm]);
+            return;
+        }
+        let task_id = app.quick_actions.target_task_id.clone();
+        if task_id.is_empty() {
+            app.quick_actions.open = false;
+            return;
+        }
+        app.pending_task_action = Some(PendingTaskAction {
+            action: action.id,
+            task_id: task_id.clone(),
+            expected_version: app.quick_actions.target_task_version,
+        });
+        app.quick_actions.open = false;
+        app.quick_actions.confirm = false;
+        app.quick_notice = Some(Notice::new(
+            format!(
+                "{} requested for {}",
+                action.id.label(),
+                crate::tasks::short_task_id(&task_id)
+            ),
+            false,
+        ));
+        return;
+    }
+    let Some(target) = app.selected_workspace().map(str::to_owned) else {
+        app.quick_actions.open = false;
         return;
     };
     // Lifecycle actions need paths we don't have in state.rs, so the
@@ -231,8 +305,12 @@ fn activate_overlay(app: &mut App) {
         }
         app.pending_lifecycle = Some(PendingLifecycle {
             action: action.id,
-            workspace: target,
+            workspace: target.clone(),
         });
+        app.quick_notice = Some(Notice::new(
+            format!("{} requested for {}", action.id.label(), target),
+            false,
+        ));
         // Close the overlay while the app loop executes; the notice
         // emitted by `apply_lifecycle` will surface the result.
         app.quick_actions.open = false;
@@ -247,6 +325,7 @@ fn activate_overlay(app: &mut App) {
 mod tests {
     use super::*;
     use crate::actions::QuickActionId;
+    use ax_proto::types::{Task, TaskStartMode, TaskStatus};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn press(code: KeyCode) -> KeyEvent {
@@ -263,12 +342,52 @@ mod tests {
         }
     }
 
+    fn mock_task(id: &str, status: TaskStatus) -> Task {
+        let now = chrono::Utc::now();
+        Task {
+            id: id.into(),
+            title: "task".into(),
+            description: String::new(),
+            assignee: "alpha".into(),
+            created_by: "orch".into(),
+            parent_task_id: String::new(),
+            child_task_ids: Vec::new(),
+            version: 7,
+            status,
+            start_mode: TaskStartMode::Default,
+            workflow_mode: None,
+            priority: None,
+            stale_after_seconds: 0,
+            dispatch_message: String::new(),
+            dispatch_config_path: String::new(),
+            dispatch_count: 0,
+            attempt_count: 0,
+            last_dispatch_at: None,
+            last_attempt_at: None,
+            next_retry_at: None,
+            claimed_at: None,
+            claimed_by: String::new(),
+            claim_source: String::new(),
+            result: String::new(),
+            logs: Vec::new(),
+            rollup: None,
+            sequence: None,
+            stale_info: None,
+            removed_at: None,
+            removed_by: String::new(),
+            remove_reason: String::new(),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
     #[test]
     fn enter_opens_overlay_when_workspace_selected() {
         let mut app = App::new();
         // No agents panel = no workspace → enter is a no-op.
         handle_key(&mut app, press(KeyCode::Enter));
         assert!(!app.quick_actions.open);
+        assert!(app.quick_notice.is_some());
 
         app.agent_entries = vec![crate::agents::AgentEntry {
             label: "alpha".into(),
@@ -282,6 +401,58 @@ mod tests {
         handle_key(&mut app, press(KeyCode::Enter));
         assert!(app.quick_actions.open);
         assert!(!app.quick_actions.actions.is_empty());
+    }
+
+    #[test]
+    fn enter_on_offline_workspace_hides_session_only_actions() {
+        let mut app = App::new();
+        app.agent_entries = vec![crate::agents::AgentEntry {
+            label: "alpha".into(),
+            workspace: "alpha".into(),
+            session_index: None,
+            level: 0,
+            group: false,
+            reconcile: String::new(),
+        }];
+        handle_key(&mut app, press(KeyCode::Enter));
+        let actions: Vec<_> = app.quick_actions.actions.iter().map(|a| a.id).collect();
+        assert!(!actions.contains(&QuickActionId::StreamTmux));
+        assert!(!actions.contains(&QuickActionId::Interrupt));
+        assert!(!actions.contains(&QuickActionId::Stop));
+        assert!(actions.contains(&QuickActionId::Restart));
+    }
+
+    #[test]
+    fn enter_on_task_opens_remediation_overlay_and_queues_confirmed_action() {
+        let mut app = App::new();
+        app.stream = StreamView::Tasks;
+        app.tasks = vec![mock_task("abcdef123456", TaskStatus::InProgress)];
+
+        handle_key(&mut app, press(KeyCode::Enter));
+        assert!(app.quick_actions.open);
+        assert_eq!(app.quick_actions.target_task_id, "abcdef123456");
+        let ids: Vec<_> = app.quick_actions.actions.iter().map(|a| a.id).collect();
+        assert!(ids.contains(&QuickActionId::TaskWake));
+        assert!(ids.contains(&QuickActionId::TaskInterrupt));
+        assert!(ids.contains(&QuickActionId::TaskRetry));
+        assert!(ids.contains(&QuickActionId::TaskCancel));
+
+        app.quick_actions.selected = app
+            .quick_actions
+            .actions
+            .iter()
+            .position(|a| a.id == QuickActionId::TaskCancel)
+            .expect("cancel action");
+        handle_key(&mut app, press(KeyCode::Enter));
+        assert!(app.quick_actions.confirm);
+        assert!(app.pending_task_action.is_none());
+
+        handle_key(&mut app, press(KeyCode::Enter));
+        let pending = app.pending_task_action.expect("queued task action");
+        assert_eq!(pending.action, QuickActionId::TaskCancel);
+        assert_eq!(pending.task_id, "abcdef123456");
+        assert_eq!(pending.expected_version, 7);
+        assert!(!app.quick_actions.open);
     }
 
     #[test]
@@ -407,17 +578,18 @@ mod tests {
     fn digit_keys_jump_tab_without_changing_focus() {
         let mut app = App::new();
         assert_eq!(app.focus, Focus::List);
-        // `4` is now Tokens (Agents=1, Messages=2, Tasks=3, Tokens=4,
-        // Stream=5); focus must stay on List so digits are a pure
-        // view peek.
+        // `4` is Tokens (Agents=1, Messages=2, Tasks=3, Tokens=4).
+        // Stream is hidden until a workspace is pinned, so `5` is
+        // ignored on a cold start.
         handle_key(&mut app, press(KeyCode::Char('4')));
         assert_eq!(app.stream, crate::stream::StreamView::Tokens);
-        assert_eq!(
-            app.focus,
-            Focus::List,
-            "digit keys preserve current focus"
-        );
-        // `5` jumps to Stream, exercising the 5th slot.
+        assert_eq!(app.focus, Focus::List, "digit keys preserve current focus");
+        handle_key(&mut app, press(KeyCode::Char('5')));
+        assert_eq!(app.stream, crate::stream::StreamView::Tokens);
+
+        // Once a workspace is pinned, the contextual Stream view
+        // becomes visible as the 5th slot.
+        app.streamed_workspace = Some("alpha".into());
         handle_key(&mut app, press(KeyCode::Char('5')));
         assert_eq!(app.stream, crate::stream::StreamView::Stream);
     }
@@ -534,5 +706,22 @@ mod tests {
         let before = app.quick_actions.selected;
         handle_scroll(&mut app, 1);
         assert_eq!(app.quick_actions.selected, before, "overlay swallows wheel");
+    }
+
+    #[test]
+    fn stream_keys_scroll_and_restore_follow_tail() {
+        let mut app = App::new();
+        app.stream = StreamView::Stream;
+        app.streamed_workspace = Some("alpha".into());
+        app.stream_cursor.index = 20;
+        assert!(app.stream_follow_tail);
+
+        handle_key(&mut app, press(KeyCode::Up));
+        assert_eq!(app.stream_cursor.index, 19);
+        assert!(!app.stream_follow_tail);
+
+        handle_key(&mut app, press(KeyCode::Char('G')));
+        assert!(app.stream_follow_tail);
+        assert_eq!(app.stream_cursor.index, 0);
     }
 }

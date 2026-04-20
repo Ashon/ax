@@ -10,6 +10,7 @@
 
 use std::time::{Duration, Instant};
 
+use ax_proto::types::{Task, TaskStatus};
 use ax_workspace::{restart_named_target, stop_named_target, RealTmux};
 
 use crate::state::App;
@@ -25,6 +26,10 @@ pub(crate) enum QuickActionId {
     Interrupt,
     Restart,
     Stop,
+    TaskWake,
+    TaskInterrupt,
+    TaskRetry,
+    TaskCancel,
 }
 
 impl QuickActionId {
@@ -36,19 +41,31 @@ impl QuickActionId {
             Self::Interrupt => "Interrupt",
             Self::Restart => "Restart",
             Self::Stop => "Stop",
+            Self::TaskWake => "Wake task",
+            Self::TaskInterrupt => "Interrupt assignee",
+            Self::TaskRetry => "Retry task",
+            Self::TaskCancel => "Cancel task",
         }
     }
 
     pub(crate) fn requires_confirmation(self) -> bool {
-        matches!(self, Self::Restart | Self::Stop)
+        matches!(self, Self::Restart | Self::Stop | Self::TaskCancel)
     }
 
-    pub(crate) fn confirm_prompt(self) -> &'static str {
+    pub(crate) fn confirm_prompt(self, target: &str) -> String {
         match self {
-            Self::Restart => "confirm restart?",
-            Self::Stop => "confirm stop?",
-            _ => "",
+            Self::Restart => format!("confirm restart {target}?"),
+            Self::Stop => format!("confirm stop {target}?"),
+            Self::TaskCancel => format!("confirm cancel task {target}?"),
+            _ => String::new(),
         }
+    }
+
+    pub(crate) fn is_task_action(self) -> bool {
+        matches!(
+            self,
+            Self::TaskWake | Self::TaskInterrupt | Self::TaskRetry | Self::TaskCancel
+        )
     }
 }
 
@@ -57,7 +74,12 @@ pub(crate) struct QuickAction {
     pub id: QuickActionId,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn default_actions() -> Vec<QuickAction> {
+    contextual_actions(true)
+}
+
+pub(crate) fn contextual_actions(has_session: bool) -> Vec<QuickAction> {
     vec![
         QuickAction {
             id: QuickActionId::StreamTmux,
@@ -78,6 +100,34 @@ pub(crate) fn default_actions() -> Vec<QuickAction> {
             id: QuickActionId::Stop,
         },
     ]
+    .into_iter()
+    .filter(|action| {
+        has_session
+            || !matches!(
+                action.id,
+                QuickActionId::StreamTmux | QuickActionId::Interrupt | QuickActionId::Stop
+            )
+    })
+    .collect()
+}
+
+pub(crate) fn task_actions(task: &Task) -> Vec<QuickAction> {
+    if !matches!(
+        task.status,
+        TaskStatus::Pending | TaskStatus::InProgress | TaskStatus::Blocked
+    ) {
+        return Vec::new();
+    }
+    [
+        QuickActionId::TaskWake,
+        QuickActionId::TaskInterrupt,
+        QuickActionId::TaskRetry,
+        QuickActionId::TaskCancel,
+    ]
+    .into_iter()
+    .filter(|id| *id != QuickActionId::TaskInterrupt || !task.assignee.is_empty())
+    .map(|id| QuickAction { id })
+    .collect()
 }
 
 #[derive(Debug, Clone, Default)]
@@ -86,6 +136,9 @@ pub(crate) struct QuickActionState {
     pub actions: Vec<QuickAction>,
     pub selected: usize,
     pub confirm: bool,
+    pub target_workspace: String,
+    pub target_task_id: String,
+    pub target_task_version: i64,
 }
 
 impl QuickActionState {
@@ -168,6 +221,10 @@ pub(crate) fn run_selected(state: &QuickActionState, target: &str) -> Vec<Action
                 error: true,
             }]
         }
+        QuickActionId::TaskWake
+        | QuickActionId::TaskInterrupt
+        | QuickActionId::TaskRetry
+        | QuickActionId::TaskCancel => vec![ActionOutcome::Close],
     }
 }
 
@@ -259,6 +316,9 @@ pub(crate) fn apply_outcomes(app: &mut App, outcomes: Vec<ActionOutcome>) {
                 app.quick_actions.open = false;
                 app.quick_actions.confirm = false;
                 app.quick_actions.selected = 0;
+                app.quick_actions.target_workspace.clear();
+                app.quick_actions.target_task_id.clear();
+                app.quick_actions.target_task_version = 0;
             }
         }
     }
@@ -277,6 +337,7 @@ mod tests {
             actions: default_actions(),
             selected: 0,
             confirm: false,
+            ..QuickActionState::default()
         };
         state.selected = state
             .actions
@@ -320,7 +381,10 @@ mod tests {
         let mut app = crate::state::App::new();
         app.streamed_workspace = Some("alpha".into());
         app.stream = StreamView::Stream;
-        apply_outcomes(&mut app, vec![ActionOutcome::ChangeStream(StreamView::Tasks)]);
+        apply_outcomes(
+            &mut app,
+            vec![ActionOutcome::ChangeStream(StreamView::Tasks)],
+        );
         assert_eq!(app.stream, StreamView::Tasks);
         assert_eq!(
             app.streamed_workspace.as_deref(),
@@ -364,8 +428,89 @@ mod tests {
             QuickActionId::Interrupt,
             QuickActionId::Restart,
             QuickActionId::Stop,
+            QuickActionId::TaskWake,
+            QuickActionId::TaskInterrupt,
+            QuickActionId::TaskRetry,
+            QuickActionId::TaskCancel,
         ] {
             assert!(!id.label().is_empty());
+        }
+    }
+
+    #[test]
+    fn contextual_actions_hide_session_only_actions_without_session() {
+        let ids: Vec<_> = contextual_actions(false)
+            .into_iter()
+            .map(|a| a.id)
+            .collect();
+        assert!(!ids.contains(&QuickActionId::StreamTmux));
+        assert!(!ids.contains(&QuickActionId::Interrupt));
+        assert!(!ids.contains(&QuickActionId::Stop));
+        assert!(ids.contains(&QuickActionId::Restart));
+        assert!(ids.contains(&QuickActionId::ShowTasks));
+    }
+
+    #[test]
+    fn task_actions_only_include_active_task_remediation() {
+        let mut task = mock_task(TaskStatus::InProgress);
+        let ids: Vec<_> = task_actions(&task).into_iter().map(|a| a.id).collect();
+        assert!(ids.contains(&QuickActionId::TaskWake));
+        assert!(ids.contains(&QuickActionId::TaskInterrupt));
+        assert!(ids.contains(&QuickActionId::TaskRetry));
+        assert!(ids.contains(&QuickActionId::TaskCancel));
+
+        task.status = TaskStatus::Completed;
+        assert!(task_actions(&task).is_empty());
+    }
+
+    #[test]
+    fn confirm_prompt_names_target_workspace() {
+        assert_eq!(
+            QuickActionId::Restart.confirm_prompt("alpha"),
+            "confirm restart alpha?"
+        );
+        assert_eq!(
+            QuickActionId::Stop.confirm_prompt("alpha"),
+            "confirm stop alpha?"
+        );
+    }
+
+    fn mock_task(status: TaskStatus) -> Task {
+        let now = chrono::Utc::now();
+        Task {
+            id: "task123".into(),
+            title: "task".into(),
+            description: String::new(),
+            assignee: "alpha".into(),
+            created_by: "orch".into(),
+            parent_task_id: String::new(),
+            child_task_ids: Vec::new(),
+            version: 1,
+            status,
+            start_mode: ax_proto::types::TaskStartMode::Default,
+            workflow_mode: None,
+            priority: None,
+            stale_after_seconds: 0,
+            dispatch_message: String::new(),
+            dispatch_config_path: String::new(),
+            dispatch_count: 0,
+            attempt_count: 0,
+            last_dispatch_at: None,
+            last_attempt_at: None,
+            next_retry_at: None,
+            claimed_at: None,
+            claimed_by: String::new(),
+            claim_source: String::new(),
+            result: String::new(),
+            logs: Vec::new(),
+            rollup: None,
+            sequence: None,
+            stale_info: None,
+            removed_at: None,
+            removed_by: String::new(),
+            remove_reason: String::new(),
+            created_at: now,
+            updated_at: now,
         }
     }
 }

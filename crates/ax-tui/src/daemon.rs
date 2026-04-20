@@ -11,9 +11,15 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
 
-use ax_proto::payloads::{RegisterPayload, UsageTrendWorkspace, UsageTrendsPayload};
-use ax_proto::responses::{ListWorkspacesResponse, StatusResponse, UsageTrendsResponse};
-use ax_proto::types::WorkspaceInfo;
+use ax_proto::payloads::{
+    CancelTaskPayload, InterveneTaskPayload, RegisterPayload, UsageTrendWorkspace,
+    UsageTrendsPayload,
+};
+use ax_proto::responses::{
+    InterveneTaskResponse, ListWorkspacesResponse, StatusResponse, TaskResponse,
+    UsageTrendsResponse,
+};
+use ax_proto::types::{Task, WorkspaceInfo};
 use ax_proto::usage::WorkspaceTrend;
 use ax_proto::{Envelope, ErrorPayload, MessageType, ResponsePayload};
 use serde::de::DeserializeOwned;
@@ -46,6 +52,13 @@ pub(crate) struct Client {
 
 impl Client {
     pub(crate) fn connect(socket_path: &Path) -> Result<Self, DaemonClientError> {
+        Self::connect_as(socket_path, "_watch")
+    }
+
+    pub(crate) fn connect_as(
+        socket_path: &Path,
+        workspace: &str,
+    ) -> Result<Self, DaemonClientError> {
         let stream =
             UnixStream::connect(socket_path).map_err(|source| DaemonClientError::Connect {
                 path: socket_path.display().to_string(),
@@ -63,7 +76,7 @@ impl Client {
         let _: StatusResponse = client.request(
             MessageType::Register,
             &RegisterPayload {
-                workspace: "_watch".into(),
+                workspace: workspace.to_owned(),
                 dir,
                 description: String::new(),
                 config_path: String::new(),
@@ -103,6 +116,41 @@ impl Client {
         };
         let response: UsageTrendsResponse = self.request(MessageType::UsageTrends, &payload)?;
         Ok(response.trends)
+    }
+
+    pub(crate) fn cancel_task(
+        &mut self,
+        id: &str,
+        reason: &str,
+        expected_version: Option<i64>,
+    ) -> Result<Task, DaemonClientError> {
+        let response: TaskResponse = self.request(
+            MessageType::CancelTask,
+            &CancelTaskPayload {
+                id: id.to_owned(),
+                reason: reason.to_owned(),
+                expected_version,
+            },
+        )?;
+        Ok(response.task)
+    }
+
+    pub(crate) fn intervene_task(
+        &mut self,
+        id: &str,
+        action: &str,
+        note: &str,
+        expected_version: Option<i64>,
+    ) -> Result<InterveneTaskResponse, DaemonClientError> {
+        self.request(
+            MessageType::InterveneTask,
+            &InterveneTaskPayload {
+                id: id.to_owned(),
+                action: action.to_owned(),
+                note: note.to_owned(),
+                expected_version,
+            },
+        )
     }
 
     fn request<P, R>(&mut self, kind: MessageType, payload: &P) -> Result<R, DaemonClientError>

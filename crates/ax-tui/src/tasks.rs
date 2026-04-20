@@ -1,4 +1,4 @@
-//! Tasks stream view — reads `tasks.json` from the daemon state dir
+//! Tasks stream view — reads `tasks-state.json` from the daemon state dir
 //! and renders a summary header + table in the body pane.
 //!
 //! Helpers here are close relatives of the ones in `ax-cli::tasks`;
@@ -12,7 +12,15 @@ use ax_daemon::{expand_socket_path, HistoryEntry};
 use ax_proto::types::{Task, TaskPriority, TaskStatus};
 use chrono::{DateTime, Utc};
 
-const TASKS_FILE_NAME: &str = "tasks.json";
+const TASKS_FILE_NAME: &str = "tasks-state.json";
+const LEGACY_TASKS_FILE_NAME: &str = "tasks.json";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SnapshotRead<T> {
+    Loaded(T),
+    Missing,
+    Error(String),
+}
 
 /// Cycle order for the `f` key: active → stale → done → all → active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,7 +58,10 @@ pub(crate) fn filter_tasks(tasks: &[Task], mode: TaskFilterMode) -> Vec<Task> {
         .iter()
         .filter(|task| match mode {
             TaskFilterMode::Active => {
-                matches!(task.status, TaskStatus::Pending | TaskStatus::InProgress)
+                matches!(
+                    task.status,
+                    TaskStatus::Pending | TaskStatus::InProgress | TaskStatus::Blocked
+                )
             }
             TaskFilterMode::Stale => task_is_stale(task),
             TaskFilterMode::Done => matches!(
@@ -78,15 +89,39 @@ pub(crate) fn tasks_file_path(socket_path: &Path) -> PathBuf {
 /// Parse the tasks snapshot, returning an empty slice when the file
 /// is missing or malformed. Tasks are sorted in display order so
 /// rendering can iterate them directly.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn read_tasks(path: &Path) -> Vec<Task> {
-    let Ok(data) = std::fs::read_to_string(path) else {
-        return Vec::new();
+    match read_tasks_snapshot(path) {
+        SnapshotRead::Loaded(tasks) => tasks,
+        SnapshotRead::Missing | SnapshotRead::Error(_) => Vec::new(),
+    }
+}
+
+pub(crate) fn read_tasks_snapshot(path: &Path) -> SnapshotRead<Vec<Task>> {
+    match read_tasks_snapshot_file(path) {
+        SnapshotRead::Missing if path.file_name().is_some_and(|name| name == TASKS_FILE_NAME) => {
+            read_tasks_snapshot_file(&path.with_file_name(LEGACY_TASKS_FILE_NAME))
+        }
+        result => result,
+    }
+}
+
+fn read_tasks_snapshot_file(path: &Path) -> SnapshotRead<Vec<Task>> {
+    let data = match std::fs::read_to_string(path) {
+        Ok(data) => data,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return SnapshotRead::Missing,
+        Err(e) => {
+            return SnapshotRead::Error(format!("tasks snapshot read {}: {e}", path.display()));
+        }
     };
-    let Ok(mut tasks) = serde_json::from_str::<Vec<Task>>(&data) else {
-        return Vec::new();
+    let mut tasks = match serde_json::from_str::<Vec<Task>>(&data) {
+        Ok(tasks) => tasks,
+        Err(e) => {
+            return SnapshotRead::Error(format!("tasks snapshot parse {}: {e}", path.display()));
+        }
     };
     sort_tasks_for_display(&mut tasks);
-    tasks
+    SnapshotRead::Loaded(tasks)
 }
 
 /// Low-cardinality counts the header uses. `top_attention_ids` is
@@ -97,6 +132,7 @@ pub(crate) struct TaskSummary {
     pub total: usize,
     pub pending: usize,
     pub in_progress: usize,
+    pub blocked: usize,
     pub completed: usize,
     pub failed: usize,
     pub cancelled: usize,
@@ -115,10 +151,10 @@ pub(crate) fn summarize_tasks(tasks: &[Task]) -> TaskSummary {
         match task.status {
             TaskStatus::Pending => s.pending += 1,
             TaskStatus::InProgress => s.in_progress += 1,
+            TaskStatus::Blocked => s.blocked += 1,
             TaskStatus::Completed => s.completed += 1,
             TaskStatus::Failed => s.failed += 1,
             TaskStatus::Cancelled => s.cancelled += 1,
-            TaskStatus::Blocked => {}
         }
         if matches!(
             task.priority,
@@ -142,8 +178,8 @@ pub(crate) fn summarize_tasks(tasks: &[Task]) -> TaskSummary {
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn format_task_summary(s: &TaskSummary) -> String {
     let mut out = format!(
-        "total={}  pending={}  in_progress={}  stale={}  diverged={}  queued_msgs={}",
-        s.total, s.pending, s.in_progress, s.stale, s.diverged, s.queued_messages,
+        "total={}  pending={}  in_progress={}  blocked={}  stale={}  diverged={}  queued_msgs={}",
+        s.total, s.pending, s.in_progress, s.blocked, s.stale, s.diverged, s.queued_messages,
     );
     if s.cancelled > 0 {
         let _ = write!(out, "  cancelled={}", s.cancelled);
@@ -216,10 +252,10 @@ pub(crate) fn task_sort_order(status: &TaskStatus) -> i32 {
     match status {
         TaskStatus::InProgress => 0,
         TaskStatus::Pending => 1,
-        TaskStatus::Failed => 2,
-        TaskStatus::Cancelled => 3,
-        TaskStatus::Completed => 4,
-        TaskStatus::Blocked => 5,
+        TaskStatus::Blocked => 2,
+        TaskStatus::Failed => 3,
+        TaskStatus::Cancelled => 4,
+        TaskStatus::Completed => 5,
     }
 }
 
@@ -431,6 +467,7 @@ mod tests {
     use super::*;
     use ax_proto::types::{TaskStartMode, TaskStatus};
     use chrono::TimeZone;
+    use std::ffi::OsStr;
     use tempfile::TempDir;
 
     fn task(id: &str, status: TaskStatus, priority: Option<TaskPriority>) -> Task {
@@ -482,7 +519,7 @@ mod tests {
     #[test]
     fn read_tasks_parses_and_sorts_array_payload() {
         let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("tasks.json");
+        let path = tmp.path().join(TASKS_FILE_NAME);
         let tasks = vec![
             task("a", TaskStatus::Completed, None),
             task("b", TaskStatus::InProgress, Some(TaskPriority::Urgent)),
@@ -496,18 +533,86 @@ mod tests {
     }
 
     #[test]
+    fn tasks_file_path_uses_primary_state_snapshot_name() {
+        let tmp = TempDir::new().unwrap();
+        let path = tasks_file_path(&tmp.path().join("daemon.sock"));
+        assert_eq!(path.file_name(), Some(OsStr::new(TASKS_FILE_NAME)));
+    }
+
+    #[test]
+    fn read_tasks_snapshot_prefers_primary_state_file_over_legacy_file() {
+        let tmp = TempDir::new().unwrap();
+        let primary = tmp.path().join(TASKS_FILE_NAME);
+        let legacy = tmp.path().join(LEGACY_TASKS_FILE_NAME);
+        std::fs::write(
+            &primary,
+            serde_json::to_string(&vec![task("primary", TaskStatus::Pending, None)]).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            &legacy,
+            serde_json::to_string(&vec![task("legacy", TaskStatus::Pending, None)]).unwrap(),
+        )
+        .unwrap();
+
+        let got = read_tasks_snapshot(&primary);
+        assert!(matches!(got, SnapshotRead::Loaded(tasks) if tasks[0].id == "primary"));
+    }
+
+    #[test]
+    fn read_tasks_snapshot_falls_back_to_legacy_file_when_primary_is_missing() {
+        let tmp = TempDir::new().unwrap();
+        let primary = tmp.path().join(TASKS_FILE_NAME);
+        let legacy = tmp.path().join(LEGACY_TASKS_FILE_NAME);
+        std::fs::write(
+            &legacy,
+            serde_json::to_string(&vec![task("legacy", TaskStatus::Pending, None)]).unwrap(),
+        )
+        .unwrap();
+
+        let got = read_tasks_snapshot(&primary);
+        assert!(matches!(got, SnapshotRead::Loaded(tasks) if tasks[0].id == "legacy"));
+    }
+
+    #[test]
+    fn read_tasks_snapshot_reports_missing_when_primary_and_legacy_are_missing() {
+        let tmp = TempDir::new().unwrap();
+        let primary = tmp.path().join(TASKS_FILE_NAME);
+        assert!(matches!(
+            read_tasks_snapshot(&primary),
+            SnapshotRead::Missing
+        ));
+    }
+
+    #[test]
+    fn read_tasks_snapshot_distinguishes_missing_and_malformed_files() {
+        let tmp = TempDir::new().unwrap();
+        assert!(matches!(
+            read_tasks_snapshot(&tmp.path().join("missing.json")),
+            SnapshotRead::Missing
+        ));
+
+        let path = tmp.path().join("tasks.json");
+        std::fs::write(&path, "not json").unwrap();
+        let got = read_tasks_snapshot(&path);
+        assert!(matches!(got, SnapshotRead::Error(message) if message.contains("parse")));
+    }
+
+    #[test]
     fn summarize_counts_by_status_and_priority() {
         let tasks = vec![
             task("a", TaskStatus::Pending, Some(TaskPriority::High)),
             task("b", TaskStatus::InProgress, None),
             task("c", TaskStatus::Completed, None),
+            task("d", TaskStatus::Blocked, Some(TaskPriority::Urgent)),
         ];
         let s = summarize_tasks(&tasks);
-        assert_eq!(s.total, 3);
+        assert_eq!(s.total, 4);
         assert_eq!(s.pending, 1);
         assert_eq!(s.in_progress, 1);
+        assert_eq!(s.blocked, 1);
         assert_eq!(s.completed, 1);
-        assert_eq!(s.urgent_or_high, 1);
+        assert_eq!(s.urgent_or_high, 2);
     }
 
     #[test]
@@ -516,13 +621,14 @@ mod tests {
             total: 3,
             pending: 1,
             in_progress: 1,
+            blocked: 1,
             completed: 1,
             urgent_or_high: 1,
             ..TaskSummary::default()
         };
         assert_eq!(
             format_task_summary(&s),
-            "total=3  pending=1  in_progress=1  stale=0  diverged=0  queued_msgs=0  high_pri=1"
+            "total=3  pending=1  in_progress=1  blocked=1  stale=0  diverged=0  queued_msgs=0  high_pri=1"
         );
     }
 
@@ -553,13 +659,14 @@ mod tests {
             task("a", TaskStatus::Pending, None),
             task("b", TaskStatus::Completed, None),
             task("c", TaskStatus::Failed, None),
+            task("d", TaskStatus::Blocked, None),
         ];
         assert_eq!(
             filter_tasks(&tasks, TaskFilterMode::Active)
                 .iter()
                 .map(|t| t.id.clone())
                 .collect::<Vec<_>>(),
-            vec!["a".to_owned()]
+            vec!["a".to_owned(), "d".to_owned()]
         );
         assert_eq!(
             filter_tasks(&tasks, TaskFilterMode::Done)
@@ -568,7 +675,22 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["c".to_owned(), "b".to_owned()]
         );
-        assert_eq!(filter_tasks(&tasks, TaskFilterMode::All).len(), 3);
+        assert_eq!(filter_tasks(&tasks, TaskFilterMode::All).len(), 4);
+    }
+
+    #[test]
+    fn sort_tasks_places_blocked_before_terminal_states() {
+        let mut tasks = vec![
+            task("done", TaskStatus::Completed, None),
+            task("blocked", TaskStatus::Blocked, None),
+            task("failed", TaskStatus::Failed, None),
+            task("pending", TaskStatus::Pending, None),
+        ];
+        sort_tasks_for_display(&mut tasks);
+        assert_eq!(
+            tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            vec!["pending", "blocked", "failed", "done"]
+        );
     }
 
     #[test]

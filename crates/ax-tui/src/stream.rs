@@ -11,6 +11,13 @@ use ax_daemon::{expand_socket_path, HistoryEntry};
 
 const HISTORY_FILE_NAME: &str = "message_history.jsonl";
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SnapshotRead<T> {
+    Loaded(T),
+    Missing,
+    Error(String),
+}
+
 /// Which stream the body pane is showing. Each variant owns both a
 /// list renderer (top half of the body) and a detail renderer
 /// (bottom half) so every tab follows the same master/detail shape.
@@ -48,6 +55,17 @@ impl StreamView {
         Self::Tokens,
         Self::Stream,
     ];
+
+    pub(crate) const DEFAULT_TABS: [Self; 4] =
+        [Self::Agents, Self::Messages, Self::Tasks, Self::Tokens];
+
+    pub(crate) fn tabs(stream_pinned: bool) -> &'static [Self] {
+        if stream_pinned {
+            &Self::ALL
+        } else {
+            &Self::DEFAULT_TABS
+        }
+    }
 }
 
 /// Resolve the absolute path to the daemon's history file given
@@ -62,23 +80,45 @@ pub(crate) fn history_file_path(socket_path: &Path) -> PathBuf {
 
 /// Load the newest `max_entries` history rows. Missing file or
 /// parse errors are treated as "no history".
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn read_history(path: &Path, max_entries: usize) -> Vec<HistoryEntry> {
-    let Ok(data) = std::fs::read_to_string(path) else {
-        return Vec::new();
+    match read_history_snapshot(path, max_entries) {
+        SnapshotRead::Loaded(entries) => entries,
+        SnapshotRead::Missing | SnapshotRead::Error(_) => Vec::new(),
+    }
+}
+
+pub(crate) fn read_history_snapshot(
+    path: &Path,
+    max_entries: usize,
+) -> SnapshotRead<Vec<HistoryEntry>> {
+    let data = match std::fs::read_to_string(path) {
+        Ok(data) => data,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return SnapshotRead::Missing,
+        Err(e) => {
+            return SnapshotRead::Error(format!("history snapshot read {}: {e}", path.display()));
+        }
     };
     let mut entries: Vec<HistoryEntry> = Vec::new();
-    for line in data.lines() {
+    for (idx, line) in data.lines().enumerate() {
         if line.is_empty() {
             continue;
         }
-        if let Ok(entry) = serde_json::from_str::<HistoryEntry>(line) {
-            entries.push(entry);
+        match serde_json::from_str::<HistoryEntry>(line) {
+            Ok(entry) => entries.push(entry),
+            Err(e) => {
+                return SnapshotRead::Error(format!(
+                    "history snapshot parse {} line {}: {e}",
+                    path.display(),
+                    idx + 1
+                ));
+            }
         }
     }
     if entries.len() > max_entries {
         entries.drain(..entries.len() - max_entries);
     }
-    entries
+    SnapshotRead::Loaded(entries)
 }
 
 /// Render a single history row into a fixed-width line. Contents
@@ -167,6 +207,20 @@ mod tests {
     }
 
     #[test]
+    fn read_history_snapshot_distinguishes_missing_and_malformed_files() {
+        let tmp = TempDir::new().unwrap();
+        assert!(matches!(
+            read_history_snapshot(&tmp.path().join("missing.jsonl"), 50),
+            SnapshotRead::Missing
+        ));
+
+        let path = tmp.path().join("history.jsonl");
+        std::fs::write(&path, "{not json}\n").unwrap();
+        let got = read_history_snapshot(&path, 50);
+        assert!(matches!(got, SnapshotRead::Error(message) if message.contains("line 1")));
+    }
+
+    #[test]
     fn format_message_line_flattens_newlines_and_truncates() {
         let e = entry(
             "2026-04-18T10:00:00Z",
@@ -189,10 +243,19 @@ mod tests {
     }
 
     #[test]
-    fn stream_view_all_preserves_display_order() {
+    fn stream_view_tabs_hide_stream_until_pinned() {
         assert_eq!(
-            StreamView::ALL,
-            [
+            StreamView::tabs(false),
+            &[
+                StreamView::Agents,
+                StreamView::Messages,
+                StreamView::Tasks,
+                StreamView::Tokens,
+            ]
+        );
+        assert_eq!(
+            StreamView::tabs(true),
+            &[
                 StreamView::Agents,
                 StreamView::Messages,
                 StreamView::Tasks,
