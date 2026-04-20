@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use ax_agent::{run_with_options, LaunchOptions};
 use ax_config::{find_config_file, Config};
-use ax_daemon::{expand_socket_path, Daemon, DEFAULT_SOCKET_PATH};
+use ax_daemon::{expand_socket_path, Daemon, HistoryEntry, DEFAULT_SOCKET_PATH};
 use ax_proto::types::Message;
 use ax_tmux::{attach_session, create_ephemeral_session, session_exists};
 use ax_workspace::{
@@ -41,7 +41,7 @@ Usage:
   ax claude [claude args...]
   ax codex [codex args...]
   ax send [--config PATH] [--socket PATH] <workspace> <message...>
-  ax messages [--from NAME] [--limit N] [--wait] [--timeout SECONDS] [--json] [--socket PATH]
+  ax messages [--history] [--from NAME] [--limit N] [--wait] [--timeout SECONDS] [--json] [--socket PATH]
   ax start <target> [--config PATH] [--socket PATH] [--ax-bin PATH]
   ax stop <target> [--config PATH] [--socket PATH] [--ax-bin PATH]
   ax restart <target> [--config PATH] [--socket PATH] [--ax-bin PATH]
@@ -60,6 +60,7 @@ Usage:
   ax tasks activity [task-id] [--assignee N] [--created-by N] [--status S] [--stale] [--limit N] [--socket PATH]
   ax init [--global] [--no-setup] [--no-refresh] [--axis auto|role|domain] [--codex|--claude] [--socket PATH]
   ax init --reconfigure [--no-refresh] [--codex|--claude] [--socket PATH]
+  ax top [--socket PATH]
   ax watch [--socket PATH]
   ax workspace create <name> [--dir PATH] [--socket PATH] [--config PATH] [--ax-bin PATH]
   ax workspace destroy <name> [--socket PATH] [--config PATH] [--ax-bin PATH]
@@ -71,10 +72,13 @@ Notes:
   --config defaults to the discovered ax config (.ax/config.yaml or ax.yaml)
   --socket defaults to ~/.local/state/ax/daemon.sock
   --ax-bin defaults to the current ax executable
+  ax messages drains pending messages from the synthetic _cli inbox
+  ax messages --history shows recent global message history without draining inboxes
 ";
 
 const ROOT_ORCHESTRATOR_FAILURE_HOLD_SCRIPT: &str = "\"$@\"\nstatus=$?\nif [ \"$status\" -ne 0 ] && [ \"$status\" -ne 130 ] && [ \"$status\" -ne 143 ]; then\n  printf '\\n[ax] Root orchestrator process exited unexpectedly with status %s.\\n' \"$status\"\n  printf '[ax] Common causes: runtime binary not found, auth/config issues, or a CLI crash.\\n'\n  printf '[ax] Press Enter to close this tmux session.\\n'\n  IFS= read -r _\nfi\nexit \"$status\"";
 const CLI_INBOX_WORKSPACE: &str = "_cli";
+const MESSAGE_HISTORY_FILE_NAME: &str = "message_history.jsonl";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CommonOptions {
@@ -125,6 +129,7 @@ enum ParsedCommand {
         from: String,
         limit: i64,
         wait: bool,
+        history: bool,
         timeout_seconds: u64,
         json_output: bool,
         socket_path: PathBuf,
@@ -309,6 +314,15 @@ enum SendCliError {
 enum MessagesCliError {
     Connect(DaemonClientError),
     Read(DaemonClientError),
+    ReadHistory {
+        path: PathBuf,
+        source: io::Error,
+    },
+    ParseHistory {
+        path: PathBuf,
+        line: usize,
+        source: serde_json::Error,
+    },
     FormatJson(serde_json::Error),
 }
 
@@ -349,6 +363,16 @@ impl fmt::Display for MessagesCliError {
         match self {
             Self::Connect(source) => write!(f, "connect to daemon: {source} (is daemon running?)"),
             Self::Read(source) => write!(f, "read messages: {source}"),
+            Self::ReadHistory { path, source } => {
+                write!(f, "read message history {}: {source}", path.display())
+            }
+            Self::ParseHistory { path, line, source } => {
+                write!(
+                    f,
+                    "parse message history {} line {line}: {source}",
+                    path.display()
+                )
+            }
             Self::FormatJson(source) => write!(f, "format messages as json: {source}"),
         }
     }
@@ -557,6 +581,7 @@ where
             from,
             limit,
             wait,
+            history,
             timeout_seconds,
             json_output,
             socket_path,
@@ -564,6 +589,7 @@ where
             &from,
             limit,
             wait,
+            history,
             timeout_seconds,
             json_output,
             &socket_path,
@@ -1108,6 +1134,7 @@ fn parse_messages_args(argv: &[OsString], force_json: bool) -> Result<ParsedComm
     let mut from = String::new();
     let mut limit = 10_i64;
     let mut wait = false;
+    let mut history = false;
     let mut timeout_seconds = 120_u64;
     let mut json_output = force_json;
 
@@ -1131,6 +1158,9 @@ fn parse_messages_args(argv: &[OsString], force_json: bool) -> Result<ParsedComm
             "--wait" => {
                 wait = true;
             }
+            "--history" => {
+                history = true;
+            }
             "--timeout" => {
                 i += 1;
                 timeout_seconds = parse_u64_arg(argv.get(i), "--timeout")?;
@@ -1152,10 +1182,17 @@ fn parse_messages_args(argv: &[OsString], force_json: bool) -> Result<ParsedComm
         i += 1;
     }
 
+    if history && wait {
+        return Err(CliError::Usage(format!(
+            "messages --history cannot be combined with --wait\n\n{USAGE}"
+        )));
+    }
+
     Ok(ParsedCommand::Messages {
         from,
         limit,
         wait,
+        history,
         timeout_seconds,
         json_output,
         socket_path,
@@ -2117,10 +2154,22 @@ fn run_messages(
     from: &str,
     limit: i64,
     wait: bool,
+    history: bool,
     timeout_seconds: u64,
     json_output: bool,
     socket_path: &Path,
 ) -> Result<ExitCode, CliError> {
+    if history {
+        let path = message_history_file_path(socket_path);
+        let entries = read_message_history(&path, limit, from)?;
+        print!(
+            "{}",
+            format_message_history_output(&entries, json_output)
+                .map_err(MessagesCliError::FormatJson)?
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+
     let mut client = DaemonClient::connect(socket_path, CLI_INBOX_WORKSPACE)
         .map_err(MessagesCliError::Connect)?;
     if !wait {
@@ -2134,7 +2183,9 @@ fn run_messages(
         return Ok(ExitCode::SUCCESS);
     }
 
-    println!("Waiting for CLI inbox messages for `{CLI_INBOX_WORKSPACE}`... (Ctrl+C to stop)");
+    println!(
+        "Waiting for pending messages in `{CLI_INBOX_WORKSPACE}` inbox; received messages are drained from the queue... (Ctrl+C to stop)"
+    );
     let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
     while Instant::now() < deadline {
         let messages = client
@@ -2694,6 +2745,62 @@ fn resolve_mcp_telemetry_path(socket_path: &Path) -> Option<PathBuf> {
     Some(dir.join("tool_calls.jsonl"))
 }
 
+fn message_history_file_path(socket_path: &Path) -> PathBuf {
+    let expanded = expand_socket_path(&socket_path.display().to_string());
+    expanded
+        .parent()
+        .map_or_else(
+            || PathBuf::from(MESSAGE_HISTORY_FILE_NAME),
+            Path::to_path_buf,
+        )
+        .join(MESSAGE_HISTORY_FILE_NAME)
+}
+
+fn read_message_history(
+    path: &Path,
+    limit: i64,
+    from: &str,
+) -> Result<Vec<HistoryEntry>, MessagesCliError> {
+    let data = match fs::read_to_string(path) {
+        Ok(data) => data,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => {
+            return Err(MessagesCliError::ReadHistory {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    let limit = normalized_message_limit(limit);
+    let mut entries = Vec::new();
+    for (idx, line) in data.lines().enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let entry: HistoryEntry =
+            serde_json::from_str(line).map_err(|source| MessagesCliError::ParseHistory {
+                path: path.to_path_buf(),
+                line: idx + 1,
+                source,
+            })?;
+        if from.is_empty() || entry.from == from {
+            entries.push(entry);
+        }
+    }
+    if entries.len() > limit {
+        entries.drain(..entries.len() - limit);
+    }
+    Ok(entries)
+}
+
+fn normalized_message_limit(limit: i64) -> usize {
+    if limit <= 0 {
+        10
+    } else {
+        usize::try_from(limit).unwrap_or(10)
+    }
+}
+
 fn format_messages_output(
     messages: &[Message],
     json_output: bool,
@@ -2704,10 +2811,15 @@ fn format_messages_output(
         return serde_json::to_string_pretty(messages).map(|text| format!("{text}\n"));
     }
     if messages.is_empty() {
-        return Ok("No messages.\n".to_owned());
+        return Ok(format!(
+            "No pending messages in `{CLI_INBOX_WORKSPACE}` inbox.\nUse `ax messages --history` for recent global message history without draining inboxes.\n"
+        ));
     }
 
-    let mut out = String::new();
+    let mut out = format!(
+        "Drained {} pending message(s) from `{CLI_INBOX_WORKSPACE}` inbox; they are now removed from the queue.\n",
+        messages.len()
+    );
     for message in messages {
         let _ = write!(
             out,
@@ -2720,11 +2832,39 @@ fn format_messages_output(
     Ok(out)
 }
 
+fn format_message_history_output(
+    entries: &[HistoryEntry],
+    json_output: bool,
+) -> Result<String, serde_json::Error> {
+    use std::fmt::Write as _;
+
+    if json_output {
+        return serde_json::to_string_pretty(entries).map(|text| format!("{text}\n"));
+    }
+    if entries.is_empty() {
+        return Ok("No message history.\n".to_owned());
+    }
+
+    let mut out =
+        "Recent global message history (non-destructive; does not drain inboxes).\n".to_owned();
+    for entry in entries {
+        let _ = write!(
+            out,
+            "── [{}] {} -> {} ──\n{}\n\n",
+            entry.timestamp.format("%H:%M:%S"),
+            entry.from,
+            entry.to,
+            entry.content
+        );
+    }
+    Ok(out)
+}
+
 fn timeout_messages_output(json_output: bool) -> &'static str {
     if json_output {
         "[]\n"
     } else {
-        "No messages received within timeout.\n"
+        "No pending messages received in `_cli` inbox within timeout.\n"
     }
 }
 
@@ -2950,6 +3090,45 @@ mod tests {
     }
 
     #[test]
+    fn top_and_watch_aliases_launch_tui_with_socket_override() {
+        for command in ["top", "watch"] {
+            let parsed = parse_args(
+                vec![
+                    "ax".into(),
+                    command.into(),
+                    "--socket".into(),
+                    "~/daemon.sock".into(),
+                ],
+                Path::new("/missing"),
+                Path::new("/tmp/ax"),
+            )
+            .expect("parse");
+
+            assert_eq!(
+                parsed,
+                ParsedCommand::Watch {
+                    socket_path: expand_socket_path("~/daemon.sock"),
+                },
+                "{command} should remain a compatible TUI launcher alias",
+            );
+        }
+    }
+
+    #[test]
+    fn top_watch_alias_rejects_unknown_flags() {
+        let err = parse_args(
+            vec!["ax".into(), "top".into(), "--bad".into()],
+            Path::new("/missing"),
+            Path::new("/tmp/ax"),
+        )
+        .expect_err("unknown watch flag should fail");
+        assert_eq!(
+            err.to_string(),
+            format!("unknown flag \"--bad\"\n\n{USAGE}")
+        );
+    }
+
+    #[test]
     fn up_defaults_to_discovered_config_and_current_exe() {
         let root = TempDir::new().expect("tempdir");
         let home = TempDir::new().expect("home");
@@ -3129,10 +3308,62 @@ mod tests {
                 from: "worker".to_owned(),
                 limit: 5,
                 wait: true,
+                history: false,
                 timeout_seconds: 30,
                 json_output: true,
                 socket_path: expand_socket_path("~/daemon.sock"),
             }
+        );
+    }
+
+    #[test]
+    fn messages_parses_history_mode_without_wait() {
+        let parsed = parse_args(
+            vec![
+                "ax".into(),
+                "messages".into(),
+                "--history".into(),
+                "--from".into(),
+                "ax.orchestrator".into(),
+                "--limit".into(),
+                "3".into(),
+            ],
+            Path::new("/missing"),
+            Path::new("/tmp/ax"),
+        )
+        .expect("parse");
+
+        assert_eq!(
+            parsed,
+            ParsedCommand::Messages {
+                from: "ax.orchestrator".to_owned(),
+                limit: 3,
+                wait: false,
+                history: true,
+                timeout_seconds: 120,
+                json_output: false,
+                socket_path: expand_socket_path(DEFAULT_SOCKET_PATH),
+            }
+        );
+    }
+
+    #[test]
+    fn messages_history_rejects_wait_mode() {
+        let err = parse_args(
+            vec![
+                "ax".into(),
+                "messages".into(),
+                "--history".into(),
+                "--wait".into(),
+            ],
+            Path::new("/missing"),
+            Path::new("/tmp/ax"),
+        )
+        .expect_err("history wait should fail");
+
+        assert_eq!(
+            err.to_string(),
+            format!("messages --history cannot be combined with --wait\n\n{USAGE}")
         );
     }
 
@@ -3148,6 +3379,7 @@ mod tests {
         }];
 
         let text = format_messages_output(&messages, false).expect("text output");
+        assert!(text.contains("Drained 1 pending message(s) from `_cli` inbox"));
         assert!(text.contains("── [02:30:00] from ax.orchestrator ──"));
         assert!(text.contains("Task ready"));
 
@@ -3159,12 +3391,61 @@ mod tests {
     }
 
     #[test]
+    fn format_messages_output_empty_names_cli_inbox_and_history_escape_hatch() {
+        let text = format_messages_output(&[], false).expect("text output");
+        assert!(text.contains("No pending messages in `_cli` inbox."));
+        assert!(text.contains("ax messages --history"));
+    }
+
+    #[test]
+    fn read_message_history_filters_and_tails_without_draining() {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("daemon.sock");
+        let history_path = message_history_file_path(&socket_path);
+        let entries = vec![
+            history_entry("orch", "ax.cli", "one", "2026-04-14T02:30:00Z"),
+            history_entry("worker", "ax.cli", "skip", "2026-04-14T02:31:00Z"),
+            history_entry("orch", "ax.cli", "two", "2026-04-14T02:32:00Z"),
+            history_entry("orch", "ax.cli", "three", "2026-04-14T02:33:00Z"),
+        ];
+        let body = entries
+            .iter()
+            .map(|entry| serde_json::to_string(entry).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&history_path, format!("{body}\n")).unwrap();
+
+        let got = read_message_history(&history_path, 2, "orch").expect("read history");
+        assert_eq!(
+            got.iter()
+                .map(|entry| entry.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["two", "three"]
+        );
+
+        let text = format_message_history_output(&got, false).expect("history text");
+        assert!(text.contains("Recent global message history"));
+        assert!(text.contains("orch -> ax.cli"));
+        assert!(text.contains("three"));
+    }
+
+    #[test]
     fn timeout_messages_output_matches_text_and_json_modes() {
         assert_eq!(timeout_messages_output(true), "[]\n");
         assert_eq!(
             timeout_messages_output(false),
-            "No messages received within timeout.\n"
+            "No pending messages received in `_cli` inbox within timeout.\n"
         );
+    }
+
+    fn history_entry(from: &str, to: &str, content: &str, ts: &str) -> HistoryEntry {
+        HistoryEntry {
+            timestamp: ts.parse().expect("timestamp"),
+            from: from.to_owned(),
+            to: to.to_owned(),
+            content: content.to_owned(),
+            task_id: String::new(),
+        }
     }
 
     #[test]
