@@ -182,6 +182,7 @@ impl Daemon {
         let flusher = queue.spawn_flusher();
         let wake_loop = wake_scheduler.clone().spawn();
         let idle_loop = spawn_idle_sleep_loop(session_manager.clone());
+        let reconcile_loop = spawn_stranded_task_reconciler(task_store.clone());
         let join = tokio::spawn(run_accept_loop(
             listener,
             AcceptLoopCtx {
@@ -205,11 +206,13 @@ impl Daemon {
             flusher: Some(flusher),
             wake_loop: Some(wake_loop),
             idle_loop: Some(idle_loop),
+            reconcile_loop: Some(reconcile_loop),
         })
     }
 }
 
 const IDLE_SLEEP_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+const STRANDED_TASK_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Handle the idle-sleep background task owns. Mirrors the flusher /
 /// wake-loop pattern so shutdown is graceful.
@@ -237,6 +240,33 @@ impl Drop for IdleLoopHandle {
     }
 }
 
+/// Handle the stranded-task reconciler owns. Same shape as
+/// `IdleLoopHandle` so `DaemonHandle::shutdown` can drive the
+/// identical graceful-stop sequence.
+pub(crate) struct ReconcileLoopHandle {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    join: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl ReconcileLoopHandle {
+    async fn shutdown(mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(join) = self.join.take() {
+            join.abort();
+            let _ = join.await;
+        }
+    }
+}
+
+impl Drop for ReconcileLoopHandle {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(join) = self.join.take() {
+            join.abort();
+        }
+    }
+}
+
 fn spawn_idle_sleep_loop(session_manager: Arc<SessionManager<RealTmux>>) -> IdleLoopHandle {
     use std::sync::atomic::{AtomicBool, Ordering};
     let stop = Arc::new(AtomicBool::new(false));
@@ -253,6 +283,49 @@ fn spawn_idle_sleep_loop(session_manager: Arc<SessionManager<RealTmux>>) -> Idle
         }
     });
     IdleLoopHandle {
+        stop,
+        join: Some(join),
+    }
+}
+
+/// Catch tasks whose assignee tmux session has disappeared while the
+/// daemon stayed up — the in-flight counterpart to the startup
+/// recovery sweep in `Daemon::with_state_dir`. Without it a crashed
+/// agent leaves its task `InProgress` forever, the parent rollup
+/// keeps lying, and the wake scheduler has no reason to fire because
+/// the inbox is empty.
+fn spawn_stranded_task_reconciler(task_store: Arc<TaskStore>) -> ReconcileLoopHandle {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_task = stop.clone();
+    let join = tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(STRANDED_TASK_CHECK_INTERVAL);
+        ticker.tick().await; // skip the immediate first tick
+        loop {
+            ticker.tick().await;
+            if stop_task.load(Ordering::Relaxed) {
+                break;
+            }
+            let store = task_store.clone();
+            // The liveness probe shells out to tmux, so hop onto a
+            // blocking thread. The sweep itself is CPU-cheap — it's
+            // the N tmux has-session calls that make this worth
+            // offloading.
+            let recovered = tokio::task::spawn_blocking(move || {
+                store.recover_stale_in_progress(ax_tmux::session_exists)
+            })
+            .await
+            .unwrap_or_default();
+            if !recovered.is_empty() {
+                tracing::info!(
+                    count = recovered.len(),
+                    tasks = ?recovered,
+                    "reconciled stranded in_progress tasks with dead assignee sessions"
+                );
+            }
+        }
+    });
+    ReconcileLoopHandle {
         stop,
         join: Some(join),
     }
@@ -437,6 +510,7 @@ pub struct DaemonHandle {
     flusher: Option<FlusherHandle>,
     wake_loop: Option<WakeLoopHandle>,
     idle_loop: Option<IdleLoopHandle>,
+    reconcile_loop: Option<ReconcileLoopHandle>,
 }
 
 impl DaemonHandle {
@@ -463,6 +537,9 @@ impl DaemonHandle {
         }
         if let Some(idle_loop) = self.idle_loop.take() {
             idle_loop.shutdown().await;
+        }
+        if let Some(reconcile_loop) = self.reconcile_loop.take() {
+            reconcile_loop.shutdown().await;
         }
     }
 }
