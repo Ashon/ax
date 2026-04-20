@@ -35,6 +35,25 @@ static DUPLICATE_NOOP_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     .expect("duplicate no-op regex must compile")
 });
 
+/// Path-with-extension matcher. A leading non-word char (or start)
+/// guards against picking up suffixes in the middle of URLs or code
+/// identifiers like `a.b.c` as false positives. The extension is
+/// 1–8 alnum chars so sentences ending in a period don't match.
+static EVIDENCE_PATH_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?:^|[^A-Za-z0-9_])[\w./\-]{2,}\.[A-Za-z0-9]{1,8}\b")
+        .expect("evidence path regex must compile")
+});
+
+/// Common build / test / git command fragments. Anything matched here
+/// is strong signal that the author actually ran something they can
+/// cross-check.
+static EVIDENCE_COMMAND_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\b(cargo (build|test|run|check|clippy|fmt)|(npm|pnpm|yarn) (run|test|build|install)|pytest|python -m \w+|go (test|build|run|vet)|make \w+|gradle \w+|mix \w+|git (commit|diff|log|status|show))\b",
+    )
+    .expect("evidence command regex must compile")
+});
+
 /// Pull a `Task ID: <uuid>` reference out of a free-form message body.
 /// Returns an empty string when no match is found.
 #[must_use]
@@ -78,6 +97,21 @@ pub(crate) fn looks_like_noop_status_message(normalized: &str) -> bool {
         return false;
     }
     DUPLICATE_NOOP_PATTERN.is_match(normalized)
+}
+
+/// Returns `true` when `result` contains at least one concrete
+/// evidence signal — a file path with an extension, or a recognisable
+/// build / test / git command fragment. Absence is a hint that the
+/// completion report may be light on specifics; the task store records
+/// that as a log line rather than rejecting, since the marker and the
+/// `confirm=true` affirmation already gate the hard edge of the
+/// Completion Reporting Contract.
+#[must_use]
+pub(crate) fn has_concrete_evidence(result: &str) -> bool {
+    if result.trim().is_empty() {
+        return false;
+    }
+    EVIDENCE_PATH_PATTERN.is_match(result) || EVIDENCE_COMMAND_PATTERN.is_match(result)
 }
 
 /// Prefix a dispatch message with `Task ID: <uuid>` so downstream
@@ -255,6 +289,36 @@ mod tests {
         assert!(looks_like_noop_status_message(&msg));
         let msg2 = normalize_message_for_suppression("Finished refactor of module X");
         assert!(!looks_like_noop_status_message(&msg2));
+    }
+
+    #[test]
+    fn evidence_signal_catches_paths_and_commands() {
+        // File paths with extensions.
+        assert!(has_concrete_evidence(
+            "wrote greeter/hello.sh and ran it; remaining owned dirty files=<none>"
+        ));
+        assert!(has_concrete_evidence("updated src/main.rs and tests/foo.rs"));
+        assert!(has_concrete_evidence("./run.sh prints the expected line"));
+        // Tool commands.
+        assert!(has_concrete_evidence("ran cargo test --workspace; 48 passed"));
+        assert!(has_concrete_evidence("pytest confirmed the new case"));
+        assert!(has_concrete_evidence("git commit -m 'fix' on current branch"));
+    }
+
+    #[test]
+    fn evidence_signal_absent_for_handwaves() {
+        // Hand-wavy prose with no paths, no commands.
+        assert!(!has_concrete_evidence(
+            "done; remaining owned dirty files=<none>"
+        ));
+        assert!(!has_concrete_evidence(
+            "implemented the change and verified it works correctly"
+        ));
+        assert!(!has_concrete_evidence(""));
+        // A sentence with a period but no extension-like suffix.
+        assert!(!has_concrete_evidence(
+            "All the logic looks correct. Ready to ship."
+        ));
     }
 
     #[test]

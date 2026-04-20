@@ -207,6 +207,7 @@ fn completion_reporting_instruction_contract() -> String {
         "  3. result에 `remaining owned dirty files=` 마커가 올바른 모양으로 들어가 있음.",
         "  4. 이 task scope 안에서 남은 TODO/미해결 blocker가 없음 (있다면 failed나 후속 unit으로 넘어감).",
         "- `confirm` 없이(또는 `confirm=false`) completion을 보내면 daemon이 `CompletionRequiresConfirmation` 에러로 거부하고 체크리스트를 돌려줍니다. 그 메시지를 읽고 실제로 점검한 뒤에 `confirm=true`로 재호출하세요.",
+        "- result에는 가능하면 **구체 evidence** 한 조각 이상을 남기세요. 예: 수정한 파일 경로 (`src/foo.rs`, `greeter/hello.sh`), 실행한 검증 커맨드 (`cargo test`, `pytest`, `npm test`), 또는 관련 git 동작. 파일 경로/커맨드 흔적이 없는 completion은 daemon이 거부하진 않지만 task 로그에 `evidence hint` 경고를 남겨서 리뷰어가 spot-check 하도록 표시합니다.",
     ]
     .join("\n")
 }

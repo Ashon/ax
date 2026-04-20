@@ -21,7 +21,7 @@ use ax_proto::types::{
 
 use crate::atomicfile::write_file_atomic;
 use crate::task_helpers::{
-    format_task_dispatch_message, looks_like_noop_status_message,
+    format_task_dispatch_message, has_concrete_evidence, looks_like_noop_status_message,
     normalize_message_for_suppression, DUPLICATE_SUPPRESSION_WINDOW, OPERATOR_WORKSPACE_NAME,
 };
 
@@ -398,6 +398,7 @@ impl TaskStore {
 
         let now = Utc::now();
         let mut changed = false;
+        let prev_status = task.status.clone();
 
         let action_source = claim_source(status.as_ref(), result.as_deref(), log_msg.as_deref());
         if workspace == task.assignee
@@ -432,6 +433,29 @@ impl TaskStore {
                 });
                 changed = true;
             }
+        }
+
+        // Soft evidence hint. Fires only on the edge into `Completed`,
+        // and only when the effective result has no file paths or
+        // recognisable tool-command fragments. Left as a task log —
+        // NOT as a rejected update — because "evidence" is fuzzy and
+        // legitimate completions can read terse. Humans (and the TUI)
+        // see the note and know to spot-check.
+        if matches!(task.status, TaskStatus::Completed)
+            && !matches!(prev_status, TaskStatus::Completed)
+            && !has_concrete_evidence(&task.result)
+        {
+            task.logs.push(TaskLog {
+                timestamp: now,
+                workspace: OPERATOR_WORKSPACE_NAME.to_owned(),
+                message:
+                    "evidence hint: completion result contains no file paths or tool-command \
+                     fragments. Reviewers may want to spot-check — the Completion Reporting \
+                     Contract suggests mentioning the files you touched or the command(s) \
+                     that verified the change."
+                        .to_owned(),
+            });
+            changed = true;
         }
 
         let parent_id = task.parent_task_id.clone();
@@ -1253,6 +1277,64 @@ mod tests {
         assert!(
             matches!(err, TaskStoreError::MissingCompletionEvidence(_)),
             "marker complaint must surface first, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn completion_without_evidence_signal_adds_hint_log() {
+        // Happy path: marker present, confirm true, but the result
+        // reads as a handwave. The store accepts (the hard gates
+        // passed) but records a log line so reviewers see the
+        // evidence was light.
+        let store = make_store();
+        let task = seed_in_progress_task(&store);
+
+        let updated = store
+            .update_with_confirm(
+                &task.id,
+                Some(TaskStatus::Completed),
+                Some("done; remaining owned dirty files=<none>".into()),
+                None,
+                Some(true),
+                "worker",
+            )
+            .expect("should accept with hint log");
+        assert!(matches!(updated.status, TaskStatus::Completed));
+        assert!(
+            updated
+                .logs
+                .iter()
+                .any(|l| l.message.contains("evidence hint")),
+            "expected evidence-hint log, got {:?}",
+            updated.logs
+        );
+    }
+
+    #[test]
+    fn completion_with_evidence_signal_skips_hint_log() {
+        let store = make_store();
+        let task = seed_in_progress_task(&store);
+
+        let updated = store
+            .update_with_confirm(
+                &task.id,
+                Some(TaskStatus::Completed),
+                Some(
+                    "wrote src/foo.rs and ran cargo test; remaining owned dirty files=<none>"
+                        .into(),
+                ),
+                None,
+                Some(true),
+                "worker",
+            )
+            .expect("should accept without hint");
+        assert!(
+            !updated
+                .logs
+                .iter()
+                .any(|l| l.message.contains("evidence hint")),
+            "concrete evidence must suppress the hint, got {:?}",
+            updated.logs
         );
     }
 
