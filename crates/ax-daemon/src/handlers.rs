@@ -493,27 +493,29 @@ fn dispatch_config_path_for_workspace(ctx: &HandlerCtx, workspace: &str) -> Stri
 }
 
 /// Do whatever it takes to get an idle `task.assignee` to pick up the
-/// pending inbox. Prefers the task's stored dispatch config (goes
-/// through the session-manager so missing sessions get recreated);
-/// falls back to a direct tmux wake when no config is available and
-/// the session already exists.
+/// pending inbox. The policy — prefer the task's stored dispatch
+/// config, fall back to a direct tmux wake, error when neither is
+/// available — lives in `pure_decisions::plan_task_wake` so it can
+/// be unit-tested without a daemon. This function carries the plan
+/// out.
 fn dispatch_task_wake(ctx: &HandlerCtx, task: &Task, sender: &str) -> Result<(), HandlerError> {
-    let config_path = task.dispatch_config_path.trim();
-    if !config_path.is_empty() {
-        return ctx
-            .session_manager
-            .ensure_runnable(config_path, &task.assignee, sender, false)
-            .map_err(|e| HandlerError::Logic(format!("wake task {}: {e}", task.id)));
-    }
     let tmux = ctx.session_manager.tmux();
-    if !tmux.session_exists(&task.assignee) {
-        return Err(HandlerError::Logic(format!(
-            "workspace {:?} is not running",
-            task.assignee
-        )));
+    let plan = crate::pure_decisions::plan_task_wake(task, |ws| tmux.session_exists(ws));
+    match plan {
+        crate::pure_decisions::WakePlan::EnsureRunnable {
+            config_path,
+            assignee,
+        } => ctx
+            .session_manager
+            .ensure_runnable(&config_path, &assignee, sender, false)
+            .map_err(|e| HandlerError::Logic(format!("wake task {}: {e}", task.id))),
+        crate::pure_decisions::WakePlan::DirectWake { assignee } => tmux
+            .wake_workspace(&assignee, &wake_prompt(sender, false))
+            .map_err(|e| HandlerError::Logic(e.to_string())),
+        crate::pure_decisions::WakePlan::SessionMissing { assignee } => Err(HandlerError::Logic(
+            format!("workspace {assignee:?} is not running"),
+        )),
     }
-    tmux.wake_workspace(&task.assignee, &wake_prompt(sender, false))
-        .map_err(|e| HandlerError::Logic(e.to_string()))
 }
 
 pub(crate) fn handle_intervene_task(
@@ -537,12 +539,12 @@ pub(crate) fn handle_intervene_task(
         message_id: String::new(),
     };
 
-    match payload.action.as_str() {
-        "wake" => {
+    match crate::pure_decisions::plan_intervention(&payload.action) {
+        crate::pure_decisions::InterventionPlan::Wake => {
             dispatch_task_wake(ctx, &task, workspace)?;
             "woken".clone_into(&mut resp.status);
         }
-        "interrupt" => {
+        crate::pure_decisions::InterventionPlan::Interrupt => {
             let tmux = ctx.session_manager.tmux();
             if !tmux.session_exists(&task.assignee) {
                 return Err(HandlerError::Logic(format!(
@@ -554,7 +556,7 @@ pub(crate) fn handle_intervene_task(
                 .map_err(|e| HandlerError::Logic(e.to_string()))?;
             "interrupted".clone_into(&mut resp.status);
         }
-        "retry" => {
+        crate::pure_decisions::InterventionPlan::Retry => {
             let retried = ctx
                 .task_store
                 .retry(&task.id, &payload.note, workspace, payload.expected_version)
@@ -581,7 +583,7 @@ pub(crate) fn handle_intervene_task(
             "queued".clone_into(&mut resp.status);
             resp.message_id = msg.id;
         }
-        other => {
+        crate::pure_decisions::InterventionPlan::Invalid(other) => {
             return Err(HandlerError::Logic(format!(
                 "invalid intervene_task action {other:?}"
             )));

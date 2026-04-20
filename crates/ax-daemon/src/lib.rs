@@ -10,6 +10,7 @@ mod daemonutil;
 mod handlers;
 mod history;
 mod memory;
+mod pure_decisions;
 mod queue;
 mod registry;
 mod server;
