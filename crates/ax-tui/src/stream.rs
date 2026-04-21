@@ -121,41 +121,6 @@ pub(crate) fn read_history_snapshot(
     SnapshotRead::Loaded(entries)
 }
 
-/// Render a single history row into a fixed-width line. Contents
-/// are newline-flattened and truncated with a trailing ellipsis so
-/// panes stay legible regardless of terminal width.
-pub(crate) fn format_message_line(entry: &HistoryEntry, width: usize) -> String {
-    let ts = entry.timestamp.format("%H:%M:%S");
-    let prefix = format!(" {ts} {} → {}: ", entry.from, entry.to);
-    let prefix_w = display_width(&prefix);
-    if prefix_w >= width {
-        return truncate(&prefix, width);
-    }
-    let content = entry.content.replace(['\n', '\r'], " ");
-    let content = truncate(&content, width - prefix_w);
-    format!("{prefix}{content}")
-}
-
-fn display_width(s: &str) -> usize {
-    s.chars().count()
-}
-
-fn truncate(s: &str, limit: usize) -> String {
-    if limit == 0 {
-        return String::new();
-    }
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= limit {
-        return s.to_owned();
-    }
-    if limit == 1 {
-        return "…".to_owned();
-    }
-    let mut out: String = chars[..limit - 1].iter().collect();
-    out.push('…');
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,28 +183,6 @@ mod tests {
         std::fs::write(&path, "{not json}\n").unwrap();
         let got = read_history_snapshot(&path, 50);
         assert!(matches!(got, SnapshotRead::Error(message) if message.contains("line 1")));
-    }
-
-    #[test]
-    fn format_message_line_flattens_newlines_and_truncates() {
-        let e = entry(
-            "2026-04-18T10:00:00Z",
-            "orch",
-            "worker",
-            "line one\nline two is long",
-        );
-        let line = format_message_line(&e, 40);
-        assert!(!line.contains('\n'));
-        assert_eq!(line.chars().count(), 40);
-        assert!(line.contains("10:00:00"));
-        assert!(line.contains("orch → worker:"));
-    }
-
-    #[test]
-    fn format_message_line_still_renders_prefix_when_width_is_small() {
-        let e = entry("2026-04-18T10:00:00Z", "a", "b", "content");
-        let line = format_message_line(&e, 5);
-        assert_eq!(line.chars().count(), 5);
     }
 
     #[test]
