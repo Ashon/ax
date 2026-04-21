@@ -23,7 +23,7 @@ use ax_proto::responses::{
     StartTaskResponse, StatusResponse, TaskDispatch, TaskResponse, TeamApplyResponse,
     TeamPlanResponse, TeamStateResponse,
 };
-use ax_proto::types::{LifecycleAction, McpToolActivityStatus, Message, Task};
+use ax_proto::types::{LifecycleAction, McpToolActivityStatus, Message, Task, TaskStatus};
 use ax_proto::{Envelope, ErrorPayload, MessageType, ResponsePayload};
 use ax_workspace::{
     cleanup_orchestrator_state, dispatch_runnable_work, ensure_orchestrator,
@@ -843,8 +843,56 @@ fn apply_task_state_followup(ctx: &HandlerCtx, task: &Task) {
             if ctx.queue.pending_count(&assignee) == 0 {
                 ctx.wake_scheduler.cancel(&assignee);
             }
+            notify_creator_of_terminal_status(ctx, task);
         }
     }
+}
+
+/// When a task reaches a terminal status, push a system notification
+/// into the creator's inbox so the orchestrator sees completion (or
+/// failure) without having to poll `list_tasks`. This is the
+/// agent-agnostic half of the "avoid stale waiting" story: any agent
+/// that correctly calls `update_task(status=terminal)` through MCP
+/// causes its creator to learn about it immediately.
+fn notify_creator_of_terminal_status(ctx: &HandlerCtx, task: &Task) {
+    let creator = task.created_by.trim();
+    if creator.is_empty() || creator == task.assignee {
+        return;
+    }
+    let status_label = match &task.status {
+        TaskStatus::Completed => "completed",
+        TaskStatus::Failed => "failed",
+        TaskStatus::Cancelled => "cancelled",
+        TaskStatus::Blocked => "blocked",
+        _ => return,
+    };
+    let mut content = format!(
+        "[task-{status_label}] Task ID: {id} — assignee={assignee}",
+        id = task.id,
+        assignee = task.assignee,
+    );
+    let result_trim = task.result.trim();
+    if !result_trim.is_empty() {
+        const MAX_SNIPPET: usize = 240;
+        if result_trim.len() > MAX_SNIPPET {
+            // Only truncate at a char boundary so multi-byte UTF-8 stays intact.
+            let mut cut = MAX_SNIPPET;
+            while !result_trim.is_char_boundary(cut) && cut > 0 {
+                cut -= 1;
+            }
+            content.push_str(" — ");
+            content.push_str(&result_trim[..cut]);
+            content.push('…');
+        } else {
+            content.push_str(" — ");
+            content.push_str(result_trim);
+        }
+    }
+    let msg = task_aware_message(&task.assignee, creator, &content);
+    let msg = ctx.queue.enqueue(msg);
+    ctx.history.append_message(&msg);
+    push_if_registered(ctx, creator, &msg);
+    ctx.wake_scheduler.schedule(creator, &task.assignee);
 }
 
 pub(crate) fn handle_get_team_state(

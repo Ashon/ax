@@ -339,3 +339,108 @@ async fn start_task_queues_dispatch_message() {
     orch.daemon().close().await;
     handle.shutdown().await;
 }
+
+#[tokio::test]
+async fn task_completion_notifies_creator_inbox() {
+    let tmp = TempDir::new().expect("tempdir");
+    let handle = spawn_daemon(tmp.path()).await;
+    let orch = connect_server(handle.socket_path(), "orch").await;
+    let worker = connect_server(handle.socket_path(), "worker").await;
+
+    let created = orch
+        .create_task(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "title": "do the thing",
+                "assignee": "worker",
+            }))
+            .expect("decode"),
+        ))
+        .await
+        .expect("create");
+    let task_id = call_json::<serde_json::Value>(&created)["id"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+
+    // Worker transitions the task to completed, satisfying the contract
+    // (marker + confirm).
+    worker
+        .update_task(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "id": task_id,
+                "status": "completed",
+                "result": "did the thing. remaining owned dirty files=<none>",
+                "confirm": true,
+            }))
+            .expect("decode"),
+        ))
+        .await
+        .expect("update to completed");
+
+    let inbox = orch
+        .read_messages(Parameters(
+            serde_json::from_value(serde_json::json!({})).expect("decode"),
+        ))
+        .await
+        .expect("read");
+    let body = call_text(&inbox);
+    assert!(body.contains("1 message(s):"), "body: {body}");
+    assert!(body.contains("From: worker"), "body: {body}");
+    assert!(body.contains("[task-completed]"), "body: {body}");
+    assert!(body.contains(&task_id), "body: {body}");
+
+    orch.daemon().close().await;
+    worker.daemon().close().await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn self_assigned_task_completion_does_not_notify() {
+    // When creator == assignee (orch working on its own task), we
+    // should not enqueue a notification to orch's own inbox.
+    let tmp = TempDir::new().expect("tempdir");
+    let handle = spawn_daemon(tmp.path()).await;
+    let orch = connect_server(handle.socket_path(), "orch").await;
+
+    let created = orch
+        .create_task(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "title": "self task",
+                "assignee": "orch",
+            }))
+            .expect("decode"),
+        ))
+        .await
+        .expect("create");
+    let task_id = call_json::<serde_json::Value>(&created)["id"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+
+    orch.update_task(Parameters(
+        serde_json::from_value(serde_json::json!({
+            "id": task_id,
+            "status": "completed",
+            "result": "done. remaining owned dirty files=<none>",
+            "confirm": true,
+        }))
+        .expect("decode"),
+    ))
+    .await
+    .expect("update");
+
+    let inbox = orch
+        .read_messages(Parameters(
+            serde_json::from_value(serde_json::json!({})).expect("decode"),
+        ))
+        .await
+        .expect("read");
+    assert!(
+        call_text(&inbox).contains("No pending messages."),
+        "body: {}",
+        call_text(&inbox)
+    );
+
+    orch.daemon().close().await;
+    handle.shutdown().await;
+}
