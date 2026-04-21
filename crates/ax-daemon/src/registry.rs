@@ -116,6 +116,7 @@ impl Registry {
             status_text,
             git_status: None,
             connected_at: Some(now),
+            last_activity_at: Some(now),
         };
         let entry = Entry {
             id,
@@ -184,7 +185,9 @@ impl Registry {
     }
 
     /// Snapshot of all currently-registered workspaces. Ordered by name
-    /// (`BTreeMap`) so JSON rendering is stable.
+    /// (`BTreeMap`) so JSON rendering is stable. Splices the registry's
+    /// authoritative `last_active_at` watermark into each snapshot so
+    /// consumers see one source of truth for liveness timestamps.
     #[must_use]
     pub fn list(&self) -> Vec<WorkspaceInfo> {
         self.inner
@@ -192,7 +195,11 @@ impl Registry {
             .expect("registry poisoned")
             .entries
             .values()
-            .map(|e| e.info.clone())
+            .map(|e| {
+                let mut info = e.info.clone();
+                info.last_activity_at = Some(e.last_active_at);
+                info
+            })
             .collect()
     }
 

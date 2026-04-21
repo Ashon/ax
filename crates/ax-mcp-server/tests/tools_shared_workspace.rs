@@ -122,6 +122,46 @@ async fn workspace_status_and_list_tools_reflect_registry() {
 }
 
 #[tokio::test]
+async fn list_workspaces_exposes_last_activity_at_per_peer() {
+    let tmp = TempDir::new().expect("tempdir");
+    let handle = spawn_daemon(tmp.path()).await;
+    let orch = connect_server(handle.socket_path(), "orch").await;
+    let _worker = connect_server(handle.socket_path(), "worker").await;
+
+    // Any MCP call on orch bumps its last_activity_at. We verify the
+    // field is present and non-null for both peers so orchestrators
+    // can answer "how long has B been quiet" without polling
+    // registry-internal timestamps.
+    let _ = orch
+        .set_status(Parameters(
+            serde_json::from_value(serde_json::json!({ "status": "driving" }))
+                .expect("decode"),
+        ))
+        .await
+        .expect("set_status");
+
+    let listed = orch.list_workspaces().await.expect("list succeeds");
+    let body: serde_json::Value =
+        serde_json::from_str(&call_text(&listed)).expect("decode list_workspaces");
+    let workspaces = body["workspaces"].as_array().expect("workspaces array");
+    assert_eq!(workspaces.len(), 2, "body: {body}");
+    for ws in workspaces {
+        let ts = ws["last_activity_at"]
+            .as_str()
+            .unwrap_or_else(|| panic!("last_activity_at missing on {ws}"));
+        // RFC3339 starts with a 4-digit year; any reasonable
+        // timestamp fits that shape. This guards against a future
+        // regression where the field is present but encoded as a
+        // different primitive (e.g. epoch seconds as an int).
+        assert!(ts.len() >= 10, "suspicious timestamp shape: {ts}");
+        assert!(ts.contains('T'), "expected RFC3339 timestamp, got {ts}");
+    }
+
+    orch.daemon().close().await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn get_shared_value_returns_not_found_cleanly() {
     let tmp = TempDir::new().expect("tempdir");
     let handle = spawn_daemon(tmp.path()).await;

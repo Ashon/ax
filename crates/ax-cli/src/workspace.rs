@@ -415,6 +415,7 @@ mod tests {
             status_text: String::new(),
             git_status: None,
             connected_at: None,
+            last_activity_at: None,
         }
     }
 

@@ -745,6 +745,7 @@ mod tests {
                 status_text: "  long running job that is definitely more than limit".into(),
                 git_status: None,
                 connected_at: None,
+                last_activity_at: None,
             },
         );
         let preview = workspace_status_preview(&map, "alpha", 10);
@@ -775,6 +776,7 @@ mod tests {
                     message: String::new(),
                 }),
                 connected_at: None,
+                last_activity_at: None,
             },
         );
 
@@ -799,6 +801,7 @@ mod tests {
                     ..WorkspaceGitStatus::default()
                 }),
                 connected_at: None,
+                last_activity_at: None,
             },
         );
 

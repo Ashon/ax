@@ -3790,6 +3790,7 @@ mod tests {
             status_text: String::new(),
             git_status: Some(git_status),
             connected_at: None,
+            last_activity_at: None,
         }
     }
 

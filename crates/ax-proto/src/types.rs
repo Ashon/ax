@@ -36,6 +36,13 @@ pub struct WorkspaceInfo {
     pub git_status: Option<WorkspaceGitStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connected_at: Option<DateTime<Utc>>,
+    /// Wall-clock timestamp of the most recent daemon-visible activity
+    /// from this workspace (register, status update, message send,
+    /// tool call, etc.). Consumers use this to detect peers that are
+    /// connected but not making progress — the "how long has B been
+    /// quiet" signal that presence alone cannot answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
