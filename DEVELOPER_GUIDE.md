@@ -96,7 +96,7 @@ ax/
 │   ├── ax-cli/                       #   바이너리 엔트리 (name = "ax")
 │   │   └── src/main.rs               #     clap-free argv 파서 + 서브커맨드
 │   ├── ax-tui/                       #   ratatui 기반 watch/top TUI
-│   │   └── src/                      #     app/sidebar/stream/tasks/tokens/actions/captures
+│   │   └── src/                      #     app/render/stream/tasks/tokens/theme/actions/captures
 │   ├── ax-daemon/                    #   Unix 소켓 데몬
 │   │   └── src/                      #     registry, queue, history, taskstore,
 │   │                                 #     wake_scheduler, team_controller, handlers
@@ -368,10 +368,18 @@ pub struct Child {
 
 ### TUI 메모
 
-- `ax top`은 config 트리와 현재 tmux 세션을 결합해 사이드바를 그린다. 상태 마커는 `offline`=`○`, `idle`=`●`, `running`=스피너이며, 하단 스트림은 `messages` / `tasks` / `tokens` / `off`를 순환한다.
-- `ax top`의 task pane은 `tasks.json`을 직접 읽어 active/all/completed/failed 필터와 stale/divergence/queued 배지를 표시한다.
+- `ax top`은 config 트리, 현재 tmux 세션, daemon workspace/task/message/usage 상태를 결합해 master/detail body를 그린다. 기본 tab은 `agents` / `messages` / `tasks` / `tokens`이며, agents quick action으로 workspace를 pin하면 `stream` tab이 추가된다.
+- `ax top`의 task pane은 daemon state dir의 `tasks-state.json`을 우선 읽고 legacy `tasks.json`을 fallback으로 사용한다. active/stale/done/all 필터와 stale/divergence/queued message 배지를 표시한다.
 - `ax shell`은 기본적으로 오케스트레이터 세션을 메인 pane에 보여주고, `Ctrl+A`로 control mode에 들어가 `v`(선택 워크스페이스 보기), `o`(오케스트레이터 복귀), `t`(stream 전환), `x`(interrupt) 같은 조작을 한다.
 - `ax shell`도 `top`과 동일한 messages/tasks/tokens 스트림과 workspace status/task 관측 정보를 재사용한다.
+- TUI 색상은 보조 신호다. 텍스트 label, `●`/`○` marker, bold/dim modifier, 선택 row의 reverse-video가 primary cue로 남아야 한다. `crates/ax-tui/src/theme.rs`가 foreground 색을 중앙 관리하며, renderer는 직접 `.fg(...)`를 흩뿌리지 말고 `theme::task_status`, `theme::agent_status`, `theme::sender`, `theme::git_state` 같은 semantic helper를 호출한다.
+- semantic palette는 표준 terminal color만 사용한다. cyan은 focus/progress, green은 online/completed/clean/success, yellow는 blocked/stale/dirty/disconnected/high-priority/mixed git warning, red는 failed/error/panic, gray는 timestamp/separator/placeholder/metadata, dim gray는 disabled/offline, light blue/magenta/yellow/cyan은 workspace/sender/up token, task id/down token, cost, info 값에 쓴다.
+- `NO_COLOR` 또는 `AX_TUI_NO_COLOR`가 설정되면 foreground 색을 비활성화한다. fallback에서도 bold, dim, reverse-video는 유지되므로 disabled/offline 값은 dim cue와 텍스트 label을 함께 가져야 하고, 선택 row는 색 없이도 보인다.
+- agents view는 `NAME`, `STATE`, `UP`, `DOWN`, `COST`, `INFO` span 컬럼으로 렌더링한다. `NAME`은 cursor/indent/live marker/workspace label, `STATE`는 running/idle/online/offline/disconnected, `UP`/`DOWN`/`COST`는 live capture 또는 usage trend, `INFO`는 status_text와 reconcile/git note를 담당한다.
+- agents git status는 leaf row마다 반복하지 않고 group/project row의 `INFO`에 roll-up한다. 직접 child workspace의 git 상태가 같으면 `git clean`, `git changed:N ?M` 또는 compact 폭의 `git ~N ?M`을 표시하고, 서로 다르면 warning style의 `git mixed`를 표시한다. 선택 workspace의 detail pane은 `modified`/`added`/`deleted`/`untracked`와 diff 통계를 포함한 full detail을 계속 보여준다.
+- tasks view는 `ID`, `STATE`, `OWNER`, `TITLE` span 컬럼을 쓰며 state는 `pending`, `running`, `blocked`, `done`, `failed`, `cancelled`와 stale suffix를 텍스트로 보존한다. summary line은 `run`, `pend`, `stale`, `block`, `fail`, `done`, `msg`, `div`, `hi`, `cancel` 값을 각 semantic style로 구분한다.
+- messages view는 timestamp, sender, recipient, optional short task id, body를 span으로 나누고, body는 error/failure/panic, blocked/warning/stale/wake, completed/success/done 계열 단어만 가볍게 분류한다. 이 분류는 routing/task linkage 색과 별개이며, 색 없이도 원문 body가 그대로 남아야 한다.
+- 현재 자동 검증은 `cargo test -p ax-tui --lib`, `NO_COLOR=1 cargo test -p ax-tui --lib`, `cargo build --release --bin ax`, `git diff --check -- crates/ax-tui` 수준을 기준으로 한다. 실제 terminal theme별 시인성, focused/unfocused buffer snapshot, no-color screenshot 검증은 아직 수동 리뷰 영역이다.
 
 ---
 

@@ -74,6 +74,39 @@ ax top
 - usage / token trend
 - 최근 pane 상태
 
+`ax top`의 색상은 보조 신호입니다. 중요한 상태는 텍스트, `●`/`○`
+마커, 선택 row의 reverse-video, bold/dim modifier로도 남기 때문에
+저색상 터미널이나 흑백 capture에서도 읽을 수 있어야 합니다.
+foreground 색을 끄고 확인하려면 표준 `NO_COLOR=1 ax top` 또는
+ax 전용 `AX_TUI_NO_COLOR=1 ax top`을 사용합니다. 이 경우 색만 빠지고
+bold, dim, reverse-video 선택 표시는 유지됩니다.
+
+기본 색 의미는 다음처럼 고정됩니다. cyan은 focus/running/progress, green은
+online/done/clean/success, yellow는 blocked/stale/dirty/mixed/warning, red는
+failed/error, gray는 timestamp/placeholder/metadata, light blue/magenta/yellow/cyan은
+workspace/sender, task id/down token, cost, info 값 보조 표시입니다.
+
+agents view의 주요 컬럼:
+
+- `NAME`: 선택 cursor, live/offline 마커, project/workspace label
+- `STATE`: `running`, `idle`, `online`, `offline`, `disconnected`
+- `UP` / `DOWN` / `COST`: 현재 capture 또는 누적 trend에서 읽은 token/cost
+- `INFO`: status/reconcile note와 group-level git 요약
+
+git 요약은 agent leaf row마다 반복하지 않고 project/group row의 `INFO`에만
+roll-up됩니다. 직접 child workspace들이 같은 상태이면 `git clean` 또는
+`git changed:N ?M`처럼 표시하고, child 상태가 섞이면 `git mixed`로 표시합니다.
+폭이 좁으면 `git ~N ?M`처럼 축약될 수 있습니다. 선택한 workspace의 상세
+pane에는 modified/added/deleted/untracked와 diff 통계가 있는 full git detail이
+나옵니다.
+
+tasks view는 `ID`, `STATE`, `OWNER`, `TITLE` 컬럼을 쓰고, active stale task는
+`running stale` / `pending stale`처럼 state 텍스트에 stale을 붙입니다. summary
+line의 `msg`는 queued message, `div`는 task/message divergence, `hi`는 high 또는
+urgent priority를 뜻합니다. messages view는 time, sender, recipient, optional
+task id, body를 분리해서 보여주며 error/failure, blocked/stale/wake,
+completed/done 같은 body 단어를 상태 색으로 보조 표시합니다.
+
 ### 특정 session 직접 확인
 
 ```bash
