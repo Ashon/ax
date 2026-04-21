@@ -119,6 +119,7 @@ impl Registry {
             last_activity_at: Some(now),
             active_task_count: 0,
             current_task_id: None,
+            connection_generation: id,
         };
         let entry = Entry {
             id,
@@ -200,6 +201,7 @@ impl Registry {
             .map(|e| {
                 let mut info = e.info.clone();
                 info.last_activity_at = Some(e.last_active_at);
+                info.connection_generation = e.id;
                 info
             })
             .collect()

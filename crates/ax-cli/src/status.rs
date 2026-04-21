@@ -748,6 +748,7 @@ mod tests {
                 last_activity_at: None,
                 active_task_count: 0,
                 current_task_id: None,
+                connection_generation: 0,
             },
         );
         let preview = workspace_status_preview(&map, "alpha", 10);
@@ -781,6 +782,7 @@ mod tests {
                 last_activity_at: None,
                 active_task_count: 0,
                 current_task_id: None,
+                connection_generation: 0,
             },
         );
 
@@ -808,6 +810,7 @@ mod tests {
                 last_activity_at: None,
                 active_task_count: 0,
                 current_task_id: None,
+                connection_generation: 0,
             },
         );
 

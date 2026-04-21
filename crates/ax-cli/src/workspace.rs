@@ -418,6 +418,7 @@ mod tests {
             last_activity_at: None,
             active_task_count: 0,
             current_task_id: None,
+            connection_generation: 0,
         }
     }
 

@@ -122,6 +122,53 @@ async fn workspace_status_and_list_tools_reflect_registry() {
 }
 
 #[tokio::test]
+async fn connection_generation_bumps_when_peer_reregisters() {
+    let tmp = TempDir::new().expect("tempdir");
+    let handle = spawn_daemon(tmp.path()).await;
+
+    // First registration of `worker`.
+    let worker_a = connect_server(handle.socket_path(), "worker").await;
+    let orch = connect_server(handle.socket_path(), "orch").await;
+    let listed_before = orch.list_workspaces().await.expect("list 1");
+    let body_before: serde_json::Value =
+        serde_json::from_str(&call_text(&listed_before)).expect("decode 1");
+    let gen_before = body_before["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["name"] == "worker")
+        .and_then(|w| w["connection_generation"].as_u64())
+        .expect("connection_generation on worker");
+
+    // Drop and re-register the same workspace — the second registration
+    // should receive a strictly higher generation so any caller that
+    // cached state against the previous connection can invalidate.
+    worker_a.daemon().close().await;
+    // Give the daemon a moment to notice the disconnect; re-register.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let worker_b = connect_server(handle.socket_path(), "worker").await;
+
+    let listed_after = orch.list_workspaces().await.expect("list 2");
+    let body_after: serde_json::Value =
+        serde_json::from_str(&call_text(&listed_after)).expect("decode 2");
+    let gen_after = body_after["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["name"] == "worker")
+        .and_then(|w| w["connection_generation"].as_u64())
+        .expect("connection_generation after re-register");
+    assert!(
+        gen_after > gen_before,
+        "generation must bump on re-register (was {gen_before}, now {gen_after})"
+    );
+
+    worker_b.daemon().close().await;
+    orch.daemon().close().await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn list_workspaces_reports_current_task_id_for_in_progress_assignee() {
     let tmp = TempDir::new().expect("tempdir");
     let handle = spawn_daemon(tmp.path()).await;

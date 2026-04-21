@@ -407,6 +407,7 @@ mod tests {
                 last_activity_at: Some(Utc::now()),
                 active_task_count: 0,
                 current_task_id: None,
+                connection_generation: 0,
             },
             config_path: "/tmp/config.yaml".into(),
             idle_timeout: Duration::from_secs(30),

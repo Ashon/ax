@@ -57,6 +57,18 @@ pub struct WorkspaceInfo {
     /// "what is B working on right now" answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_task_id: Option<String>,
+    /// Monotonic generation number assigned by the daemon each time
+    /// this workspace registers. A bump since the last snapshot means
+    /// the peer disconnected and came back — useful for invalidating
+    /// any caller-side assumptions (cached task state, in-flight
+    /// requests, dropped messages) that were tied to the prior
+    /// connection. `0` is treated as "unknown" for offline peers.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub connection_generation: u64,
+}
+
+fn is_zero_u64(n: &u64) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
