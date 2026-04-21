@@ -375,6 +375,14 @@ pub struct UpdateTaskRequest {
 }
 
 #[derive(Debug, schemars::JsonSchema, Deserialize)]
+pub struct ReportTaskProgressRequest {
+    pub id: String,
+    /// Human-readable progress note. Appended to the task log and
+    /// bumps `updated_at`, which resets the silent-exit stale timer.
+    pub note: String,
+}
+
+#[derive(Debug, schemars::JsonSchema, Deserialize)]
 pub struct ReportTaskCompletionRequest {
     pub id: String,
     /// Human-readable summary of what was done.
@@ -962,6 +970,58 @@ impl Server {
             result: req.result.filter(|s| !s.is_empty()),
             log: req.log.filter(|s| !s.is_empty()),
             confirm: req.confirm,
+        };
+        let resp: TaskResponse = self
+            .daemon
+            .request(MessageType::UpdateTask, &payload)
+            .await
+            .map_err(tool_error)?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&resp.task).unwrap_or_default(),
+        )]))
+    }
+
+    /// `report_task_progress` — lightweight heartbeat for long-running
+    /// tasks. Auto-promotes `pending` to `in_progress` on first call
+    /// and appends `note` to the task log, which bumps `updated_at`
+    /// and resets the silent-exit stale timer. Any MCP-speaking agent
+    /// can use this to signal liveness without remembering status
+    /// names.
+    #[tool(
+        description = "Report progress on a task. Promotes pending to in_progress on first call and appends `note` to the task log so silent-exit detection does not flag this task as stale. Call this periodically during long work units."
+    )]
+    pub async fn report_task_progress(
+        &self,
+        Parameters(req): Parameters<ReportTaskProgressRequest>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let note = req.note.trim();
+        if note.is_empty() {
+            return Err(rmcp::ErrorData::invalid_params(
+                "note is required",
+                None,
+            ));
+        }
+        let current: TaskResponse = self
+            .daemon
+            .request(
+                MessageType::GetTask,
+                &GetTaskPayload { id: req.id.clone() },
+            )
+            .await
+            .map_err(tool_error)?;
+        // Only promote when the task is still pending; in-progress
+        // stays in-progress (no transition), and terminal statuses
+        // reject — let the daemon surface that rejection naturally.
+        let target_status = match current.task.status {
+            TaskStatus::Pending => Some(TaskStatus::InProgress),
+            _ => None,
+        };
+        let payload = UpdateTaskPayload {
+            id: req.id,
+            status: target_status,
+            result: None,
+            log: Some(note.to_owned()),
+            confirm: None,
         };
         let resp: TaskResponse = self
             .daemon

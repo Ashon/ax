@@ -453,6 +453,79 @@ async fn completion_contract_rejection_enqueues_reminder_in_worker_inbox() {
 }
 
 #[tokio::test]
+async fn report_task_progress_promotes_pending_to_in_progress() {
+    let tmp = TempDir::new().expect("tempdir");
+    let handle = spawn_daemon(tmp.path()).await;
+    let orch = connect_server(handle.socket_path(), "orch").await;
+    let worker = connect_server(handle.socket_path(), "worker").await;
+
+    let created = orch
+        .create_task(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "title": "heartbeat me",
+                "assignee": "worker",
+            }))
+            .expect("decode"),
+        ))
+        .await
+        .expect("create");
+    let task_id = call_json::<serde_json::Value>(&created)["id"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+
+    let resp = worker
+        .report_task_progress(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "id": task_id,
+                "note": "reading source files",
+            }))
+            .expect("decode"),
+        ))
+        .await
+        .expect("report succeeds");
+    let task: serde_json::Value = call_json(&resp);
+    assert_eq!(task["status"], "in_progress");
+    // Log entry should contain the note we sent.
+    let logs = task["logs"].as_array().expect("logs array");
+    let note_found = logs.iter().any(|entry| {
+        entry["message"]
+            .as_str()
+            .or_else(|| entry["note"].as_str())
+            .or_else(|| entry.as_str())
+            .map(|s| s.contains("reading source files"))
+            .unwrap_or(false)
+    });
+    assert!(note_found, "logs: {logs:?}");
+
+    orch.daemon().close().await;
+    worker.daemon().close().await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn report_task_progress_rejects_empty_note() {
+    let tmp = TempDir::new().expect("tempdir");
+    let handle = spawn_daemon(tmp.path()).await;
+    let worker = connect_server(handle.socket_path(), "worker").await;
+
+    let err = worker
+        .report_task_progress(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "id": "t-anything",
+                "note": "   ",
+            }))
+            .expect("decode"),
+        ))
+        .await
+        .expect_err("empty note must reject before hitting daemon");
+    assert!(err.to_string().contains("note"), "body: {err}");
+
+    worker.daemon().close().await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn report_task_completion_marks_completed_when_clean() {
     let tmp = TempDir::new().expect("tempdir");
     let handle = spawn_daemon(tmp.path()).await;
