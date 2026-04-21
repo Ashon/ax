@@ -375,6 +375,22 @@ pub struct UpdateTaskRequest {
 }
 
 #[derive(Debug, schemars::JsonSchema, Deserialize)]
+pub struct ReportTaskCompletionRequest {
+    pub id: String,
+    /// Human-readable summary of what was done.
+    pub summary: String,
+    /// Owned files that are still dirty (uncommitted / out-of-place).
+    /// Use an empty list if nothing is left over.
+    #[serde(default)]
+    pub dirty_files: Vec<String>,
+    /// Optional description of residual work if `dirty_files` is
+    /// non-empty. Required by the Completion Reporting Contract when
+    /// there is leftover scope; otherwise ignored.
+    #[serde(default)]
+    pub residual_scope: Option<String>,
+}
+
+#[derive(Debug, schemars::JsonSchema, Deserialize)]
 pub struct TaskIdRequest {
     pub id: String,
 }
@@ -946,6 +962,69 @@ impl Server {
             result: req.result.filter(|s| !s.is_empty()),
             log: req.log.filter(|s| !s.is_empty()),
             confirm: req.confirm,
+        };
+        let resp: TaskResponse = self
+            .daemon
+            .request(MessageType::UpdateTask, &payload)
+            .await
+            .map_err(tool_error)?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&resp.task).unwrap_or_default(),
+        )]))
+    }
+
+    /// `report_task_completion` — ergonomic wrapper over `update_task`
+    /// that constructs the Completion Reporting Contract marker from
+    /// structured fields. Any MCP-speaking agent can call this
+    /// without memorising the exact marker string, which is the
+    /// dominant source of silent completion rejections.
+    #[tool(
+        description = "Report task completion with structured fields. Constructs the Completion Reporting Contract marker from `dirty_files` and `residual_scope` for you, then transitions the task to completed. Use this instead of `update_task` whenever you are closing out a task — it is the lowest-friction path."
+    )]
+    pub async fn report_task_completion(
+        &self,
+        Parameters(req): Parameters<ReportTaskCompletionRequest>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let summary = req.summary.trim();
+        if summary.is_empty() {
+            return Err(rmcp::ErrorData::invalid_params(
+                "summary is required",
+                None,
+            ));
+        }
+        let clean_files: Vec<String> = req
+            .dirty_files
+            .into_iter()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let marker = if clean_files.is_empty() {
+            "remaining owned dirty files=<none>".to_owned()
+        } else {
+            let residual = req
+                .residual_scope
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    rmcp::ErrorData::invalid_params(
+                        "residual_scope is required when dirty_files is non-empty",
+                        None,
+                    )
+                })?;
+            format!(
+                "remaining owned dirty files={}; residual scope={}",
+                clean_files.join(", "),
+                residual,
+            )
+        };
+        let result = format!("{summary}\n\n{marker}");
+        let payload = UpdateTaskPayload {
+            id: req.id,
+            status: Some(TaskStatus::Completed),
+            result: Some(result),
+            log: None,
+            confirm: Some(true),
         };
         let resp: TaskResponse = self
             .daemon
