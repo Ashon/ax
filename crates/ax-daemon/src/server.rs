@@ -234,6 +234,18 @@ const SILENT_TASK_STALE_THRESHOLD_SECS: i64 = 180;
 /// human should intervene.
 const SILENT_TASK_NUDGE_CAP: i64 = 5;
 
+/// Body text appended to the silent-exit reminder. Kept as a constant
+/// so it can be unit-tested independently of the reconciler loop and
+/// so future additions to the task-lifecycle tool surface land in
+/// one place. Any MCP agent — Claude, Codex, or future runtimes —
+/// sees the same remediation menu.
+pub(crate) const SILENT_TASK_NUDGE_NOTE: &str = "Assignee looks idle but the task is still `in_progress`. \
+     Call one of the task-lifecycle MCP tools instead of leaving it open: \
+     `report_task_progress` (heartbeat with a note), \
+     `report_task_completion` (done — supply `dirty_files` and optional `residual_scope`), \
+     `report_task_failed` (hard error with `reason`), or \
+     `report_task_blocked` (need external help — optional `needs_help_from`).";
+
 /// Handle the idle-sleep background task owns. Mirrors the flusher /
 /// wake-loop pattern so shutdown is graceful.
 pub(crate) struct IdleLoopHandle {
@@ -391,13 +403,7 @@ fn reconcile_once(
             continue; // wake scheduler will handle the existing traffic
         }
 
-        let body = ax_daemon_helpers::build_task_reminder_message(
-            &task,
-            "Assignee looks idle but the task is still `in_progress`. \
-             Call `update_task` to report progress, mark it `completed` \
-             with the leftover-scope declaration, or `failed` with a \
-             reason — don't leave the task open.",
-        );
+        let body = ax_daemon_helpers::build_task_reminder_message(&task, SILENT_TASK_NUDGE_NOTE);
         let msg = ax_daemon_helpers::task_aware_message("reconciler", &task.assignee, &body);
         queue.enqueue(msg);
         let _ = task_store.record_dispatch(&task.id, &task.assignee, now);
@@ -638,5 +644,38 @@ impl Drop for DaemonHandle {
         if let Some(tx) = self.shutdown.take() {
             let _ = tx.send(());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SILENT_TASK_NUDGE_NOTE;
+
+    #[test]
+    fn silent_task_nudge_note_advertises_every_lifecycle_tool() {
+        // Any MCP agent reading this nudge should see the full
+        // remediation menu. If a tool is added/renamed and this
+        // assertion stops holding, update the note — the note is
+        // the canonical discovery surface for stuck agents.
+        assert!(SILENT_TASK_NUDGE_NOTE.contains("report_task_progress"));
+        assert!(SILENT_TASK_NUDGE_NOTE.contains("report_task_completion"));
+        assert!(SILENT_TASK_NUDGE_NOTE.contains("report_task_failed"));
+        assert!(SILENT_TASK_NUDGE_NOTE.contains("report_task_blocked"));
+    }
+
+    #[test]
+    fn silent_task_nudge_note_describes_why_nudge_fires() {
+        // The note must explain the "why" so an agent does not just
+        // retry the same tool call blindly — it should understand
+        // the reconciler noticed an idle in_progress task.
+        assert!(SILENT_TASK_NUDGE_NOTE.contains("idle"));
+        assert!(SILENT_TASK_NUDGE_NOTE.contains("in_progress"));
+    }
+
+    #[test]
+    fn silent_task_nudge_note_is_non_trivial() {
+        // Guard against an accidental truncation / empty string in
+        // a future refactor: the note backs stale-recovery UX.
+        assert!(SILENT_TASK_NUDGE_NOTE.len() > 100);
     }
 }
