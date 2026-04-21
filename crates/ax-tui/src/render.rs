@@ -5,7 +5,7 @@
 //! moves to the header status bar when the active tab isn't agents.
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Style;
 use ratatui::symbols;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
@@ -15,11 +15,12 @@ use ratatui::widgets::{
 use ratatui::Frame;
 use throbber_widgets_tui::{Throbber, WhichUse, BRAILLE_SIX};
 
-use ax_proto::types::AgentStatus;
+use ax_proto::types::{AgentStatus, WorkspaceGitStatus};
 
 use crate::agents::AgentEntry;
 use crate::state::{App, Focus};
-use crate::stream::{format_message_line, StreamView};
+use crate::stream::StreamView;
+use crate::theme::{self, Severity};
 
 pub(crate) fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
@@ -167,16 +168,11 @@ fn draw_help(f: &mut Frame, frame: Rect, app: &App) {
         }
         lines.push(Line::from(Span::styled(
             format!(" {section}"),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+            theme::accent_bold(),
         )));
         for (key, desc) in rows {
             lines.push(Line::from(vec![
-                Span::styled(
-                    format!("  {key:<width$}", width = key_col),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
+                Span::styled(format!("  {key:<width$}", width = key_col), theme::strong()),
                 Span::raw(*desc),
             ]));
         }
@@ -205,7 +201,7 @@ fn draw_help(f: &mut Frame, frame: Rect, app: &App) {
     if total_rows as usize > inner.height as usize && !visible.is_empty() {
         *visible.last_mut().expect("visible is non-empty") = Line::from(Span::styled(
             "  ... resize terminal for more help",
-            Style::default().add_modifier(Modifier::DIM),
+            theme::muted(),
         ));
     }
     f.render_widget(Paragraph::new(visible), inner);
@@ -299,11 +295,11 @@ fn draw_quick_actions(f: &mut Frame, frame: Rect, list_area: Rect, app: &App) {
             .unwrap_or_default();
         lines.push(Line::from(Span::styled(
             prompt,
-            Style::default().add_modifier(Modifier::BOLD),
+            theme::severity_bold(Severity::Warning),
         )));
         lines.push(Line::from(Span::styled(
             "enter to confirm · esc to cancel",
-            Style::default().add_modifier(Modifier::DIM),
+            theme::muted(),
         )));
     } else {
         for (idx, action) in app.quick_actions.actions.iter().enumerate() {
@@ -313,7 +309,7 @@ fn draw_quick_actions(f: &mut Frame, frame: Rect, list_area: Rect, app: &App) {
                 "  "
             };
             let style = if idx == app.quick_actions.selected {
-                Style::default().add_modifier(Modifier::REVERSED)
+                theme::selection(true)
             } else {
                 Style::default()
             };
@@ -324,7 +320,7 @@ fn draw_quick_actions(f: &mut Frame, frame: Rect, list_area: Rect, app: &App) {
         }
         lines.push(Line::from(Span::styled(
             "enter to run · esc to close",
-            Style::default().add_modifier(Modifier::DIM),
+            theme::muted(),
         )));
     }
     let para = Paragraph::new(lines).block(block);
@@ -376,11 +372,11 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
         filter = app.task_filter.label(),
     );
     if app.daemon_running {
-        let throbber = status_throbber(text, Style::default().add_modifier(Modifier::BOLD));
+        let throbber = status_throbber(text, theme::strong());
         let mut state = app.throbber_state.clone();
         f.render_stateful_widget(throbber, area, &mut state);
     } else {
-        let header = Paragraph::new(text).style(Style::default().add_modifier(Modifier::BOLD));
+        let header = Paragraph::new(text).style(theme::strong());
         f.render_widget(header, area);
     }
 }
@@ -429,7 +425,7 @@ fn draw_agents_list(f: &mut Frame, area: Rect, app: &App) {
     render_scrollbar(f, list_area, viewport);
 }
 
-/// Column widths for the agents table. `name` flexes to fill the
+/// Column widths for the agents table. INFO flexes to fill the
 /// remainder; the rest are fixed so rows line up across refreshes.
 struct AgentColumns {
     name: usize,
@@ -442,13 +438,14 @@ struct AgentColumns {
 
 impl AgentColumns {
     fn fit(width: u16) -> Self {
-        // NAME is fixed-compact; INFO absorbs the remaining width so
-        // operator hints / reconcile notes get the room they need.
-        let name = 28;
-        let state = 11;
-        let up = 7;
-        let down = 7;
-        let cost = 8;
+        // INFO absorbs status/reconcile notes and group-level git
+        // summaries so agent names stay concise.
+        let compact = width < 104;
+        let name = if compact { 34 } else { 44 };
+        let state = if compact { 8 } else { 11 };
+        let up = if compact { 5 } else { 7 };
+        let down = if compact { 5 } else { 7 };
+        let cost = if compact { 6 } else { 8 };
         let gaps = 5; // 5 single-space gaps between 6 columns
         let fixed = name + state + up + down + cost + gaps;
         let info = (width as usize).saturating_sub(fixed).max(12);
@@ -464,25 +461,19 @@ impl AgentColumns {
 }
 
 fn draw_agents_header(f: &mut Frame, area: Rect, cols: &AgentColumns) {
-    let text = format!(
-        "{:<w1$} {:<w2$} {:<w3$} {:<w4$} {:<w5$} {:<w6$}",
-        "NAME",
-        "STATE",
-        "UP",
-        "DOWN",
-        "COST",
-        "INFO",
-        w1 = cols.name,
-        w2 = cols.state,
-        w3 = cols.up,
-        w4 = cols.down,
-        w5 = cols.cost,
-        w6 = cols.info,
-    );
-    let para = Paragraph::new(Line::from(Span::styled(
-        text,
-        Style::default().add_modifier(Modifier::DIM),
-    )));
+    let mut spans = Vec::new();
+    push_padded_span(&mut spans, "NAME", cols.name, theme::column_header());
+    push_gap(&mut spans);
+    push_padded_span(&mut spans, "STATE", cols.state, theme::column_header());
+    push_gap(&mut spans);
+    push_padded_span(&mut spans, "UP", cols.up, theme::traffic_up());
+    push_gap(&mut spans);
+    push_padded_span(&mut spans, "DOWN", cols.down, theme::traffic_down());
+    push_gap(&mut spans);
+    push_padded_span(&mut spans, "COST", cols.cost, theme::cost());
+    push_gap(&mut spans);
+    push_padded_span(&mut spans, "INFO", cols.info, theme::column_header());
+    let para = Paragraph::new(Line::from(spans));
     f.render_widget(para, area);
 }
 
@@ -499,19 +490,17 @@ fn agent_row<'a>(
     // the `▸` cursor has somewhere to land without pushing the label.
     let indent = "  ".repeat(entry.level);
     if entry.group {
-        return ListItem::new(Line::from(Span::styled(
-            format!("{indent}{}", entry.label),
-            Style::default().add_modifier(Modifier::BOLD),
-        )));
+        return agent_group_row(idx, entry, app, cols, &indent);
     }
 
     let live = entry.session_index.is_some();
     let is_selected = idx == app.selected_entry;
     let cursor = if is_selected { "▸" } else { " " };
     let marker = if live { "●" } else { "○" };
-    let name_raw = format!("{cursor} {indent}{marker} {}", entry.label);
 
     let info_opt = app.workspace_infos.get(&entry.workspace);
+    let name_raw = format!("{cursor} {indent}{marker} {}", entry.label);
+
     // Flip between "running" (animated spinner) and "idle" based on
     // whether the tmux capture is actively changing. A few seconds of
     // quiet output past the last captured diff means the agent is
@@ -581,24 +570,219 @@ fn agent_row<'a>(
         entry.reconcile.clone()
     };
 
-    let text = format!(
-        "{name} {state} {up} {down} {cost} {info}",
-        name = pad_or_trunc(&name_raw, cols.name),
-        state = pad_or_trunc(&state_raw, cols.state),
-        up = pad_or_trunc(&up_raw, cols.up),
-        down = pad_or_trunc(&down_raw, cols.down),
-        cost = pad_or_trunc(&cost_raw, cols.cost),
-        info = pad_or_trunc(&info_raw, cols.info),
-    );
+    let selected_style = is_selected.then(|| theme::selection(app.focus == Focus::List));
+    let name_style = selected_style.unwrap_or_else(|| {
+        if live {
+            theme::workspace(entry.level)
+        } else {
+            theme::disabled()
+        }
+    });
+    let state_style = selected_style.unwrap_or_else(|| {
+        if live {
+            if state_raw.contains("running") {
+                theme::running()
+            } else {
+                theme::idle()
+            }
+        } else {
+            info_opt.map_or_else(theme::disabled, |w| theme::agent_status(&w.status))
+        }
+    });
+    let up_style = selected_style.unwrap_or_else(|| metric_style(&up_raw, theme::traffic_up()));
+    let down_style =
+        selected_style.unwrap_or_else(|| metric_style(&down_raw, theme::traffic_down()));
+    let cost_style = selected_style.unwrap_or_else(|| metric_style(&cost_raw, theme::cost()));
+    let info_style = selected_style.unwrap_or_else(|| {
+        if info_raw.is_empty() {
+            theme::muted()
+        } else if entry.reconcile.is_empty() {
+            theme::info()
+        } else {
+            theme::severity(Severity::Warning)
+        }
+    });
+    let gap_style = selected_style.unwrap_or_else(Style::default);
 
-    let style = if is_selected {
-        Style::default().add_modifier(Modifier::REVERSED)
-    } else if !live {
-        Style::default().fg(Color::DarkGray)
+    let mut spans = Vec::new();
+    push_padded_span(&mut spans, &name_raw, cols.name, name_style);
+    push_gap_with(&mut spans, gap_style);
+    push_padded_span(&mut spans, &state_raw, cols.state, state_style);
+    push_gap_with(&mut spans, gap_style);
+    push_padded_span(&mut spans, &up_raw, cols.up, up_style);
+    push_gap_with(&mut spans, gap_style);
+    push_padded_span(&mut spans, &down_raw, cols.down, down_style);
+    push_gap_with(&mut spans, gap_style);
+    push_padded_span(&mut spans, &cost_raw, cols.cost, cost_style);
+    push_gap_with(&mut spans, gap_style);
+    push_padded_span(&mut spans, &info_raw, cols.info, info_style);
+    ListItem::new(Line::from(spans))
+}
+
+fn agent_group_row<'a>(
+    idx: usize,
+    entry: &'a AgentEntry,
+    app: &'a App,
+    cols: &AgentColumns,
+    indent: &str,
+) -> ListItem<'a> {
+    let label = format!("{indent}{}", entry.label);
+    let git = group_git_summary(idx, app, cols.info >= 20);
+    let mut spans = Vec::new();
+    push_padded_span(
+        &mut spans,
+        label,
+        cols.name,
+        theme::workspace(entry.level).add_modifier(ratatui::style::Modifier::BOLD),
+    );
+    push_gap(&mut spans);
+    push_padded_span(&mut spans, "", cols.state, theme::muted());
+    push_gap(&mut spans);
+    push_padded_span(&mut spans, "", cols.up, theme::muted());
+    push_gap(&mut spans);
+    push_padded_span(&mut spans, "", cols.down, theme::muted());
+    push_gap(&mut spans);
+    push_padded_span(&mut spans, "", cols.cost, theme::muted());
+    push_gap(&mut spans);
+    if let Some((summary, style)) = git {
+        push_padded_span(&mut spans, format!("git {summary}"), cols.info, style);
     } else {
-        Style::default()
-    };
-    ListItem::new(Line::from(Span::styled(text, style)))
+        push_padded_span(&mut spans, "", cols.info, theme::muted());
+    }
+    ListItem::new(Line::from(spans))
+}
+
+fn group_git_summary(idx: usize, app: &App, wide: bool) -> Option<(String, Style)> {
+    let group = app.agent_entries.get(idx)?;
+    if !group.group {
+        return None;
+    }
+    let mut first: Option<&WorkspaceGitStatus> = None;
+    let mut mixed = false;
+    for child in app.agent_entries.iter().skip(idx + 1) {
+        if child.group && child.level <= group.level {
+            break;
+        }
+        if child.group {
+            continue;
+        }
+        if child.level < group.level {
+            break;
+        }
+        if child.level > group.level + 1 {
+            continue;
+        }
+        let Some(git) = app
+            .workspace_infos
+            .get(&child.workspace)
+            .and_then(|info| info.git_status.as_ref())
+        else {
+            continue;
+        };
+        if let Some(existing) = first {
+            if existing != git {
+                mixed = true;
+                break;
+            }
+        } else {
+            first = Some(git);
+        }
+    }
+    if mixed {
+        return Some(("mixed".to_owned(), theme::severity(Severity::Warning)));
+    }
+    let git = first?;
+    let state = normalized_git_state(git);
+    Some((
+        format_git_status_inline(git, wide),
+        theme::git_state(&state),
+    ))
+}
+
+fn format_git_status_inline(git: &WorkspaceGitStatus, wide: bool) -> String {
+    let state = normalized_git_state(git);
+    match state.as_str() {
+        "non_git" => return "non-git".to_owned(),
+        "inaccessible" => return "no access".to_owned(),
+        "error" => return "git err".to_owned(),
+        _ => {}
+    }
+
+    let changed = git.modified + git.added + git.deleted;
+    if state == "clean" && changed == 0 && git.untracked == 0 {
+        return "clean".to_owned();
+    }
+    if wide {
+        return format!("changed:{changed} ?{}", git.untracked);
+    }
+    format!("~{changed} ?{}", git.untracked)
+}
+
+fn format_git_status_detail(git: &WorkspaceGitStatus) -> String {
+    let state = normalized_git_state(git);
+    match state.as_str() {
+        "non_git" => return git_message("non-git", git),
+        "inaccessible" => return git_message("inaccessible", git),
+        "error" => return git_message("error", git),
+        _ => {}
+    }
+
+    let mut out = format!(
+        "{state} · modified {} · added {} · deleted {} · untracked {}",
+        git.modified, git.added, git.deleted, git.untracked
+    );
+    if git.files_changed > 0 || git.insertions > 0 || git.deletions > 0 {
+        out.push_str(&format!(
+            " · diff {} files +{} -{}",
+            git.files_changed, git.insertions, git.deletions
+        ));
+    }
+    out
+}
+
+fn normalized_git_state(git: &WorkspaceGitStatus) -> String {
+    let state = git.state.trim();
+    if !state.is_empty() {
+        return state.to_owned();
+    }
+    if git.modified + git.added + git.deleted + git.untracked > 0 {
+        "dirty".to_owned()
+    } else {
+        "clean".to_owned()
+    }
+}
+
+fn git_message(prefix: &str, git: &WorkspaceGitStatus) -> String {
+    if git.message.trim().is_empty() {
+        prefix.to_owned()
+    } else {
+        format!("{prefix}: {}", git.message.trim())
+    }
+}
+
+fn push_gap(spans: &mut Vec<Span<'static>>) {
+    spans.push(Span::raw(" "));
+}
+
+fn push_gap_with(spans: &mut Vec<Span<'static>>, style: Style) {
+    spans.push(Span::styled(" ", style));
+}
+
+fn push_padded_span(
+    spans: &mut Vec<Span<'static>>,
+    text: impl AsRef<str>,
+    width: usize,
+    style: Style,
+) {
+    spans.push(Span::styled(pad_or_trunc(text.as_ref(), width), style));
+}
+
+fn metric_style(raw: &str, style: Style) -> Style {
+    if raw.trim() == "-" {
+        theme::muted()
+    } else {
+        style
+    }
 }
 
 fn token_cell(raw: &str, arrow: char) -> String {
@@ -704,11 +888,9 @@ fn detail_title(app: &App) -> Line<'static> {
             .unwrap_or_else(|| " stream detail ".to_owned()),
     };
     let style = if focus_detail {
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
+        theme::accent_bold()
     } else {
-        Style::default().add_modifier(Modifier::DIM)
+        theme::muted()
     };
     Line::from(Span::styled(label, style))
 }
@@ -729,20 +911,16 @@ fn tabs_title(app: &App) -> Line<'static> {
             // of poking up as a dot.
             spans.push(Span::styled(
                 format!(" {} ", symbols::line::HORIZONTAL),
-                Style::default().add_modifier(Modifier::DIM),
+                theme::muted(),
             ));
         }
         let label = format!(" {}·{} ", idx + 1, view.tab_label());
         let is_selected = *view == app.stream;
         let style = match (is_selected, focused) {
-            (true, true) => Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-            (true, false) => Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-            (false, true) => Style::default().fg(Color::DarkGray),
-            (false, false) => Style::default().add_modifier(Modifier::DIM),
+            (true, true) => theme::active_label(true),
+            (true, false) => theme::active_label(false),
+            (false, true) => theme::disabled(),
+            (false, false) => theme::muted(),
         };
         spans.push(Span::styled(label, style));
     }
@@ -758,7 +936,7 @@ fn draw_stream(f: &mut Frame, area: Rect, app: &mut App) {
         let placeholder = Paragraph::new(
             "  (no workspace streaming — focus an agent and hit enter → Stream tmux)",
         )
-        .style(Style::default().add_modifier(Modifier::DIM));
+        .style(theme::muted());
         f.render_widget(placeholder, area);
         return;
     };
@@ -775,7 +953,7 @@ fn draw_stream(f: &mut Frame, area: Rect, app: &mut App) {
         let loading_area = centered_loading_area(area);
         let throbber = status_throbber(
             format!("waiting for tmux capture of {workspace}…"),
-            Style::default().add_modifier(Modifier::DIM),
+            theme::muted(),
         );
         f.render_stateful_widget(throbber, loading_area, &mut app.throbber_state);
         return;
@@ -789,11 +967,8 @@ fn draw_stream(f: &mut Frame, area: Rect, app: &mut App) {
     } else {
         "frozen"
     };
-    let caption = Paragraph::new(format!("  {workspace} · tmux mirror · {mode}")).style(
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    );
+    let caption =
+        Paragraph::new(format!("  {workspace} · tmux mirror · {mode}")).style(theme::accent_bold());
     let caption_area = Rect::new(area.x, area.y, area.width, 1);
     f.render_widget(caption, caption_area);
     let body_area = Rect::new(
@@ -846,11 +1021,7 @@ fn status_throbber<'a>(label: impl Into<Span<'a>>, style: Style) -> Throbber<'a>
     Throbber::default()
         .label(label)
         .style(style)
-        .throbber_style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )
+        .throbber_style(theme::accent_bold())
         .throbber_set(BRAILLE_SIX)
         .use_type(WhichUse::Spin)
 }
@@ -866,11 +1037,7 @@ fn centered_loading_area(area: Rect) -> Rect {
 /// an obvious cyan edge and the rest fade to the default border
 /// colour.
 fn focus_border_style(app: &App, panel: Focus) -> Style {
-    if app.focus == panel {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default()
-    }
+    theme::focus_border(app.focus == panel)
 }
 
 fn draw_messages(f: &mut Frame, area: Rect, app: &App) {
@@ -884,7 +1051,7 @@ fn draw_messages(f: &mut Frame, area: Rect, app: &App) {
                 &format!("  snapshot error: {error}"),
                 warning_area.width as usize,
             ))
-            .style(Style::default().fg(Color::Red)),
+            .style(theme::severity(Severity::Danger)),
             warning_area,
         );
         list_area = Rect::new(
@@ -898,8 +1065,7 @@ fn draw_messages(f: &mut Frame, area: Rect, app: &App) {
         if app.messages_snapshot_error.is_some() {
             return;
         }
-        let para = Paragraph::new("  (no messages yet)")
-            .style(Style::default().add_modifier(Modifier::DIM));
+        let para = Paragraph::new("  (no messages yet)").style(theme::muted());
         f.render_widget(para, list_area);
         return;
     }
@@ -920,27 +1086,97 @@ fn draw_messages(f: &mut Frame, area: Rect, app: &App) {
         .enumerate()
         .map(|(rel, entry)| {
             let absolute = viewport.start + rel;
-            let text = format_message_line(entry, content_width.max(1));
-            let style = if absolute == cursor {
-                // REVERSED reads as selection everywhere else in the
-                // TUI (tasks list, agents list); CYAN tint when the
-                // list has focus disambiguates "live cursor" from
-                // "selection parked while detail is focused".
-                if list_focused {
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::REVERSED)
-                } else {
-                    Style::default().add_modifier(Modifier::REVERSED)
-                }
-            } else {
-                Style::default()
-            };
-            Line::from(Span::styled(text, style))
+            message_list_line(
+                entry,
+                content_width.max(1),
+                absolute == cursor,
+                list_focused,
+            )
         })
         .collect();
     f.render_widget(Paragraph::new(lines), content_area);
     render_scrollbar(f, list_area, viewport);
+}
+
+fn message_list_line(
+    entry: &ax_daemon::HistoryEntry,
+    width: usize,
+    selected: bool,
+    focused: bool,
+) -> Line<'static> {
+    let selected_style = selected.then(|| theme::selection(focused));
+    let time = format!(" {}", entry.timestamp.format("%H:%M:%S"));
+    let arrow = " → ";
+    let task = if entry.task_id.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", crate::tasks::short_task_id(&entry.task_id))
+    };
+    let suffix = ": ";
+    let prefix_width = time.chars().count()
+        + 1
+        + entry.from.chars().count()
+        + arrow.chars().count()
+        + entry.to.chars().count()
+        + task.chars().count()
+        + suffix.chars().count();
+    let prefix_text = format!("{time} {}{arrow}{}{task}{suffix}", entry.from, entry.to);
+    if prefix_width >= width {
+        let style = selected_style.unwrap_or_else(theme::timestamp);
+        return Line::from(Span::styled(
+            crate::tasks::truncate(&prefix_text, width),
+            style,
+        ));
+    }
+
+    let body = entry.content.replace(['\n', '\r'], " ");
+    let body = crate::tasks::truncate(&body, width - prefix_width);
+    let time_style = selected_style.unwrap_or_else(theme::timestamp);
+    let from_style = selected_style.unwrap_or_else(theme::sender);
+    let arrow_style = selected_style.unwrap_or_else(theme::muted);
+    let to_style = selected_style.unwrap_or_else(theme::assignee);
+    let task_style = selected_style.unwrap_or_else(theme::task_id);
+    let body_style = selected_style.unwrap_or_else(|| message_body_style(&entry.content));
+
+    let mut spans = vec![
+        Span::styled(time, time_style),
+        Span::styled(" ", arrow_style),
+        Span::styled(entry.from.clone(), from_style),
+        Span::styled(arrow, arrow_style),
+        Span::styled(entry.to.clone(), to_style),
+    ];
+    if !task.is_empty() {
+        spans.push(Span::styled(task, task_style));
+    }
+    spans.push(Span::styled(suffix, arrow_style));
+    spans.push(Span::styled(body, body_style));
+    Line::from(spans)
+}
+
+fn message_body_style(text: &str) -> Style {
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("error")
+        || lower.contains("failed")
+        || lower.contains("failure")
+        || lower.contains("panic")
+    {
+        theme::severity(Severity::Danger)
+    } else if lower.contains("blocked")
+        || lower.contains("blocker")
+        || lower.contains("warning")
+        || lower.contains("stale")
+        || lower.contains("wake")
+    {
+        theme::severity(Severity::Warning)
+    } else if lower.contains("completed")
+        || lower.contains("success")
+        || lower.contains("done")
+        || lower.contains("remaining owned dirty files=<none>")
+    {
+        theme::severity(Severity::Success)
+    } else {
+        Style::default()
+    }
 }
 
 fn draw_tokens(f: &mut Frame, area: Rect, app: &App) {
@@ -969,10 +1205,7 @@ fn draw_tokens(f: &mut Frame, area: Rect, app: &App) {
         } else {
             "  (no token usage recorded yet — run an agent to produce a transcript)"
         };
-        f.render_widget(
-            Paragraph::new(hint).style(Style::default().add_modifier(Modifier::DIM)),
-            inner,
-        );
+        f.render_widget(Paragraph::new(hint).style(theme::muted()), inner);
         return;
     }
 
@@ -988,7 +1221,7 @@ fn draw_tokens(f: &mut Frame, area: Rect, app: &App) {
     } else {
         " last 24h · ▁▂▃▄▅▆▇ = rolling usage per 5-min bucket"
     })
-    .style(Style::default().add_modifier(Modifier::DIM));
+    .style(theme::muted());
     let header_text = if compact {
         format!(" {:<24} {:<9} {:<12}  TREND", "WORKSPACE", "TOTAL", "LAST")
     } else {
@@ -997,7 +1230,7 @@ fn draw_tokens(f: &mut Frame, area: Rect, app: &App) {
             "WORKSPACE", "MODEL", "INPUT", "OUTPUT", "CACHE", "TURNS", "LAST"
         )
     };
-    let header = Paragraph::new(header_text).style(Style::default().add_modifier(Modifier::DIM));
+    let header = Paragraph::new(header_text).style(theme::muted());
 
     let header_rows = 2_u16;
     if inner.height <= header_rows {
@@ -1082,7 +1315,7 @@ fn draw_tokens(f: &mut Frame, area: Rect, app: &App) {
             .map(|ts| format_last_activity(now, ts))
             .unwrap_or_else(|| "-".to_owned());
         let style = if max_total > 0.0 && total >= max_total * 0.8 {
-            Style::default().fg(Color::Red)
+            theme::severity(Severity::Warning)
         } else {
             Style::default()
         };
@@ -1123,15 +1356,10 @@ fn draw_tokens(f: &mut Frame, area: Rect, app: &App) {
             .map(|b| b.totals.total().max(0) as u64)
             .collect();
         if series.iter().any(|v| *v > 0) {
-            let spark = Sparkline::default()
-                .data(&series)
-                .style(Style::default().fg(Color::Cyan));
+            let spark = Sparkline::default().data(&series).style(theme::accent());
             f.render_widget(spark, row_spark);
         } else {
-            f.render_widget(
-                Paragraph::new(" (flat)").style(Style::default().add_modifier(Modifier::DIM)),
-                row_spark,
-            );
+            f.render_widget(Paragraph::new(" (flat)").style(theme::muted()), row_spark);
         }
     }
 
@@ -1180,13 +1408,10 @@ fn draw_tasks_list_only(f: &mut Frame, area: Rect, app: &App) {
         let (text, style) = if let Some(error) = &app.task_snapshot_error {
             (
                 crate::tasks::truncate(&format!("  snapshot error: {error}"), area.width as usize),
-                Style::default().fg(Color::Red),
+                theme::severity(Severity::Danger),
             )
         } else {
-            (
-                "  (no tasks yet)".to_owned(),
-                Style::default().add_modifier(Modifier::DIM),
-            )
+            ("  (no tasks yet)".to_owned(), theme::muted())
         };
         let para = Paragraph::new(text).style(style);
         f.render_widget(para, area);
@@ -1231,33 +1456,18 @@ fn draw_tasks_list(f: &mut Frame, area: Rect, app: &App, filtered: &[ax_proto::t
     let summary_line = if let Some(error) = &app.task_snapshot_error {
         Line::from(Span::styled(
             crate::tasks::truncate(&format!("snapshot error: {error}"), inner_width.max(1)),
-            Style::default().fg(Color::Red),
+            theme::severity(Severity::Danger),
         ))
     } else {
-        Line::from(Span::styled(
-            crate::tasks::truncate(&format_task_summary_compact(&summary), inner_width.max(1)),
-            Style::default().add_modifier(Modifier::BOLD),
-        ))
+        format_task_summary_line(&summary, inner_width.max(1))
     };
     let header_lines = vec![
         Line::from(Span::styled(
             crate::tasks::truncate(&title_line, inner_width.max(1)),
-            Style::default()
-                .fg(if app.focus == Focus::List {
-                    Color::Cyan
-                } else {
-                    Color::White
-                })
-                .add_modifier(Modifier::BOLD),
+            theme::active_label(app.focus == Focus::List),
         )),
         summary_line,
-        Line::from(Span::styled(
-            crate::tasks::truncate(
-                "ID       STATE         OWNER        TITLE",
-                inner_width.max(1),
-            ),
-            Style::default().add_modifier(Modifier::DIM),
-        )),
+        task_header_line(inner_width.max(1)),
     ];
     let visible_headers: Vec<Line> = header_lines
         .into_iter()
@@ -1268,7 +1478,7 @@ fn draw_tasks_list(f: &mut Frame, area: Rect, app: &App, filtered: &[ax_proto::t
     if filtered.is_empty() {
         if body_area.height > 0 {
             let para = Paragraph::new("  (no tasks match current filter — press f to cycle)")
-                .style(Style::default().add_modifier(Modifier::DIM));
+                .style(theme::muted());
             f.render_widget(para, body_area);
         }
         return;
@@ -1284,15 +1494,12 @@ fn draw_tasks_list(f: &mut Frame, area: Rect, app: &App, filtered: &[ax_proto::t
     let mut lines: Vec<Line> = Vec::with_capacity(viewport.visible);
     for (idx, task) in filtered[viewport.start..viewport.end].iter().enumerate() {
         let absolute = viewport.start + idx;
-        let style = if absolute == app.task_cursor.index {
-            Style::default().add_modifier(Modifier::REVERSED)
-        } else {
-            Style::default()
-        };
-        lines.push(Line::from(Span::styled(
-            format_task_row(task, rows_width),
-            style,
-        )));
+        lines.push(format_task_row(
+            task,
+            rows_width,
+            absolute == app.task_cursor.index,
+            app.focus == Focus::List,
+        ));
     }
     let para = Paragraph::new(lines);
     f.render_widget(para, rows_area);
@@ -1309,8 +1516,7 @@ fn draw_task_detail(f: &mut Frame, area: Rect, app: &App, filtered: &[ax_proto::
     let inner_height = area.height as usize;
 
     let Some(task) = filtered.get(app.task_cursor.index) else {
-        let para = Paragraph::new("  (no task selected)")
-            .style(Style::default().add_modifier(Modifier::DIM));
+        let para = Paragraph::new("  (no task selected)").style(theme::muted());
         f.render_widget(para, area);
         return;
     };
@@ -1338,8 +1544,8 @@ fn draw_task_detail(f: &mut Frame, area: Rect, app: &App, filtered: &[ax_proto::
 /// have to flip tabs to peek at what the agent is doing.
 fn draw_agents_detail(f: &mut Frame, area: Rect, app: &App) {
     let Some(workspace) = app.selected_workspace().map(ToOwned::to_owned) else {
-        let para = Paragraph::new("  (select an agent with ↑/↓ to see its detail)")
-            .style(Style::default().add_modifier(Modifier::DIM));
+        let para =
+            Paragraph::new("  (select an agent with ↑/↓ to see its detail)").style(theme::muted());
         f.render_widget(para, area);
         return;
     };
@@ -1354,42 +1560,35 @@ fn draw_agents_detail(f: &mut Frame, area: Rect, app: &App) {
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(Line::from(vec![
-        Span::styled(
-            format!("workspace  "),
-            Style::default().add_modifier(Modifier::DIM),
-        ),
-        Span::styled(
-            workspace.clone(),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
+        Span::styled("workspace  ".to_owned(), theme::muted()),
+        Span::styled(workspace.clone(), theme::strong()),
     ]));
     let status_label = info
         .map(|w| agent_status_str(&w.status).to_owned())
         .unwrap_or_else(|| "offline".to_owned());
+    let status_style = info.map_or_else(theme::disabled, |w| theme::agent_status(&w.status));
     lines.push(Line::from(vec![
-        Span::styled(
-            "status     ".to_owned(),
-            Style::default().add_modifier(Modifier::DIM),
-        ),
-        Span::raw(status_label),
+        Span::styled("status     ".to_owned(), theme::muted()),
+        Span::styled(status_label, status_style),
     ]));
     if let Some(info) = info {
+        if let Some(git) = &info.git_status {
+            let git_state = normalized_git_state(git);
+            lines.push(Line::from(vec![
+                Span::styled("git        ".to_owned(), theme::muted()),
+                Span::styled(format_git_status_detail(git), theme::git_state(&git_state)),
+            ]));
+        }
         if !info.status_text.is_empty() {
             lines.push(Line::from(vec![
-                Span::styled(
-                    "note       ".to_owned(),
-                    Style::default().add_modifier(Modifier::DIM),
-                ),
+                Span::styled("note       ".to_owned(), theme::muted()),
                 Span::raw(info.status_text.clone()),
             ]));
         }
     }
     if let Some(s) = session {
         lines.push(Line::from(vec![
-            Span::styled(
-                "tmux       ".to_owned(),
-                Style::default().add_modifier(Modifier::DIM),
-            ),
+            Span::styled("tmux       ".to_owned(), theme::muted()),
             Span::raw(format!(
                 "{} · {} window{}",
                 s.name,
@@ -1401,10 +1600,7 @@ fn draw_agents_detail(f: &mut Frame, area: Rect, app: &App) {
     if let Some(t) = trend.filter(|t| t.available) {
         let total_all = (t.total.cache_read + t.total.cache_creation + t.total.input) as f64;
         lines.push(Line::from(vec![
-            Span::styled(
-                "tokens     ".to_owned(),
-                Style::default().add_modifier(Modifier::DIM),
-            ),
+            Span::styled("tokens     ".to_owned(), theme::muted()),
             Span::raw(format!(
                 "↑{} · ↓{} · Σ{}",
                 crate::tokens::format_token_count(t.total.input as f64),
@@ -1417,7 +1613,7 @@ fn draw_agents_detail(f: &mut Frame, area: Rect, app: &App) {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "recent tmux:".to_owned(),
-            Style::default().add_modifier(Modifier::DIM),
+            theme::muted(),
         )));
         let rows_budget = area
             .height
@@ -1441,8 +1637,7 @@ fn draw_agents_detail(f: &mut Frame, area: Rect, app: &App) {
 /// placeholder so the pane isn't suspiciously empty.
 fn draw_messages_detail(f: &mut Frame, area: Rect, app: &App) {
     if app.messages.is_empty() {
-        let para = Paragraph::new("  (no messages yet)")
-            .style(Style::default().add_modifier(Modifier::DIM));
+        let para = Paragraph::new("  (no messages yet)").style(theme::muted());
         f.render_widget(para, area);
         return;
     }
@@ -1456,33 +1651,30 @@ fn draw_messages_detail(f: &mut Frame, area: Rect, app: &App) {
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(Line::from(vec![
+        Span::styled("time   ".to_owned(), theme::muted()),
         Span::styled(
-            "time   ".to_owned(),
-            Style::default().add_modifier(Modifier::DIM),
+            entry.timestamp.format("%Y-%m-%d %H:%M:%S").to_string(),
+            theme::timestamp(),
         ),
-        Span::raw(entry.timestamp.format("%Y-%m-%d %H:%M:%S").to_string()),
     ]));
     lines.push(Line::from(vec![
-        Span::styled(
-            "from   ".to_owned(),
-            Style::default().add_modifier(Modifier::DIM),
-        ),
-        Span::raw(entry.from.clone()),
-        Span::raw("  →  "),
-        Span::raw(entry.to.clone()),
+        Span::styled("from   ".to_owned(), theme::muted()),
+        Span::styled(entry.from.clone(), theme::sender()),
+        Span::styled("  →  ", theme::muted()),
+        Span::styled(entry.to.clone(), theme::assignee()),
     ]));
     if !entry.task_id.is_empty() {
         lines.push(Line::from(vec![
-            Span::styled(
-                "task   ".to_owned(),
-                Style::default().add_modifier(Modifier::DIM),
-            ),
-            Span::raw(entry.task_id.clone()),
+            Span::styled("task   ".to_owned(), theme::muted()),
+            Span::styled(entry.task_id.clone(), theme::task_id()),
         ]));
     }
     lines.push(Line::from(""));
     for raw in entry.content.lines() {
-        lines.push(Line::from(Span::raw(raw.to_owned())));
+        lines.push(Line::from(Span::styled(
+            raw.to_owned(),
+            message_body_style(raw),
+        )));
     }
 
     apply_detail_scroll(f, area, app, lines);
@@ -1499,8 +1691,7 @@ fn draw_tokens_detail(f: &mut Frame, area: Rect, app: &App) {
         .filter(|t| t.available && t.total.total() > 0)
         .collect();
     if rows.is_empty() {
-        let para = Paragraph::new("  (no token activity yet)")
-            .style(Style::default().add_modifier(Modifier::DIM));
+        let para = Paragraph::new("  (no token activity yet)").style(theme::muted());
         f.render_widget(para, area);
         return;
     }
@@ -1510,68 +1701,41 @@ fn draw_tokens_detail(f: &mut Frame, area: Rect, app: &App) {
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(Line::from(vec![
-        Span::styled(
-            "workspace  ".to_owned(),
-            Style::default().add_modifier(Modifier::DIM),
-        ),
-        Span::styled(
-            t.workspace.clone(),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
+        Span::styled("workspace  ".to_owned(), theme::muted()),
+        Span::styled(t.workspace.clone(), theme::strong()),
     ]));
     if !t.latest_model.is_empty() {
         lines.push(Line::from(vec![
-            Span::styled(
-                "model      ".to_owned(),
-                Style::default().add_modifier(Modifier::DIM),
-            ),
+            Span::styled("model      ".to_owned(), theme::muted()),
             Span::raw(short_model(&t.latest_model)),
         ]));
     }
     lines.push(Line::from(vec![
-        Span::styled(
-            "input      ".to_owned(),
-            Style::default().add_modifier(Modifier::DIM),
-        ),
+        Span::styled("input      ".to_owned(), theme::muted()),
         Span::raw(crate::tokens::format_token_count(t.total.input as f64)),
     ]));
     lines.push(Line::from(vec![
-        Span::styled(
-            "output     ".to_owned(),
-            Style::default().add_modifier(Modifier::DIM),
-        ),
+        Span::styled("output     ".to_owned(), theme::muted()),
         Span::raw(crate::tokens::format_token_count(t.total.output as f64)),
     ]));
     lines.push(Line::from(vec![
-        Span::styled(
-            "cache read ".to_owned(),
-            Style::default().add_modifier(Modifier::DIM),
-        ),
+        Span::styled("cache read ".to_owned(), theme::muted()),
         Span::raw(crate::tokens::format_token_count(t.total.cache_read as f64)),
     ]));
     lines.push(Line::from(vec![
-        Span::styled(
-            "cache creat".to_owned(),
-            Style::default().add_modifier(Modifier::DIM),
-        ),
+        Span::styled("cache creat".to_owned(), theme::muted()),
         Span::raw(crate::tokens::format_token_count(
             t.total.cache_creation as f64,
         )),
     ]));
     if let Some(last) = t.last_activity {
         lines.push(Line::from(vec![
-            Span::styled(
-                "last active".to_owned(),
-                Style::default().add_modifier(Modifier::DIM),
-            ),
+            Span::styled("last active".to_owned(), theme::muted()),
             Span::raw(format_last_activity(chrono::Utc::now(), last)),
         ]));
     }
     lines.push(Line::from(vec![
-        Span::styled(
-            "buckets    ".to_owned(),
-            Style::default().add_modifier(Modifier::DIM),
-        ),
+        Span::styled("buckets    ".to_owned(), theme::muted()),
         Span::raw(format!(
             "{} × {}m window",
             t.buckets.len(),
@@ -1589,7 +1753,7 @@ fn draw_stream_detail(f: &mut Frame, area: Rect, app: &App) {
         let para = Paragraph::new(
             "  (no workspace streaming yet — open the agents tab, press Enter → Stream tmux)",
         )
-        .style(Style::default().add_modifier(Modifier::DIM));
+        .style(theme::muted());
         f.render_widget(para, area);
         return;
     };
@@ -1598,39 +1762,27 @@ fn draw_stream_detail(f: &mut Frame, area: Rect, app: &App) {
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(Line::from(vec![
-        Span::styled(
-            "mirroring  ".to_owned(),
-            Style::default().add_modifier(Modifier::DIM),
-        ),
-        Span::styled(
-            workspace.clone(),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
+        Span::styled("mirroring  ".to_owned(), theme::muted()),
+        Span::styled(workspace.clone(), theme::strong()),
     ]));
     if let Some(info) = info {
         lines.push(Line::from(vec![
+            Span::styled("status     ".to_owned(), theme::muted()),
             Span::styled(
-                "status     ".to_owned(),
-                Style::default().add_modifier(Modifier::DIM),
+                agent_status_str(&info.status).to_owned(),
+                theme::agent_status(&info.status),
             ),
-            Span::raw(agent_status_str(&info.status).to_owned()),
         ]));
         if !info.status_text.is_empty() {
             lines.push(Line::from(vec![
-                Span::styled(
-                    "note       ".to_owned(),
-                    Style::default().add_modifier(Modifier::DIM),
-                ),
+                Span::styled("note       ".to_owned(), theme::muted()),
                 Span::raw(info.status_text.clone()),
             ]));
         }
     }
     if let Some(s) = session {
         lines.push(Line::from(vec![
-            Span::styled(
-                "session    ".to_owned(),
-                Style::default().add_modifier(Modifier::DIM),
-            ),
+            Span::styled("session    ".to_owned(), theme::muted()),
             Span::raw(format!(
                 "{} · {} window{}",
                 s.name,
@@ -1736,16 +1888,139 @@ fn render_scrollbar(f: &mut Frame, area: Rect, viewport: Viewport) {
     f.render_stateful_widget(scrollbar, area, &mut state);
 }
 
-fn format_task_row(task: &ax_proto::types::Task, width: usize) -> String {
+fn format_task_row(
+    task: &ax_proto::types::Task,
+    width: usize,
+    selected: bool,
+    focused: bool,
+) -> Line<'static> {
     let id = crate::tasks::short_task_id(&task.id);
     let state = format_task_state(task);
-    let row = format!(
-        "{id:<8} {:<13} {:<12} {}",
-        crate::tasks::truncate(&state, 13),
-        crate::tasks::truncate(&task.assignee, 12),
-        task.title,
-    );
-    crate::tasks::truncate(&row, width.max(1))
+    let selected_style = selected.then(|| theme::selection(focused));
+    let id_style = selected_style.unwrap_or_else(theme::task_id);
+    let state_style = selected_style
+        .unwrap_or_else(|| theme::task_status(&task.status, crate::tasks::task_is_stale(task)));
+    let assignee_style = selected_style.unwrap_or_else(theme::assignee);
+    let title_style = selected_style.unwrap_or_else(|| theme::task_title(&task.status));
+
+    let fixed = 8 + 1 + 13 + 1 + 12 + 1;
+    if width <= fixed {
+        let row = format!(
+            "{id:<8} {:<13} {:<12} {}",
+            crate::tasks::truncate(&state, 13),
+            crate::tasks::truncate(&task.assignee, 12),
+            task.title,
+        );
+        let style = selected_style
+            .unwrap_or_else(|| theme::task_status(&task.status, crate::tasks::task_is_stale(task)));
+        return Line::from(Span::styled(
+            crate::tasks::truncate(&row, width.max(1)),
+            style,
+        ));
+    }
+
+    let mut spans = Vec::new();
+    let gap_style = selected_style.unwrap_or_else(Style::default);
+    push_padded_span(&mut spans, &id, 8, id_style);
+    push_gap_with(&mut spans, gap_style);
+    push_padded_span(&mut spans, &state, 13, state_style);
+    push_gap_with(&mut spans, gap_style);
+    push_padded_span(&mut spans, &task.assignee, 12, assignee_style);
+    push_gap_with(&mut spans, gap_style);
+    push_padded_span(&mut spans, &task.title, width - fixed, title_style);
+    Line::from(spans)
+}
+
+fn task_header_line(width: usize) -> Line<'static> {
+    let fixed = 8 + 1 + 13 + 1 + 12 + 1;
+    if width <= fixed {
+        return Line::from(Span::styled(
+            crate::tasks::truncate("ID       STATE         OWNER        TITLE", width),
+            theme::column_header(),
+        ));
+    }
+    let mut spans = Vec::new();
+    push_padded_span(&mut spans, "ID", 8, theme::column_header());
+    push_gap(&mut spans);
+    push_padded_span(&mut spans, "STATE", 13, theme::column_header());
+    push_gap(&mut spans);
+    push_padded_span(&mut spans, "OWNER", 12, theme::column_header());
+    push_gap(&mut spans);
+    push_padded_span(&mut spans, "TITLE", width - fixed, theme::column_header());
+    Line::from(spans)
+}
+
+fn format_task_summary_line(summary: &crate::tasks::TaskSummary, width: usize) -> Line<'static> {
+    let mut spans = Vec::new();
+    let parts = [
+        (format!("tot {}", summary.total), theme::strong()),
+        (
+            format!("run {}", summary.in_progress),
+            theme::task_status(&ax_proto::types::TaskStatus::InProgress, false),
+        ),
+        (
+            format!("pend {}", summary.pending),
+            theme::task_status(&ax_proto::types::TaskStatus::Pending, false),
+        ),
+        (
+            format!("stale {}", summary.stale),
+            theme::severity(Severity::Warning),
+        ),
+        (
+            format!("block {}", summary.blocked),
+            theme::task_status(&ax_proto::types::TaskStatus::Blocked, false),
+        ),
+        (
+            format!("fail {}", summary.failed),
+            theme::task_status(&ax_proto::types::TaskStatus::Failed, false),
+        ),
+        (
+            format!("done {}", summary.completed),
+            theme::task_status(&ax_proto::types::TaskStatus::Completed, false),
+        ),
+        (format!("msg {}", summary.queued_messages), theme::task_id()),
+        (
+            format!("div {}", summary.diverged),
+            theme::severity(Severity::Warning),
+        ),
+        (
+            format!("hi {}", summary.urgent_or_high),
+            theme::priority(Some(&ax_proto::types::TaskPriority::High)),
+        ),
+        (
+            format!("cancel {}", summary.cancelled),
+            theme::task_status(&ax_proto::types::TaskStatus::Cancelled, false),
+        ),
+    ];
+
+    let mut used = 0usize;
+    for (text, style) in parts {
+        let is_optional_zero = text.ends_with(" 0")
+            && !text.starts_with("tot ")
+            && !text.starts_with("run ")
+            && !text.starts_with("pend ")
+            && !text.starts_with("stale ");
+        if is_optional_zero {
+            continue;
+        }
+        let sep = if spans.is_empty() { "" } else { " · " };
+        let needed = sep.chars().count() + text.chars().count();
+        if used + needed > width {
+            break;
+        }
+        if !sep.is_empty() {
+            spans.push(Span::styled(sep.to_owned(), theme::muted()));
+        }
+        spans.push(Span::styled(text, style));
+        used += needed;
+    }
+    if spans.is_empty() {
+        return Line::from(Span::styled(
+            crate::tasks::truncate(&format_task_summary_compact(summary), width),
+            theme::strong(),
+        ));
+    }
+    Line::from(spans)
 }
 
 fn format_task_summary_compact(summary: &crate::tasks::TaskSummary) -> String {
@@ -1800,6 +2075,25 @@ fn format_task_state(task: &ax_proto::types::Task) -> String {
     }
 }
 
+fn push_detail_kv<'a>(
+    out: &mut Vec<Line<'a>>,
+    label: &'static str,
+    value: String,
+    value_style: Style,
+    width: usize,
+) {
+    let prefix = format!("{label}: ");
+    let prefix_width = prefix.chars().count();
+    let value_width = width.max(1).saturating_sub(prefix_width);
+    out.push(Line::from(vec![
+        Span::styled(prefix, theme::meta_label()),
+        Span::styled(
+            crate::tasks::truncate(&value, value_width.max(1)),
+            value_style,
+        ),
+    ]));
+}
+
 /// Render the right-hand detail pane. Line count caps to `height`
 /// so the paragraph widget never clips mid-line.
 fn build_detail_lines<'a>(
@@ -1814,95 +2108,160 @@ fn build_detail_lines<'a>(
 
     let stale_flag = if task_is_stale(task) { "yes" } else { "no" };
     let mut out: Vec<Line<'a>> = Vec::new();
-    let push = |v: &mut Vec<Line<'a>>, text: String, dim: bool| {
-        let line_style = if dim {
-            Style::default().add_modifier(Modifier::DIM)
-        } else {
-            Style::default()
-        };
-        v.push(Line::from(Span::styled(
-            truncate(&text, width.max(1)),
-            line_style,
-        )));
-    };
 
-    push(&mut out, task.title.clone(), false);
-    push(
+    out.push(Line::from(Span::styled(
+        truncate(&task.title, width.max(1)),
+        theme::task_title(&task.status).add_modifier(ratatui::style::Modifier::BOLD),
+    )));
+    out.push(Line::from(Span::styled(
+        truncate(
+            &format!("status: {}", task_status_label(task)),
+            width.max(1),
+        ),
+        theme::task_status(&task.status, task_is_stale(task)),
+    )));
+    push_detail_kv(
         &mut out,
-        format!("status: {}", task_status_label(task)),
-        true,
+        "version",
+        task.version.to_string(),
+        theme::muted(),
+        width,
     );
-    push(&mut out, format!("version: {}", task.version), true);
-    push(&mut out, format!("assignee: {}", task.assignee), true);
-    push(&mut out, format!("created_by: {}", task.created_by), true);
-    push(
+    push_detail_kv(
         &mut out,
-        format!("priority: {}", task_priority_label(task.priority.as_ref())),
-        true,
+        "assignee",
+        task.assignee.clone(),
+        theme::assignee(),
+        width,
     );
-    push(
+    push_detail_kv(
         &mut out,
-        format!("updated: {} ago", format_task_age(task)),
-        true,
+        "created_by",
+        task.created_by.clone(),
+        theme::sender(),
+        width,
     );
-    push(&mut out, format!("stale: {stale_flag}"), true);
+    push_detail_kv(
+        &mut out,
+        "priority",
+        task_priority_label(task.priority.as_ref()).to_owned(),
+        theme::priority(task.priority.as_ref()),
+        width,
+    );
+    push_detail_kv(
+        &mut out,
+        "updated",
+        format!("{} ago", format_task_age(task)),
+        theme::timestamp(),
+        width,
+    );
+    push_detail_kv(
+        &mut out,
+        "stale",
+        stale_flag.to_owned(),
+        if stale_flag == "yes" {
+            theme::severity(Severity::Warning)
+        } else {
+            theme::muted()
+        },
+        width,
+    );
     if task.stale_after_seconds > 0 {
-        push(
+        push_detail_kv(
             &mut out,
-            format!("stale_after: {}s", task.stale_after_seconds),
-            true,
+            "stale_after",
+            format!("{}s", task.stale_after_seconds),
+            theme::timestamp(),
+            width,
         );
     }
     if let Some(ts) = task.removed_at {
-        push(
+        push_detail_kv(
             &mut out,
-            format!("removed: {}", ts.format("%Y-%m-%d %H:%M:%S")),
-            true,
+            "removed",
+            ts.format("%Y-%m-%d %H:%M:%S").to_string(),
+            theme::timestamp(),
+            width,
         );
         if !task.removed_by.is_empty() {
-            push(&mut out, format!("removed_by: {}", task.removed_by), true);
+            push_detail_kv(
+                &mut out,
+                "removed_by",
+                task.removed_by.clone(),
+                theme::sender(),
+                width,
+            );
         }
     }
     if !task.description.is_empty() {
         out.push(Line::from(""));
-        push(&mut out, format!("desc: {}", task.description), false);
+        push_detail_kv(
+            &mut out,
+            "desc",
+            task.description.clone(),
+            Style::default(),
+            width,
+        );
     }
     if !task.result.is_empty() {
         out.push(Line::from(""));
-        push(&mut out, format!("result: {}", task.result), false);
+        push_detail_kv(
+            &mut out,
+            "result",
+            task.result.clone(),
+            theme::task_status(&task.status, false),
+            width,
+        );
     }
     if let Some(info) = &task.stale_info {
         out.push(Line::from(""));
-        push(&mut out, "stale_info:".to_owned(), false);
+        out.push(Line::from(Span::styled(
+            "stale_info:".to_owned(),
+            theme::severity_bold(Severity::Warning),
+        )));
         if !info.reason.is_empty() {
-            push(&mut out, format!("  reason: {}", info.reason), true);
+            push_detail_kv(
+                &mut out,
+                "  reason",
+                info.reason.clone(),
+                theme::severity(Severity::Warning),
+                width,
+            );
         }
         if !info.recommended_action.is_empty() {
-            push(
+            push_detail_kv(
                 &mut out,
-                format!("  action: {}", info.recommended_action),
-                true,
+                "  action",
+                info.recommended_action.clone(),
+                theme::info(),
+                width,
             );
         }
         if info.pending_messages > 0 {
-            push(
+            push_detail_kv(
                 &mut out,
-                format!("  pending_messages: {}", info.pending_messages),
-                true,
+                "  pending_messages",
+                info.pending_messages.to_string(),
+                theme::task_id(),
+                width,
             );
         }
         if info.wake_pending {
-            push(
+            push_detail_kv(
                 &mut out,
-                format!("  wake_attempts: {}", info.wake_attempts),
-                true,
+                "  wake_attempts",
+                info.wake_attempts.to_string(),
+                theme::severity(Severity::Warning),
+                width,
             );
         }
         if info.state_divergence {
-            push(
+            push_detail_kv(
                 &mut out,
-                format!("  divergence: {}", info.state_divergence_note),
-                true,
+                "  divergence",
+                info.state_divergence_note.clone(),
+                theme::severity(Severity::Warning),
+                width,
             );
         }
     }
@@ -1910,36 +2269,45 @@ fn build_detail_lines<'a>(
     let logs: Vec<_> = task.logs.iter().rev().take(3).collect();
     if !logs.is_empty() {
         out.push(Line::from(""));
-        push(&mut out, "recent logs:".to_owned(), false);
+        out.push(Line::from(Span::styled(
+            "recent logs:".to_owned(),
+            theme::strong(),
+        )));
         for log in logs.into_iter().rev() {
-            push(
-                &mut out,
-                format!(
-                    "  {} {}: {}",
-                    log.timestamp.format("%H:%M:%S"),
-                    log.workspace,
-                    log.message
+            out.push(Line::from(vec![
+                Span::styled(
+                    format!("  {} ", log.timestamp.format("%H:%M:%S")),
+                    theme::timestamp(),
                 ),
-                true,
-            );
+                Span::styled(log.workspace.clone(), theme::assignee()),
+                Span::styled(": ", theme::muted()),
+                Span::styled(
+                    crate::tasks::truncate(&log.message, width.saturating_sub(13).max(1)),
+                    message_body_style(&log.message),
+                ),
+            ]));
         }
     }
 
     let activity = crate::tasks::build_task_activity(task, history, 4);
     if !activity.is_empty() {
         out.push(Line::from(""));
-        push(&mut out, "activity:".to_owned(), false);
+        out.push(Line::from(Span::styled(
+            "activity:".to_owned(),
+            theme::strong(),
+        )));
         for entry in &activity {
-            push(
-                &mut out,
-                format!(
-                    "  {} {:<9} {}",
-                    entry.timestamp.format("%H:%M:%S"),
-                    entry.kind.label(),
-                    entry.summary,
+            out.push(Line::from(vec![
+                Span::styled(
+                    format!("  {} ", entry.timestamp.format("%H:%M:%S")),
+                    theme::timestamp(),
                 ),
-                true,
-            );
+                Span::styled(format!("{:<9} ", entry.kind.label()), theme::info()),
+                Span::styled(
+                    crate::tasks::truncate(&entry.summary, width.saturating_sub(20).max(1)),
+                    message_body_style(&entry.summary),
+                ),
+            ]));
         }
     }
 
@@ -1951,27 +2319,16 @@ fn build_detail_lines<'a>(
 
 fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     let (text, style) = if let Some(notice) = &app.quick_notice {
-        let s = if notice.error {
-            Style::default().fg(Color::Red)
-        } else {
-            Style::default().fg(Color::Green)
-        };
-        (notice.text.clone(), s)
+        (notice.text.clone(), theme::notice(notice.error))
     } else if let Some(msg) = &app.notice {
-        (
-            msg.text.clone(),
-            Style::default().add_modifier(Modifier::DIM),
-        )
+        (msg.text.clone(), theme::muted())
     } else if app.quick_actions.open {
         (
             "↑↓ action · enter run · esc close · q quit".to_owned(),
-            Style::default().add_modifier(Modifier::DIM),
+            theme::muted(),
         )
     } else {
-        (
-            focus_footer_hint(app),
-            Style::default().add_modifier(Modifier::DIM),
-        )
+        (focus_footer_hint(app), theme::muted())
     };
     let footer = Paragraph::new(text).style(style);
     f.render_widget(footer, area);
@@ -2018,7 +2375,8 @@ fn agent_status_str(status: &AgentStatus) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ax_proto::types::{Task, TaskStartMode, TaskStatus};
+    use ax_proto::types::{Task, TaskStartMode, TaskStatus, WorkspaceInfo};
+    use ratatui::style::Modifier;
 
     #[test]
     fn viewport_range_handles_empty_and_small_windows() {
@@ -2074,6 +2432,193 @@ mod tests {
         app.streamed_workspace = Some("alpha".into());
         let hint = focus_footer_hint(&app);
         assert!(hint.contains("Tab/1-5 view"));
+    }
+
+    #[test]
+    fn group_git_summary_rolls_up_identical_child_statuses() {
+        let git = WorkspaceGitStatus {
+            state: "dirty".into(),
+            modified: 2,
+            untracked: 1,
+            ..WorkspaceGitStatus::default()
+        };
+        let mut app = App::new();
+        app.agent_entries = vec![
+            AgentEntry {
+                label: "▾ ax".into(),
+                workspace: String::new(),
+                session_index: None,
+                level: 0,
+                group: true,
+                reconcile: String::new(),
+            },
+            AgentEntry {
+                label: "orchestrator".into(),
+                workspace: "orchestrator".into(),
+                session_index: Some(0),
+                level: 1,
+                group: false,
+                reconcile: String::new(),
+            },
+            AgentEntry {
+                label: "cli".into(),
+                workspace: "cli".into(),
+                session_index: Some(1),
+                level: 1,
+                group: false,
+                reconcile: String::new(),
+            },
+        ];
+        app.workspace_infos.insert(
+            "orchestrator".into(),
+            workspace_info("orchestrator", git.clone()),
+        );
+        app.workspace_infos
+            .insert("cli".into(), workspace_info("cli", git));
+
+        let (summary, _) = group_git_summary(0, &app, true).expect("group git summary");
+        assert_eq!(summary, "changed:2 ?1");
+    }
+
+    #[test]
+    fn group_git_summary_does_not_duplicate_nested_group_statuses() {
+        let git = WorkspaceGitStatus {
+            state: "dirty".into(),
+            modified: 2,
+            untracked: 1,
+            ..WorkspaceGitStatus::default()
+        };
+        let mut app = App::new();
+        app.agent_entries = vec![
+            AgentEntry {
+                label: "▾ ax".into(),
+                workspace: String::new(),
+                session_index: None,
+                level: 0,
+                group: true,
+                reconcile: String::new(),
+            },
+            AgentEntry {
+                label: "▾ child".into(),
+                workspace: String::new(),
+                session_index: None,
+                level: 1,
+                group: true,
+                reconcile: String::new(),
+            },
+            AgentEntry {
+                label: "worker".into(),
+                workspace: "child.worker".into(),
+                session_index: Some(0),
+                level: 2,
+                group: false,
+                reconcile: String::new(),
+            },
+        ];
+        app.workspace_infos
+            .insert("child.worker".into(), workspace_info("child.worker", git));
+
+        assert!(group_git_summary(0, &app, true).is_none());
+        let (summary, _) = group_git_summary(1, &app, true).expect("child group git summary");
+        assert_eq!(summary, "changed:2 ?1");
+    }
+
+    #[test]
+    fn task_row_uses_column_spans_for_scanability() {
+        let mut task = mock_task();
+        task.status = TaskStatus::Failed;
+        task.assignee = "ax.cli".into();
+
+        let line = format_task_row(&task, 80, false, true);
+        assert!(line.spans.len() >= 7);
+        assert_eq!(line.spans[0].content.trim(), "abc");
+        assert_eq!(line.spans[2].content.trim(), "failed");
+        assert_eq!(line.spans[4].content.trim(), "ax.cli");
+        assert!(line.spans[2].style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn message_line_splits_time_sender_task_and_body_spans() {
+        let entry = ax_daemon::HistoryEntry {
+            timestamp: chrono::DateTime::parse_from_rfc3339("2026-04-21T04:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            from: "ax.orchestrator".into(),
+            to: "ax.cli".into(),
+            content: "blocked on review".into(),
+            task_id: "abcdef123456".into(),
+        };
+
+        let line = message_list_line(&entry, 96, false, true);
+        let rendered: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(rendered.contains("04:00:00"));
+        assert!(rendered.contains("ax.orchestrator"));
+        assert!(rendered.contains("[abcdef12]"));
+        assert!(rendered.contains("blocked on review"));
+    }
+
+    #[test]
+    fn git_status_inline_includes_changed_and_untracked_counts() {
+        let git = WorkspaceGitStatus {
+            state: "dirty".into(),
+            modified: 2,
+            added: 1,
+            deleted: 0,
+            untracked: 3,
+            files_changed: 4,
+            insertions: 10,
+            deletions: 2,
+            message: String::new(),
+        };
+
+        assert_eq!(format_git_status_inline(&git, true), "changed:3 ?3");
+        assert_eq!(format_git_status_inline(&git, false), "~3 ?3");
+        assert_eq!(
+            format_git_status_detail(&git),
+            "dirty · modified 2 · added 1 · deleted 0 · untracked 3 · diff 4 files +10 -2"
+        );
+    }
+
+    #[test]
+    fn git_status_inline_handles_unavailable_states() {
+        let git = WorkspaceGitStatus {
+            state: "inaccessible".into(),
+            message: "permission denied".into(),
+            ..WorkspaceGitStatus::default()
+        };
+
+        assert_eq!(format_git_status_inline(&git, true), "no access");
+        assert_eq!(
+            format_git_status_detail(&git),
+            "inaccessible: permission denied"
+        );
+    }
+
+    #[test]
+    fn git_status_inline_marks_clean_repos() {
+        let git = WorkspaceGitStatus {
+            state: "clean".into(),
+            ..WorkspaceGitStatus::default()
+        };
+
+        assert_eq!(format_git_status_inline(&git, true), "clean");
+        assert_eq!(format_git_status_inline(&git, false), "clean");
+    }
+
+    fn workspace_info(name: &str, git_status: WorkspaceGitStatus) -> WorkspaceInfo {
+        WorkspaceInfo {
+            name: name.into(),
+            dir: String::new(),
+            description: String::new(),
+            status: AgentStatus::Online,
+            status_text: String::new(),
+            git_status: Some(git_status),
+            connected_at: None,
+        }
     }
 
     fn mock_task() -> Task {
