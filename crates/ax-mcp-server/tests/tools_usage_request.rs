@@ -162,6 +162,46 @@ async fn inspect_agent_rejects_unknown_name() {
 }
 
 #[tokio::test]
+async fn inspect_agent_fails_fast_when_target_not_registered() {
+    let tmp = TempDir::new().expect("tempdir");
+    let cfg = write_config(tmp.path());
+    let handle = spawn_daemon(tmp.path()).await;
+    // Intentionally do NOT connect `worker` — it is configured but
+    // absent from the registry.
+    let orch = connect_server(handle.socket_path(), "orch", &cfg).await;
+
+    let before = std::time::Instant::now();
+    let result = orch
+        .inspect_agent(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "name": "worker",
+                "question": "are you alive?",
+                "timeout": 60,
+            }))
+            .expect("decode"),
+        ))
+        .await
+        .expect("pre-check should surface a tool-error, not an RPC error");
+    let elapsed = before.elapsed();
+
+    assert_eq!(result.is_error, Some(true));
+    let body = call_text(&result);
+    assert!(
+        body.contains("not currently registered"),
+        "body: {body}"
+    );
+    // Pre-check must be effectively instantaneous — if we waited
+    // close to the 60s timeout, the pre-check wasn't consulted.
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "pre-check should short-circuit in well under 5s, took {elapsed:?}"
+    );
+
+    orch.daemon().close().await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn inspect_agent_timeout_returns_tool_error_result() {
     let tmp = TempDir::new().expect("tempdir");
     let cfg = write_config(tmp.path());

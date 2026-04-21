@@ -1986,6 +1986,30 @@ impl Server {
             .map_or_else(|| DEFAULT_INSPECT_QUESTION.to_owned(), ToOwned::to_owned);
         let timeout = req.timeout.unwrap_or(120).max(1);
 
+        // Fail-fast: peek at the registry before burning the full
+        // timeout. If the target is not currently registered there is
+        // no one on the other side to answer; queuing would still
+        // work but the caller almost always wants an immediate
+        // signal instead of a 120-second wait.
+        let active: ListWorkspacesResponse = self
+            .daemon
+            .request(MessageType::ListWorkspaces, &serde_json::json!({}))
+            .await
+            .map_err(tool_error)?;
+        let target_entry = active
+            .workspaces
+            .iter()
+            .find(|w| w.name == req.name)
+            .cloned();
+        if target_entry.is_none() {
+            return Ok(tool_execution_error(format!(
+                "Target agent {:?} is configured but is not currently registered with the daemon. \
+                 Start the workspace first (e.g. via start_agent) or call inspect_agent after the \
+                 peer has connected; no reply can arrive until then.",
+                req.name
+            )));
+        }
+
         let caller = self.daemon.workspace().to_owned();
         let full_message = format!(
             "{question}\n\n[ax] 작업 완료 후 반드시 send_message(to=\"{caller}\") 로 결과를 보내주세요."
