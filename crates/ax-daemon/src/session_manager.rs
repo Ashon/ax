@@ -4,15 +4,15 @@
 //! handlers and the wake-scheduler's missing-session ensurer hook
 //! share one entry point and one config-path validation path.
 //!
-//! `should_sleep` and `stop_idle` are wired into the
-//! `intervene_task` + `start_task` handler flow; a full idle-sleep
-//! loop will land once the tmux side grows `is_idle` observability.
+//! `should_sleep` and `stop_idle` are wired into the daemon's
+//! background idle-sleep loop and re-use the same lifecycle stop path
+//! as explicit operator actions.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use ax_proto::types::{LifecycleAction, LifecycleTarget, TaskStartMode, TaskStatus};
+use ax_proto::types::{AgentStatus, LifecycleAction, LifecycleTarget, TaskStartMode, TaskStatus};
 use ax_workspace::{
     dispatch_runnable_work, restart_named_target, start_named_target, stop_named_target,
     DispatchBackend, DispatchError, LifecycleError, TmuxBackend,
@@ -270,13 +270,16 @@ impl<B: TmuxBackend + DispatchBackend + Clone + Send + Sync + 'static> SessionMa
     /// Gate used by [`Self::stop_idle`]. Workspace is sleepable iff
     /// all of: it's a user-session (not an always-on orchestrator),
     /// has a `config_path`, has a positive idle timeout, hasn't been
-    /// active within that timeout, the tmux session exists and is
-    /// idle, the inbox is empty, there's no pending wake, and no
-    /// open assigned task remains.
+    /// active within that timeout, is still registered as online, the
+    /// tmux session exists and is idle, the inbox is empty, there's
+    /// no pending wake, and no open assigned task remains.
     #[must_use]
     pub fn should_sleep(&self, registered: &RegisteredWorkspace, now: DateTime<Utc>) -> bool {
         let name = registered.info.name.trim();
         if name.is_empty() || is_always_on_target(name) {
+            return false;
+        }
+        if registered.info.status != AgentStatus::Online {
             return false;
         }
         if registered.config_path.trim().is_empty() {
@@ -318,7 +321,7 @@ fn is_always_on_target(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ax_proto::types::{AgentStatus, WorkspaceInfo};
+    use ax_proto::types::{AgentStatus, TaskPriority, TaskWorkflowMode, WorkspaceInfo};
     use ax_tmux::SessionInfo;
     use std::collections::{BTreeMap, HashSet};
     use std::sync::Mutex as StdMutex;
@@ -419,6 +422,46 @@ mod tests {
         )
     }
 
+    fn create_open_task(mgr: &SessionManager<FakeTmux>, assignee: &str, status: TaskStatus) {
+        let task = mgr
+            .task_store
+            .create(crate::task_store::CreateTaskInput {
+                title: "open work".into(),
+                description: String::new(),
+                assignee: assignee.to_owned(),
+                created_by: "orchestrator".into(),
+                parent_task_id: String::new(),
+                start_mode: TaskStartMode::Default,
+                workflow_mode: TaskWorkflowMode::Parallel,
+                priority: TaskPriority::Normal,
+                stale_after_seconds: 0,
+                dispatch_body: String::new(),
+                dispatch_config_path: String::new(),
+            })
+            .expect("create task");
+        if status != TaskStatus::Pending {
+            mgr.task_store
+                .update(&task.id, Some(status), None, None, assignee)
+                .expect("update task");
+        }
+    }
+
+    fn manager_with_wake_scheduler(tmux: FakeTmux) -> SessionManager<FakeTmux> {
+        let registry = Registry::new();
+        let queue = MessageQueue::new();
+        let task_store = TaskStore::in_memory();
+        let scheduler = WakeScheduler::new(queue.clone(), RealWakeBackend);
+        SessionManager::new(
+            PathBuf::from("/tmp/daemon.sock"),
+            PathBuf::from("/tmp/ax-rs"),
+            registry,
+            queue,
+            task_store,
+            tmux,
+        )
+        .with_wake_scheduler(scheduler)
+    }
+
     #[test]
     fn should_sleep_requires_idle_session_with_empty_inbox() {
         let mgr = sample_manager(FakeTmux::with_session("worker", true));
@@ -444,6 +487,16 @@ mod tests {
     }
 
     #[test]
+    fn should_sleep_false_when_registry_status_is_not_online() {
+        let mgr = sample_manager(FakeTmux::with_session("worker", true));
+        let mut r = sample_registered("worker");
+        r.info.status = AgentStatus::Disconnected;
+        assert!(!mgr.should_sleep(&r, Utc::now()));
+        r.info.status = AgentStatus::Offline;
+        assert!(!mgr.should_sleep(&r, Utc::now()));
+    }
+
+    #[test]
     fn should_sleep_false_when_session_busy() {
         let mgr = sample_manager(FakeTmux::with_session("worker", false));
         assert!(!mgr.should_sleep(&sample_registered("worker"), Utc::now()));
@@ -462,6 +515,30 @@ mod tests {
             created_at: Utc::now(),
         });
         assert!(!mgr.should_sleep(&sample_registered("worker"), Utc::now()));
+    }
+
+    #[test]
+    fn should_sleep_false_when_wake_is_pending() {
+        let mgr = manager_with_wake_scheduler(FakeTmux::with_session("worker", true));
+        let scheduler = mgr
+            .wake_scheduler
+            .as_ref()
+            .expect("wake scheduler installed");
+        scheduler.schedule("worker", "orchestrator");
+        assert!(!mgr.should_sleep(&sample_registered("worker"), Utc::now()));
+    }
+
+    #[test]
+    fn should_sleep_false_when_open_task_is_assigned() {
+        for status in [
+            TaskStatus::Pending,
+            TaskStatus::InProgress,
+            TaskStatus::Blocked,
+        ] {
+            let mgr = sample_manager(FakeTmux::with_session("worker", true));
+            create_open_task(&mgr, "worker", status);
+            assert!(!mgr.should_sleep(&sample_registered("worker"), Utc::now()));
+        }
     }
 
     #[test]

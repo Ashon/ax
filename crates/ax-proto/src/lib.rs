@@ -21,8 +21,8 @@ pub use payloads::{
     AgentLifecyclePayload, BroadcastPayload, CancelTaskPayload, ControlLifecyclePayload,
     CreateTaskPayload, FinishTeamReconfigurePayload, GetSharedPayload, GetTaskPayload,
     GetTeamStatePayload, InterveneTaskPayload, ListTasksPayload, ReadMessagesPayload,
-    RecallMemoriesPayload, RegisterPayload, RememberMemoryPayload, RemoveTaskPayload,
-    SendMessagePayload, SetSharedPayload, SetStatusPayload, StartTaskPayload,
+    RecallMemoriesPayload, RecordMcpToolActivityPayload, RegisterPayload, RememberMemoryPayload,
+    RemoveTaskPayload, SendMessagePayload, SetSharedPayload, SetStatusPayload, StartTaskPayload,
     TeamReconfigurePayload, UpdateTaskPayload, UsageTrendWorkspace, UsageTrendsPayload,
 };
 pub use responses::{

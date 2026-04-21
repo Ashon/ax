@@ -21,6 +21,8 @@ pub enum MessageType {
     ListWorkspaces,
     #[serde(rename = "set_status")]
     SetStatus,
+    #[serde(rename = "record_mcp_tool_activity")]
+    RecordMcpToolActivity,
     #[serde(rename = "control_lifecycle")]
     ControlLifecycle,
     #[serde(rename = "agent_lifecycle")]

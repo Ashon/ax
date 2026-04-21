@@ -26,9 +26,9 @@ use ax_proto::payloads::{
     AgentLifecyclePayload, BroadcastPayload, CancelTaskPayload, CreateTaskPayload,
     FinishTeamReconfigurePayload, GetSharedPayload, GetTaskPayload, GetTeamStatePayload,
     InterveneTaskPayload, ListTasksPayload, ReadMessagesPayload, RecallMemoriesPayload,
-    RememberMemoryPayload, RemoveTaskPayload, SendMessagePayload, SetSharedPayload,
-    SetStatusPayload, StartTaskPayload, TeamReconfigurePayload, UpdateTaskPayload,
-    UsageTrendWorkspace, UsageTrendsPayload,
+    RecordMcpToolActivityPayload, RememberMemoryPayload, RemoveTaskPayload, SendMessagePayload,
+    SetSharedPayload, SetStatusPayload, StartTaskPayload, TeamReconfigurePayload,
+    UpdateTaskPayload, UsageTrendWorkspace, UsageTrendsPayload,
 };
 use ax_proto::responses::{
     AgentLifecycleResponse, BroadcastResponse, GetSharedResponse, InterveneTaskResponse,
@@ -38,8 +38,8 @@ use ax_proto::responses::{
     UsageTrendsResponse,
 };
 use ax_proto::types::{
-    AgentStatus, LifecycleAction, TaskStatus, TeamApplyTicket, TeamChangeOp, TeamChildSpec,
-    TeamEntryKind, TeamReconcileMode, TeamReconfigureAction, TeamReconfigureChange,
+    AgentStatus, LifecycleAction, McpToolActivityStatus, TaskStatus, TeamApplyTicket, TeamChangeOp,
+    TeamChildSpec, TeamEntryKind, TeamReconcileMode, TeamReconfigureAction, TeamReconfigureChange,
     TeamWorkspaceSpec, WorkspaceInfo,
 };
 use ax_proto::MessageType;
@@ -48,6 +48,8 @@ use ax_workspace::{build_desired_state_with_tree, ReconcileOptions, ReconcileRep
 use crate::daemon_client::{DaemonClient, DaemonClientError};
 use crate::memory_scope;
 use crate::telemetry::{TelemetryEvent, TelemetrySink};
+
+const MCP_ACTIVITY_FIELD_LIMIT: usize = 240;
 
 /// Entry point for `ax-cli mcp-server`: connect the daemon client,
 /// hand it to the MCP server, and run the stdio transport loop. The
@@ -115,6 +117,43 @@ impl Server {
             ok,
             duration_ms,
             err_kind: err_kind.to_owned(),
+        });
+    }
+
+    /// Best-effort user-visible activity emission through the daemon.
+    /// This deliberately records only sanitized routing/outcome data,
+    /// never raw tool arguments or result content.
+    pub(crate) fn record_mcp_tool_activity(
+        &self,
+        tool: &str,
+        ok: bool,
+        duration_ms: u64,
+        err_kind: &str,
+    ) {
+        let daemon = self.daemon.clone();
+        let payload = RecordMcpToolActivityPayload {
+            tool: sanitize_mcp_activity_field(tool),
+            task_id: String::new(),
+            status: if ok {
+                McpToolActivityStatus::Ok
+            } else {
+                McpToolActivityStatus::Error
+            },
+            error_kind: if ok {
+                String::new()
+            } else {
+                sanitize_mcp_activity_field(err_kind)
+            },
+            duration_ms: i64::try_from(duration_ms).unwrap_or(i64::MAX),
+        };
+
+        tokio::spawn(async move {
+            let result: Result<StatusResponse, DaemonClientError> = daemon
+                .request(MessageType::RecordMcpToolActivity, &payload)
+                .await;
+            if let Err(e) = result {
+                tracing::warn!(error = %e, "MCP tool activity write failed");
+            }
         });
     }
 
@@ -2016,11 +2055,12 @@ impl ServerHandler for Server {
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
         let result = self.tool_router.call(tcc).await;
         let duration_ms = started.elapsed().as_millis() as u64;
-        let (ok, err_kind) = match &result {
-            Ok(_) => (true, String::new()),
-            Err(e) => (false, e.message.to_string()),
+        let (ok, telemetry_err_kind, activity_err_kind) = match &result {
+            Ok(_) => (true, String::new(), String::new()),
+            Err(e) => (false, e.message.to_string(), mcp_error_kind(e)),
         };
-        self.record_tool_call(&tool_name, ok, duration_ms, &err_kind);
+        self.record_tool_call(&tool_name, ok, duration_ms, &telemetry_err_kind);
+        self.record_mcp_tool_activity(&tool_name, ok, duration_ms, &activity_err_kind);
         result
     }
 }
@@ -2028,6 +2068,29 @@ impl ServerHandler for Server {
 #[allow(clippy::needless_pass_by_value)]
 fn tool_error(err: DaemonClientError) -> rmcp::ErrorData {
     rmcp::ErrorData::internal_error(err.to_string(), None)
+}
+
+fn mcp_error_kind(err: &rmcp::ErrorData) -> String {
+    match err.code {
+        rmcp::model::ErrorCode::RESOURCE_NOT_FOUND => "RESOURCE_NOT_FOUND".to_owned(),
+        rmcp::model::ErrorCode::INVALID_REQUEST => "INVALID_REQUEST".to_owned(),
+        rmcp::model::ErrorCode::METHOD_NOT_FOUND => "METHOD_NOT_FOUND".to_owned(),
+        rmcp::model::ErrorCode::INVALID_PARAMS => "INVALID_PARAMS".to_owned(),
+        rmcp::model::ErrorCode::INTERNAL_ERROR => "INTERNAL_ERROR".to_owned(),
+        rmcp::model::ErrorCode::PARSE_ERROR => "PARSE_ERROR".to_owned(),
+        rmcp::model::ErrorCode::URL_ELICITATION_REQUIRED => "URL_ELICITATION_REQUIRED".to_owned(),
+        rmcp::model::ErrorCode(code) => format!("ERROR_CODE_{code}"),
+    }
+}
+
+fn sanitize_mcp_activity_field(raw: &str) -> String {
+    let compact = raw.trim().replace(['\n', '\r'], " ");
+    if compact.chars().count() <= MCP_ACTIVITY_FIELD_LIMIT {
+        return compact;
+    }
+    let mut out: String = compact.chars().take(MCP_ACTIVITY_FIELD_LIMIT).collect();
+    out.push_str("...");
+    out
 }
 
 /// Resolve the project root that a planner tool should scan.

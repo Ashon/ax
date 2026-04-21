@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::helpers::{is_false, is_zero_i64};
 use crate::types::{
-    LifecycleAction, TaskStatus, TeamReconcileMode, TeamReconfigureAction, TeamReconfigureChange,
+    LifecycleAction, McpToolActivityStatus, TaskStatus, TeamReconcileMode, TeamReconfigureAction,
+    TeamReconfigureChange,
 };
 
 /// Sent by a workspace process when it attaches to the daemon.
@@ -51,6 +52,18 @@ pub struct ReadMessagesPayload {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SetStatusPayload {
     pub status: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RecordMcpToolActivityPayload {
+    pub tool: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub task_id: String,
+    pub status: McpToolActivityStatus,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub error_kind: String,
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub duration_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

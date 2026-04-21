@@ -39,7 +39,7 @@ children:
 | `disable_root_orchestrator` | managed root orchestrator state 비활성화 |
 | `experimental_mcp_team_reconfigure` | team reconfigure 실험 기능 |
 | `codex_model_reasoning_effort` | Codex 기본 reasoning effort |
-| `idle_timeout_minutes` | workspace idle sleep 기준 시간 |
+| `idle_timeout_minutes` | workspace idle sleep 기준 시간. 런타임이 daemon 등록 payload에 양수 timeout을 전달한 workspace만 auto sleep 후보가 됩니다. |
 | `workspaces` | 현재 프로젝트의 workspace 정의 |
 | `children` | 자식 프로젝트 정의 |
 
@@ -62,7 +62,7 @@ children:
 
 - `ax up`은 artifact만 준비합니다.
 - 실제 workspace session은 메시지 또는 task dispatch 시 시작됩니다.
-- idle timeout이 지나고 queued work / open task가 없으면 workspace는 auto sleep 될 수 있습니다.
+- 양수 idle timeout이 지나고 queued work / wake retry / open assigned task / 최근 활동이 없으며 tmux session이 실제 idle이면 workspace는 auto sleep 될 수 있습니다.
 - orchestrator(`orchestrator`, `*.orchestrator`)는 always-on 대상이라 auto sleep 대상에서 제외됩니다.
 
 ## 계층적 프로젝트

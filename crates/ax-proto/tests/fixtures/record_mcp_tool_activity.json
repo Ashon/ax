@@ -1,0 +1,1 @@
+{"id":"mcp-act-1","type":"record_mcp_tool_activity","payload":{"tool":"send_message","task_id":"task-123","status":"error","error_kind":"invalid_params","duration_ms":34}}

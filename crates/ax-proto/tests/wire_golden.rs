@@ -15,9 +15,9 @@
 use ax_proto::{
     AgentLifecycleResponse, BroadcastPayload, BroadcastResponse, CancelTaskPayload,
     ControlLifecycleResponse, CreateTaskPayload, Envelope, ErrorPayload, InterveneTaskPayload,
-    ListWorkspacesResponse, MessageType, RegisterPayload, RememberMemoryPayload, ResponsePayload,
-    SendMessagePayload, SendMessageResponse, StartTaskResponse, StatusResponse, UpdateTaskPayload,
-    UsageTrendsResponse,
+    ListWorkspacesResponse, MessageType, RecordMcpToolActivityPayload, RegisterPayload,
+    RememberMemoryPayload, ResponsePayload, SendMessagePayload, SendMessageResponse,
+    StartTaskResponse, StatusResponse, UpdateTaskPayload, UsageTrendsResponse,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
@@ -80,6 +80,15 @@ fn send_message_with_config_path_matches_wire_golden() {
 fn send_message_without_config_path_omits_field() {
     assert_envelope_roundtrip("send_message_no_config", &MessageType::SendMessage);
     assert_payload_roundtrip::<SendMessagePayload>("send_message_no_config");
+}
+
+#[test]
+fn record_mcp_tool_activity_matches_wire_golden() {
+    assert_envelope_roundtrip(
+        "record_mcp_tool_activity",
+        &MessageType::RecordMcpToolActivity,
+    );
+    assert_payload_roundtrip::<RecordMcpToolActivityPayload>("record_mcp_tool_activity");
 }
 
 #[test]

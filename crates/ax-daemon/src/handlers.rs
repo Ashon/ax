@@ -12,8 +12,8 @@ use ax_proto::payloads::{
     AgentLifecyclePayload, BroadcastPayload, CancelTaskPayload, ControlLifecyclePayload,
     CreateTaskPayload, FinishTeamReconfigurePayload, GetSharedPayload, GetTaskPayload,
     GetTeamStatePayload, InterveneTaskPayload, ListTasksPayload, ReadMessagesPayload,
-    RecallMemoriesPayload, RegisterPayload, RememberMemoryPayload, RemoveTaskPayload,
-    SendMessagePayload, SetSharedPayload, SetStatusPayload, StartTaskPayload,
+    RecallMemoriesPayload, RecordMcpToolActivityPayload, RegisterPayload, RememberMemoryPayload,
+    RemoveTaskPayload, SendMessagePayload, SetSharedPayload, SetStatusPayload, StartTaskPayload,
     TeamReconfigurePayload, UpdateTaskPayload,
 };
 use ax_proto::responses::{
@@ -23,7 +23,7 @@ use ax_proto::responses::{
     StartTaskResponse, StatusResponse, TaskDispatch, TaskResponse, TeamApplyResponse,
     TeamPlanResponse, TeamStateResponse,
 };
-use ax_proto::types::{LifecycleAction, Message, Task};
+use ax_proto::types::{LifecycleAction, McpToolActivityStatus, Message, Task};
 use ax_proto::{Envelope, ErrorPayload, MessageType, ResponsePayload};
 use ax_workspace::{
     cleanup_orchestrator_state, dispatch_runnable_work, ensure_orchestrator,
@@ -33,7 +33,7 @@ use ax_workspace::{
 
 use crate::daemonutil::wake_prompt;
 use crate::git_status::GitStatusCache;
-use crate::history::History;
+use crate::history::{History, HistoryEntry};
 use crate::memory::{Query as MemoryQuery, Store as MemoryStore};
 use crate::queue::MessageQueue;
 use crate::registry::{Entry, RegisterOutcome, Registry};
@@ -46,6 +46,9 @@ use crate::task_helpers::{
 use crate::task_store::{CreateTaskInput, TaskStore};
 use crate::team_reconfigure::TeamController;
 use crate::wake_scheduler::{RealWakeBackend, WakeScheduler};
+
+const MCP_ACTIVITY_TARGET: &str = "ax.daemon";
+const MCP_ACTIVITY_FIELD_LIMIT: usize = 240;
 
 /// Context shared across handlers for one connected client.
 pub(crate) struct HandlerCtx {
@@ -136,6 +139,83 @@ pub(crate) fn handle_set_status(
             status: "ok".into(),
         },
     )
+}
+
+pub(crate) fn handle_record_mcp_tool_activity(
+    ctx: &HandlerCtx,
+    env: &Envelope,
+    workspace: &str,
+) -> Result<Envelope, HandlerError> {
+    let payload: RecordMcpToolActivityPayload = env
+        .decode_payload()
+        .map_err(|e| HandlerError::DecodePayload("record_mcp_tool_activity", e))?;
+    require_registered(workspace)?;
+
+    let tool = sanitize_mcp_activity_field(&payload.tool);
+    if tool.is_empty() {
+        return Err(HandlerError::Logic("tool is required".into()));
+    }
+    if payload.duration_ms < 0 {
+        return Err(HandlerError::Logic(
+            "duration_ms must be non-negative".into(),
+        ));
+    }
+
+    let now = Utc::now();
+    let entry = HistoryEntry {
+        timestamp: now,
+        from: workspace.to_owned(),
+        to: MCP_ACTIVITY_TARGET.to_owned(),
+        content: format_mcp_tool_activity(
+            &tool,
+            &payload.status,
+            payload.duration_ms,
+            &payload.error_kind,
+        ),
+        task_id: payload.task_id.trim().to_owned(),
+    };
+    ctx.history.append(&entry);
+    ctx.registry.touch(workspace, now);
+
+    response(
+        &env.id,
+        &StatusResponse {
+            status: "recorded".into(),
+        },
+    )
+}
+
+fn format_mcp_tool_activity(
+    tool: &str,
+    status: &McpToolActivityStatus,
+    duration_ms: i64,
+    error_kind: &str,
+) -> String {
+    let status_label = match status {
+        McpToolActivityStatus::Ok => "ok",
+        McpToolActivityStatus::Error => "error",
+    };
+    let mut parts = vec![format!("mcp tool {tool} {status_label}")];
+    if duration_ms > 0 {
+        parts.push(format!("duration_ms={duration_ms}"));
+    }
+    if matches!(status, McpToolActivityStatus::Error) {
+        let error_kind = sanitize_mcp_activity_field(error_kind);
+        if !error_kind.is_empty() {
+            parts.push(format!("error_kind={error_kind}"));
+        }
+    }
+    parts.join(" ")
+}
+
+fn sanitize_mcp_activity_field(raw: &str) -> String {
+    let compact = raw.trim().replace(['\n', '\r'], " ");
+    if compact.chars().count() <= MCP_ACTIVITY_FIELD_LIMIT {
+        return compact;
+    }
+    let mut out: String = compact.chars().take(MCP_ACTIVITY_FIELD_LIMIT).collect();
+    out.push_str("...");
+    out
 }
 
 pub(crate) fn handle_control_lifecycle(
@@ -308,9 +388,7 @@ pub(crate) fn handle_read_messages(
     };
     let from = (!payload.from.is_empty()).then_some(payload.from.as_str());
     let messages = ctx.queue.dequeue(workspace, limit, from);
-    if !messages.is_empty() {
-        ctx.registry.touch(workspace, Utc::now());
-    }
+    ctx.registry.touch(workspace, Utc::now());
     if ctx.queue.pending_count(workspace) == 0 {
         ctx.wake_scheduler.cancel(workspace);
     }
@@ -1272,6 +1350,10 @@ pub(crate) fn handle_envelope(
             handle_set_status(ctx, env, workspace)
                 .unwrap_or_else(|e| error_envelope(&env.id, e.to_string())),
         ),
+        MessageType::RecordMcpToolActivity => HandlerOutput::Response(
+            handle_record_mcp_tool_activity(ctx, env, workspace)
+                .unwrap_or_else(|e| error_envelope(&env.id, e.to_string())),
+        ),
         MessageType::ControlLifecycle => HandlerOutput::Response(
             handle_control_lifecycle(ctx, env, workspace)
                 .unwrap_or_else(|e| error_envelope(&env.id, e.to_string())),
@@ -1529,6 +1611,92 @@ mod tests {
             .expect("create child config dir");
         fs::write(&config_path, body).expect("write child config");
         config_path
+    }
+
+    #[test]
+    fn read_messages_refreshes_activity_even_when_inbox_empty() {
+        let root = TempDir::new().expect("tempdir");
+        let ctx = test_ctx(root.path().join("daemon.sock"));
+        ctx.registry.register("worker", "/tmp/worker", "", "");
+        let stale = Utc::now() - chrono::Duration::hours(1);
+        ctx.registry.touch("worker", stale);
+        let env = Envelope::new(
+            "read-empty",
+            MessageType::ReadMessages,
+            &ReadMessagesPayload {
+                limit: 10,
+                from: String::new(),
+            },
+        )
+        .expect("encode envelope");
+
+        let response = handle_read_messages(&ctx, &env, "worker").expect("read messages");
+
+        let decoded: ReadMessagesResponse = decode_response(&response);
+        assert!(decoded.messages.is_empty());
+        let snapshot = ctx.registry.snapshot();
+        let worker = snapshot
+            .iter()
+            .find(|entry| entry.info.name == "worker")
+            .expect("registered worker");
+        assert!(worker.last_active_at > stale);
+    }
+
+    #[test]
+    fn record_mcp_tool_activity_appends_success_and_error_history_records() {
+        let root = TempDir::new().expect("tempdir");
+        let ctx = test_ctx(root.path().join("daemon.sock"));
+        ctx.registry.register("worker", "/tmp/worker", "", "");
+
+        let ok_env = Envelope::new(
+            "mcp-activity-ok",
+            MessageType::RecordMcpToolActivity,
+            &RecordMcpToolActivityPayload {
+                tool: "list_tasks".into(),
+                task_id: "task-123".into(),
+                status: McpToolActivityStatus::Ok,
+                error_kind: String::new(),
+                duration_ms: 12,
+            },
+        )
+        .expect("encode ok activity");
+        let err_env = Envelope::new(
+            "mcp-activity-error",
+            MessageType::RecordMcpToolActivity,
+            &RecordMcpToolActivityPayload {
+                tool: "send_message\nretry".into(),
+                task_id: "task-123".into(),
+                status: McpToolActivityStatus::Error,
+                error_kind: "invalid_params\nbad input".into(),
+                duration_ms: 34,
+            },
+        )
+        .expect("encode error activity");
+
+        let ok_response =
+            handle_record_mcp_tool_activity(&ctx, &ok_env, "worker").expect("record ok activity");
+        let err_response = handle_record_mcp_tool_activity(&ctx, &err_env, "worker")
+            .expect("record error activity");
+
+        let ok_status: StatusResponse = decode_response(&ok_response);
+        let err_status: StatusResponse = decode_response(&err_response);
+        assert_eq!(ok_status.status, "recorded");
+        assert_eq!(err_status.status, "recorded");
+
+        let entries = ctx.history.recent(2);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].from, "worker");
+        assert_eq!(entries[0].to, MCP_ACTIVITY_TARGET);
+        assert_eq!(entries[0].task_id, "task-123");
+        assert_eq!(entries[0].content, "mcp tool list_tasks ok duration_ms=12");
+        assert_eq!(entries[1].from, "worker");
+        assert_eq!(entries[1].to, MCP_ACTIVITY_TARGET);
+        assert_eq!(entries[1].task_id, "task-123");
+        assert_eq!(
+            entries[1].content,
+            "mcp tool send_message retry error duration_ms=34 error_kind=invalid_params bad input"
+        );
+        assert!(!entries[1].content.contains('\n'));
     }
 
     #[test]

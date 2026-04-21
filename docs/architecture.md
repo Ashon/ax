@@ -97,11 +97,15 @@ daemon session manager가 주기적으로 확인합니다.
 workspace가 아래 조건을 모두 만족하면 sleep 후보가 됩니다.
 
 - orchestrator가 아님
+- daemon에 `online` 상태로 등록되어 있음
+- lifecycle config path와 양수 idle timeout이 있음
 - idle timeout 경과
+- 최근 status update / message read / task update 같은 daemon-visible 활동 없음
 - tmux session이 실제로 idle
+- tmux session 존재가 확인됨
 - queued message 없음
 - wake retry pending 없음
-- open assigned task 없음
+- pending / in_progress / blocked assigned task 없음
 
 ## root vs child orchestrator
 

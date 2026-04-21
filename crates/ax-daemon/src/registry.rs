@@ -196,13 +196,20 @@ impl Registry {
             .collect()
     }
 
-    /// Update the free-form status text for `workspace`. Returns false
-    /// if the workspace isn't registered.
+    /// Update the free-form status text for `workspace` and refresh
+    /// its activity watermark. A status heartbeat is a daemon-visible
+    /// sign of recent agent activity, so idle sleep must not race it.
     pub fn set_status_text(&self, workspace: &str, text: &str) -> bool {
+        self.set_status_text_at(workspace, text, Utc::now())
+    }
+
+    /// Test hook / deterministic variant of [`Self::set_status_text`].
+    pub fn set_status_text_at(&self, workspace: &str, text: &str, now: DateTime<Utc>) -> bool {
         let mut inner = self.inner.lock().expect("registry poisoned");
         match inner.entries.get_mut(workspace) {
             Some(entry) => {
                 text.clone_into(&mut entry.info.status_text);
+                entry.last_active_at = now;
                 true
             }
             None => false,
@@ -218,5 +225,34 @@ impl Registry {
         if let Some(entry) = inner.entries.get_mut(workspace) {
             entry.last_active_at = now;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn status_text_update_refreshes_activity_watermark() {
+        let registry = Registry::new();
+        let _ = registry.register_with_idle(
+            "worker",
+            "/tmp/worker",
+            "",
+            "/tmp/config.yaml",
+            Duration::from_secs(900),
+        );
+        let marker = Utc
+            .with_ymd_and_hms(2026, 4, 21, 5, 0, 0)
+            .single()
+            .expect("valid timestamp");
+
+        assert!(registry.set_status_text_at("worker", "busy", marker));
+        let snapshot = registry.snapshot();
+
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].info.status_text, "busy");
+        assert_eq!(snapshot[0].last_active_at, marker);
     }
 }
