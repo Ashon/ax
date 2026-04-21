@@ -399,6 +399,7 @@ mod tests {
                 description: String::new(),
                 status: AgentStatus::Online,
                 status_text: String::new(),
+                git_status: None,
                 connected_at: Some(Utc::now()),
             },
             config_path: "/tmp/config.yaml".into(),

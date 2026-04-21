@@ -7,6 +7,7 @@
 
 mod atomicfile;
 mod daemonutil;
+mod git_status;
 mod handlers;
 mod history;
 mod memory;

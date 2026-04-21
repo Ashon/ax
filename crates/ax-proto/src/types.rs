@@ -33,7 +33,31 @@ pub struct WorkspaceInfo {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub status_text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_status: Option<WorkspaceGitStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connected_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceGitStatus {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub state: String,
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub modified: i64,
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub added: i64,
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub deleted: i64,
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub untracked: i64,
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub files_changed: i64,
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub insertions: i64,
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub deletions: i64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

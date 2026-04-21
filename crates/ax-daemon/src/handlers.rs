@@ -32,6 +32,7 @@ use ax_workspace::{
 };
 
 use crate::daemonutil::wake_prompt;
+use crate::git_status::GitStatusCache;
 use crate::history::History;
 use crate::memory::{Query as MemoryQuery, Store as MemoryStore};
 use crate::queue::MessageQueue;
@@ -56,6 +57,7 @@ pub(crate) struct HandlerCtx {
     pub task_store: Arc<TaskStore>,
     pub team_controller: Arc<TeamController>,
     pub history: Arc<History>,
+    pub git_status: Arc<GitStatusCache>,
     pub wake_scheduler: Arc<WakeScheduler<RealWakeBackend>>,
     pub session_manager: Arc<SessionManager<RealTmux>>,
 }
@@ -111,12 +113,11 @@ pub(crate) fn handle_list_workspaces(
     ctx: &HandlerCtx,
     env: &Envelope,
 ) -> Result<Envelope, HandlerError> {
-    response(
-        &env.id,
-        &ListWorkspacesResponse {
-            workspaces: ctx.registry.list(),
-        },
-    )
+    let mut workspaces = ctx.registry.list();
+    for workspace in &mut workspaces {
+        workspace.git_status = Some(ctx.git_status.status_for(&workspace.dir));
+    }
+    response(&env.id, &ListWorkspacesResponse { workspaces })
 }
 
 pub(crate) fn handle_set_status(
@@ -1501,6 +1502,7 @@ mod tests {
             task_store,
             team_controller,
             history: History::in_memory(crate::history::DEFAULT_HISTORY_MAX_SIZE),
+            git_status: Arc::new(GitStatusCache::new()),
             wake_scheduler,
             session_manager,
         }

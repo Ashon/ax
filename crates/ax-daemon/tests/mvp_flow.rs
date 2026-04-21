@@ -4,6 +4,7 @@
 //! `broadcast` + `list_workspaces` + `set_status`.
 
 use std::path::Path;
+use std::process::Command;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -216,6 +217,64 @@ async fn list_workspaces_reflects_status_text_changes() {
         .find(|w| w.name == "alice")
         .expect("alice registered");
     assert_eq!(alice_info.status_text, "working on migration");
+
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn list_workspaces_includes_workspace_git_status() {
+    let tmp = tempfile::tempdir().unwrap();
+    let socket = tmp.path().join("ax.sock");
+    let repo = tmp.path().join("repo");
+    let non_git = tmp.path().join("non-git");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::create_dir_all(&non_git).unwrap();
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("init")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git init failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::write(repo.join("scratch.txt"), "work\n").unwrap();
+
+    let handle = Daemon::new(socket.clone()).bind().await.unwrap();
+    let mut alice = connect(&socket).await;
+    let mut bob = connect(&socket).await;
+    register(&mut alice, "alice", &repo.display().to_string()).await;
+    register(&mut bob, "bob", &non_git.display().to_string()).await;
+
+    let env = Envelope::new(
+        "req-list-git",
+        MessageType::ListWorkspaces,
+        &serde_json::json!({}),
+    )
+    .unwrap();
+    send_envelope(&mut alice.writer, &env).await;
+    let list: ListWorkspacesResponse =
+        decode_response(&await_response(&mut alice.reader, "req-list-git").await);
+
+    let alice_status = list
+        .workspaces
+        .iter()
+        .find(|w| w.name == "alice")
+        .and_then(|w| w.git_status.as_ref())
+        .expect("alice git status");
+    assert_eq!(alice_status.state, "dirty");
+    assert_eq!(alice_status.untracked, 1);
+
+    let bob_status = list
+        .workspaces
+        .iter()
+        .find(|w| w.name == "bob")
+        .and_then(|w| w.git_status.as_ref())
+        .expect("bob git status");
+    assert_eq!(bob_status.state, "non_git");
+    assert!(!bob_status.message.is_empty());
 
     handle.shutdown().await;
 }

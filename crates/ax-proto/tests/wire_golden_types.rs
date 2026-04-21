@@ -4,7 +4,7 @@
 //! decode → re-encode round-trip must reproduce every golden file
 //! byte-for-byte so the daemon's on-wire format stays stable.
 
-use ax_proto::types::{LifecycleTarget, Memory, Message, Task, WorkspaceInfo};
+use ax_proto::types::{LifecycleTarget, Memory, Message, Task, WorkspaceGitStatus, WorkspaceInfo};
 use serde::{de::DeserializeOwned, Serialize};
 
 const FIXTURE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
@@ -30,6 +30,11 @@ where
 #[test]
 fn workspace_info_matches_wire_golden() {
     assert_roundtrip::<WorkspaceInfo>("workspace_info");
+}
+
+#[test]
+fn workspace_git_status_matches_wire_golden() {
+    assert_roundtrip::<WorkspaceGitStatus>("workspace_git_status");
 }
 
 #[test]

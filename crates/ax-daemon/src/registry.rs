@@ -114,6 +114,7 @@ impl Registry {
             description: description.to_owned(),
             status: AgentStatus::Online,
             status_text,
+            git_status: None,
             connected_at: Some(now),
         };
         let entry = Entry {

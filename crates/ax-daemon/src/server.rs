@@ -14,6 +14,7 @@ use tokio::task::JoinHandle;
 
 use ax_proto::Envelope;
 
+use crate::git_status::GitStatusCache;
 use crate::handlers::{handle_envelope, HandlerCtx, HandlerOutput};
 use crate::history::{History, DEFAULT_HISTORY_MAX_SIZE};
 use crate::memory::Store as MemoryStore;
@@ -177,6 +178,7 @@ impl Daemon {
         let task_store = self.task_store.clone();
         let team_controller = self.team_controller.clone();
         let history = self.history.clone();
+        let git_status = Arc::new(GitStatusCache::new());
         let wake_scheduler = self.wake_scheduler.clone();
         let session_manager = self.session_manager.clone();
         let flusher = queue.spawn_flusher();
@@ -197,6 +199,7 @@ impl Daemon {
                 task_store,
                 team_controller,
                 history,
+                git_status,
                 wake_scheduler,
                 session_manager,
             },
@@ -437,6 +440,7 @@ struct AcceptLoopCtx {
     task_store: Arc<TaskStore>,
     team_controller: Arc<TeamController>,
     history: Arc<History>,
+    git_status: Arc<GitStatusCache>,
     wake_scheduler: Arc<WakeScheduler<RealWakeBackend>>,
     session_manager: Arc<SessionManager<RealTmux>>,
 }
@@ -461,6 +465,7 @@ async fn run_accept_loop(
                         task_store: loop_ctx.task_store.clone(),
                         team_controller: loop_ctx.team_controller.clone(),
                         history: loop_ctx.history.clone(),
+                        git_status: loop_ctx.git_status.clone(),
                         wake_scheduler: loop_ctx.wake_scheduler.clone(),
                         session_manager: loop_ctx.session_manager.clone(),
                     };

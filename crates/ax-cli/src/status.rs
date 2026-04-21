@@ -664,6 +664,7 @@ mod tests {
                 description: String::new(),
                 status: AgentStatus::Online,
                 status_text: "  long running job that is definitely more than limit".into(),
+                git_status: None,
                 connected_at: None,
             },
         );
