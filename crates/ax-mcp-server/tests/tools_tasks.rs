@@ -339,3 +339,69 @@ async fn start_task_queues_dispatch_message() {
     orch.daemon().close().await;
     handle.shutdown().await;
 }
+
+#[tokio::test]
+async fn intervene_task_rejects_unknown_action() {
+    let tmp = TempDir::new().expect("tempdir");
+    let handle = spawn_daemon(tmp.path()).await;
+    let orch = connect_server(handle.socket_path(), "orch").await;
+    let _worker = connect_server(handle.socket_path(), "worker").await;
+
+    let created = orch
+        .create_task(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "title": "stuck task",
+                "assignee": "worker",
+            }))
+            .expect("decode"),
+        ))
+        .await
+        .expect("create");
+    let task: serde_json::Value = call_json(&created);
+    let task_id = task["id"].as_str().expect("task id").to_owned();
+
+    let err = orch
+        .intervene_task(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "id": task_id,
+                "action": "nuke",
+            }))
+            .expect("decode"),
+        ))
+        .await
+        .expect_err("unknown action must be rejected");
+    assert!(
+        err.to_string().contains("invalid intervene_task action"),
+        "body: {err}"
+    );
+    assert!(err.to_string().contains("nuke"), "body: {err}");
+
+    orch.daemon().close().await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn intervene_task_errors_on_unknown_task_id() {
+    let tmp = TempDir::new().expect("tempdir");
+    let handle = spawn_daemon(tmp.path()).await;
+    let orch = connect_server(handle.socket_path(), "orch").await;
+
+    let err = orch
+        .intervene_task(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "id": "t-ghost-404",
+                "action": "retry",
+            }))
+            .expect("decode"),
+        ))
+        .await
+        .expect_err("unknown task id must be rejected");
+    assert!(
+        err.to_string().to_lowercase().contains("t-ghost-404")
+            || err.to_string().to_lowercase().contains("not found"),
+        "body: {err}"
+    );
+
+    orch.daemon().close().await;
+    handle.shutdown().await;
+}
