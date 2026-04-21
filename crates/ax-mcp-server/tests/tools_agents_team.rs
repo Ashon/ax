@@ -192,6 +192,55 @@ async fn interrupt_agent_reports_session_missing() {
 }
 
 #[tokio::test]
+async fn send_keys_rejects_empty_workspace() {
+    let tmp = TempDir::new().expect("tempdir");
+    let cfg = write_config(tmp.path());
+    let handle = spawn_daemon(tmp.path()).await;
+    let server = connect_server(handle.socket_path(), "orch", &cfg).await;
+
+    let err = server
+        .send_keys(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "workspace": "   ",
+                "keys": ["Enter"],
+            }))
+            .expect("decode"),
+        ))
+        .await
+        .expect_err("blank workspace rejects");
+    assert!(
+        err.to_string().to_lowercase().contains("workspace"),
+        "body: {err}"
+    );
+
+    server.daemon().close().await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn send_keys_errors_when_target_session_missing() {
+    let tmp = TempDir::new().expect("tempdir");
+    let cfg = write_config(tmp.path());
+    let handle = spawn_daemon(tmp.path()).await;
+    let server = connect_server(handle.socket_path(), "orch", &cfg).await;
+
+    let err = server
+        .send_keys(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "workspace": "alpha",
+                "keys": ["Enter"],
+            }))
+            .expect("decode"),
+        ))
+        .await
+        .expect_err("missing tmux session must surface to caller");
+    assert!(err.to_string().contains("not running"), "body: {err}");
+
+    server.daemon().close().await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn send_keys_rejects_empty_sequence() {
     let tmp = TempDir::new().expect("tempdir");
     let cfg = write_config(tmp.path());
