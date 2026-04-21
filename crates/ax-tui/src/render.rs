@@ -1182,6 +1182,10 @@ fn message_list_line(
     selected: bool,
     focused: bool,
 ) -> Line<'static> {
+    if let Some(activity) = mcp_tool_activity(entry) {
+        return mcp_tool_activity_line(entry, &activity, width, selected, focused);
+    }
+
     let selected_style = selected.then(|| theme::selection(focused));
     let time = format!(" {}", entry.timestamp.format("%H:%M:%S"));
     let arrow = " → ";
@@ -1228,6 +1232,83 @@ fn message_list_line(
     }
     spans.push(Span::styled(suffix, arrow_style));
     spans.push(Span::styled(body, body_style));
+    Line::from(spans)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct McpToolActivity {
+    tool: String,
+    status: String,
+    detail: String,
+}
+
+fn mcp_tool_activity(entry: &ax_daemon::HistoryEntry) -> Option<McpToolActivity> {
+    let body = entry.content.trim().replace(['\n', '\r'], " ");
+    let rest = body.strip_prefix("mcp tool ")?;
+    let parts: Vec<&str> = rest.split_whitespace().collect();
+    let status_idx = parts
+        .iter()
+        .position(|part| matches!(*part, "ok" | "error"))?;
+    if status_idx == 0 {
+        return None;
+    }
+    Some(McpToolActivity {
+        tool: parts[..status_idx].join(" "),
+        status: parts[status_idx].to_owned(),
+        detail: parts[status_idx + 1..].join(" "),
+    })
+}
+
+fn mcp_tool_activity_line(
+    entry: &ax_daemon::HistoryEntry,
+    activity: &McpToolActivity,
+    width: usize,
+    selected: bool,
+    focused: bool,
+) -> Line<'static> {
+    let selected_style = selected.then(|| theme::selection(focused));
+    let time = format!(" {}", entry.timestamp.format("%H:%M:%S"));
+    let task = if entry.task_id.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", crate::tasks::short_task_id(&entry.task_id))
+    };
+    let suffix = ": ";
+    let detail = if activity.detail.is_empty() {
+        activity.status.clone()
+    } else {
+        format!("{} {}", activity.status, activity.detail)
+    };
+    let prefix_text = format!("{time} {} used {}{task}{suffix}", entry.from, activity.tool);
+    let prefix_width = prefix_text.chars().count();
+    if prefix_width >= width {
+        let style = selected_style.unwrap_or_else(theme::timestamp);
+        return Line::from(Span::styled(
+            crate::tasks::truncate(&prefix_text, width),
+            style,
+        ));
+    }
+
+    let detail = crate::tasks::truncate(&detail, width - prefix_width);
+    let time_style = selected_style.unwrap_or_else(theme::timestamp);
+    let actor_style = selected_style.unwrap_or_else(theme::sender);
+    let verb_style = selected_style.unwrap_or_else(theme::muted);
+    let tool_style = selected_style.unwrap_or_else(theme::info);
+    let task_style = selected_style.unwrap_or_else(theme::task_id);
+    let body_style = selected_style.unwrap_or_else(|| message_body_style(&entry.content));
+
+    let mut spans = vec![
+        Span::styled(time, time_style),
+        Span::styled(" ", verb_style),
+        Span::styled(entry.from.clone(), actor_style),
+        Span::styled(" used ", verb_style),
+        Span::styled(activity.tool.clone(), tool_style),
+    ];
+    if !task.is_empty() {
+        spans.push(Span::styled(task, task_style));
+    }
+    spans.push(Span::styled(suffix, verb_style));
+    spans.push(Span::styled(detail, body_style));
     Line::from(spans)
 }
 
@@ -2061,6 +2142,10 @@ fn agent_mcp_activity_entries<'a>(
 }
 
 fn agent_activity_line(entry: &ax_daemon::HistoryEntry, width: usize) -> Line<'static> {
+    if let Some(activity) = mcp_tool_activity(entry) {
+        return mcp_tool_activity_line(entry, &activity, width, false, false);
+    }
+
     let task = if entry.task_id.is_empty() {
         String::new()
     } else {
@@ -3110,6 +3195,10 @@ mod tests {
         let activity = agent_mcp_activity_entries(&messages, "alpha");
         assert_eq!(activity.len(), 1);
         assert!(activity[0].content.contains("list_tasks"));
+
+        let rendered = span_text(&agent_activity_line(activity[0], 96).spans);
+        assert!(rendered.contains("alpha used list_tasks: ok duration_ms=3"));
+        assert!(!rendered.contains("alpha → ax.daemon"));
     }
 
     #[test]
@@ -3618,8 +3707,30 @@ mod tests {
             .collect();
         assert!(rendered.contains("04:00:00"));
         assert!(rendered.contains("ax.orchestrator"));
+        assert!(rendered.contains("ax.orchestrator → ax.cli"));
         assert!(rendered.contains("[abcdef12]"));
         assert!(rendered.contains("blocked on review"));
+    }
+
+    #[test]
+    fn message_line_labels_mcp_tool_activity_without_message_arrow() {
+        let entry = ax_daemon::HistoryEntry {
+            timestamp: chrono::DateTime::parse_from_rfc3339("2026-04-21T04:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            from: "alpha".into(),
+            to: "ax.daemon".into(),
+            content: "mcp tool start_task error duration_ms=34 error_kind=TOOL_ERROR".into(),
+            task_id: "abcdef123456".into(),
+        };
+
+        let line = message_list_line(&entry, 120, false, true);
+        let rendered = span_text(&line.spans);
+        assert!(rendered.contains("04:00:00"));
+        assert!(rendered.contains("alpha used start_task [abcdef12]: error duration_ms=34"));
+        assert!(rendered.contains("error_kind=TOOL_ERROR"));
+        assert!(!rendered.contains("alpha → ax.daemon"));
+        assert!(!rendered.contains("mcp tool"));
     }
 
     #[test]
