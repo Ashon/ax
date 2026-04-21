@@ -90,11 +90,7 @@ fn probe_local_usage_pipeline() {
             );
             for (idx, home) in codex_homes.iter().enumerate() {
                 let kind = if idx == 0 { "canonical" } else { "legacy" };
-                eprintln!(
-                    "     {kind}: {} (exists={})",
-                    home.display(),
-                    home.exists()
-                );
+                eprintln!("     {kind}: {} (exists={})", home.display(), home.exists());
             }
             WorkspaceBinding {
                 name: name.clone(),

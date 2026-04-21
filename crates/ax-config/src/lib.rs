@@ -23,9 +23,8 @@ pub use paths::{
 };
 pub use schema::{
     default_idle_timeout_minutes, Child, Config, LoadError, Workspace,
-    DEFAULT_CODEX_REASONING_EFFORT, DEFAULT_IDLE_TIMEOUT_MINUTES,
-    DEFAULT_MAX_CHILDREN_PER_NODE, DEFAULT_MAX_CONCURRENT_AGENTS,
-    DEFAULT_MAX_ORCHESTRATOR_DEPTH,
+    DEFAULT_CODEX_REASONING_EFFORT, DEFAULT_IDLE_TIMEOUT_MINUTES, DEFAULT_MAX_CHILDREN_PER_NODE,
+    DEFAULT_MAX_CONCURRENT_AGENTS, DEFAULT_MAX_ORCHESTRATOR_DEPTH,
 };
 pub use tree::{ProjectNode, TreeError, WorkspaceRef};
 pub use validate::{validate_tree, ValidationError};

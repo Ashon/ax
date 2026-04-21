@@ -52,8 +52,14 @@ async fn call_tool_via_mcp_transport_records_telemetry() {
     let server = Server::new(daemon).with_telemetry(TelemetrySink::new(&telemetry_path));
 
     let (server_transport, client_transport) = tokio::io::duplex(8 * 1024);
-    let server_handle =
-        tokio::spawn(async move { server.serve(server_transport).await.unwrap().waiting().await });
+    let server_handle = tokio::spawn(async move {
+        server
+            .serve(server_transport)
+            .await
+            .unwrap()
+            .waiting()
+            .await
+    });
     let client = StubClient
         .serve(client_transport)
         .await
@@ -94,8 +100,14 @@ async fn failing_tool_records_error_kind() {
     let server = Server::new(daemon).with_telemetry(TelemetrySink::new(&telemetry_path));
 
     let (server_transport, client_transport) = tokio::io::duplex(8 * 1024);
-    let server_handle =
-        tokio::spawn(async move { server.serve(server_transport).await.unwrap().waiting().await });
+    let server_handle = tokio::spawn(async move {
+        server
+            .serve(server_transport)
+            .await
+            .unwrap()
+            .waiting()
+            .await
+    });
     let client = StubClient
         .serve(client_transport)
         .await

@@ -514,10 +514,7 @@ mod tests {
 
     #[test]
     fn normalize_dir_for_key_collapses_parent_segments() {
-        assert_eq!(
-            normalize_dir_for_key("/a/b/../c"),
-            "/a/c"
-        );
+        assert_eq!(normalize_dir_for_key("/a/b/../c"), "/a/c");
     }
 
     #[test]

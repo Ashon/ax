@@ -12,12 +12,14 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use ax_e2e::harness::{
-    self, ax_down, ax_up, run_ax_init, start_daemon, start_root_orchestrator, HarnessError,
-    Sandbox,
+    self, ax_down, ax_up, run_ax_init, start_daemon, start_root_orchestrator, HarnessError, Sandbox,
 };
 
 fn scenario_dir(name: &str) -> PathBuf {
-    harness::repo_root().join("e2e").join("scenarios").join(name)
+    harness::repo_root()
+        .join("e2e")
+        .join("scenarios")
+        .join(name)
 }
 
 fn live_enabled() -> bool {
@@ -54,15 +56,11 @@ fn drive_full_lifecycle_scenario(
     let prompt = std::fs::read_to_string(scenario_dir(name).join("prompt.txt"))?;
     session.send_prompt(prompt.trim())?;
 
-    let result = harness::wait_for_settled_success(
-        timeout,
-        Duration::from_secs(10),
-        settle_window,
-        || {
+    let result =
+        harness::wait_for_settled_success(timeout, Duration::from_secs(10), settle_window, || {
             let validate_ok = harness::run_validate_script(&sandbox, "validate.sh").is_ok();
             validate_ok && session.looks_idle()
-        },
-    );
+        });
     if result.is_err() {
         dump_post_mortem(&sandbox, &session);
     }

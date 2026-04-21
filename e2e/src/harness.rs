@@ -60,9 +60,7 @@ pub enum HarnessError {
 pub fn repo_root() -> PathBuf {
     // `e2e/src/harness.rs` → repo root is 3 levels up.
     let this = Path::new(env!("CARGO_MANIFEST_DIR")); // e2e/
-    this.parent()
-        .expect("e2e has a parent")
-        .to_path_buf()
+    this.parent().expect("e2e has a parent").to_path_buf()
 }
 
 /// Isolated sandbox: one tempdir with every path the harness needs.
@@ -177,10 +175,7 @@ impl Sandbox {
             return Err(HarnessError::CommandFailed {
                 cmd: "cargo build --release --bin ax".to_owned(),
                 status: None,
-                combined: format!(
-                    "expected binary at {} did not appear",
-                    built.display()
-                ),
+                combined: format!("expected binary at {} did not appear", built.display()),
             });
         }
         // Copy so the sandbox owns the path we hand to child
@@ -245,7 +240,10 @@ pub fn start_daemon(sandbox: &Sandbox, ax: &Path) -> Result<DaemonProc, HarnessE
             after: Duration::from_secs(10),
         });
     }
-    Ok(DaemonProc { child, socket: sock })
+    Ok(DaemonProc {
+        child,
+        socket: sock,
+    })
 }
 
 /// Drive `ax init` blocking inside the sandbox. The subprocess runs
@@ -311,9 +309,7 @@ impl OrchestratorSession<'_> {
     pub fn capture_pane(&self) -> String {
         run_capture(
             "tmux",
-            ["capture-pane", "-t", &self.name, "-p"]
-                .iter()
-                .copied(),
+            ["capture-pane", "-t", &self.name, "-p"].iter().copied(),
             None,
             self.sandbox.env(),
         )
@@ -344,7 +340,9 @@ impl OrchestratorSession<'_> {
     pub fn send_prompt(&self, prompt: &str) -> Result<(), HarnessError> {
         run_logged(
             "tmux",
-            ["send-keys", "-t", &self.name, "-l", prompt].iter().copied(),
+            ["send-keys", "-t", &self.name, "-l", prompt]
+                .iter()
+                .copied(),
             None,
             self.sandbox.env(),
         )?;
@@ -357,11 +355,7 @@ impl OrchestratorSession<'_> {
         )?;
         // Best-effort confirm — keep pressing Enter until the prompt
         // text appears in codex's session history, or 20s elapses.
-        let history_dir = self
-            .sandbox
-            .home()
-            .join(".ax")
-            .join("codex");
+        let history_dir = self.sandbox.home().join(".ax").join("codex");
         let started = Instant::now();
         let deadline = started + Duration::from_secs(20);
         let mut last_enter = Instant::now();
@@ -445,10 +439,7 @@ pub fn run_validate_script(sandbox: &Sandbox, script_name: &str) -> Result<(), H
         return Err(HarnessError::CommandFailed {
             cmd: script_name.to_owned(),
             status: None,
-            combined: format!(
-                "validate script not found at {}",
-                script.display()
-            ),
+            combined: format!("validate script not found at {}", script.display()),
         });
     }
     run_logged(

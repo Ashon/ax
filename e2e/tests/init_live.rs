@@ -18,7 +18,10 @@ use std::path::PathBuf;
 use ax_e2e::harness::{self, run_ax_init, run_validate_script, HarnessError, Sandbox};
 
 fn scenario_dir(name: &str) -> PathBuf {
-    harness::repo_root().join("e2e").join("scenarios").join(name)
+    harness::repo_root()
+        .join("e2e")
+        .join("scenarios")
+        .join(name)
 }
 
 fn live_enabled() -> bool {
@@ -34,11 +37,7 @@ fn drive_init_scenario(name: &str, axis: &str) -> Result<(), HarnessError> {
     // --no-refresh skips the ancestor-orchestrator walk so we
     //   don't need a daemon; --codex pins runtime; --axis carries
     //   the flag we're validating.
-    run_ax_init(
-        &sandbox,
-        &ax,
-        &["--no-refresh", "--codex", "--axis", axis],
-    )?;
+    run_ax_init(&sandbox, &ax, &["--no-refresh", "--codex", "--axis", axis])?;
     run_validate_script(&sandbox, "validate.sh")
 }
 
@@ -46,11 +45,7 @@ fn drive_reconfigure_scenario(name: &str) -> Result<(), HarnessError> {
     let mut sandbox = Sandbox::new()?;
     let ax = sandbox.build_ax()?;
     sandbox.copy_scenario(&scenario_dir(name))?;
-    run_ax_init(
-        &sandbox,
-        &ax,
-        &["--reconfigure", "--no-refresh", "--codex"],
-    )?;
+    run_ax_init(&sandbox, &ax, &["--reconfigure", "--no-refresh", "--codex"])?;
     run_validate_script(&sandbox, "validate.sh")
 }
 

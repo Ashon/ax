@@ -177,7 +177,8 @@ fn handle_send_message_with_dispatch<B: DispatchBackend + Clone>(
         .map_err(|e| HandlerError::DecodePayload("send_message", e))?;
     require_registered(workspace)?;
 
-    let plan = crate::pure_decisions::plan_send_message(workspace, &payload.to, &payload.config_path);
+    let plan =
+        crate::pure_decisions::plan_send_message(workspace, &payload.to, &payload.config_path);
     let ensure_runnable_path = match &plan {
         crate::pure_decisions::SendMessagePlan::Reject { reason } => {
             return Err(HandlerError::Logic(reason.clone()));

@@ -104,13 +104,7 @@ impl Server {
     /// Write one tool-call record to the attached sink, if any. Kept
     /// crate-visible so the `call_tool` override and future harness
     /// tests can share the same recording path.
-    pub(crate) fn record_tool_call(
-        &self,
-        tool: &str,
-        ok: bool,
-        duration_ms: u64,
-        err_kind: &str,
-    ) {
+    pub(crate) fn record_tool_call(&self, tool: &str, ok: bool, duration_ms: u64, err_kind: &str) {
         let Some(sink) = self.telemetry.as_ref() else {
             return;
         };
@@ -2019,8 +2013,7 @@ impl ServerHandler for Server {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let tool_name = request.name.to_string();
         let started = Instant::now();
-        let tcc =
-            rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
         let result = self.tool_router.call(tcc).await;
         let duration_ms = started.elapsed().as_millis() as u64;
         let (ok, err_kind) = match &result {
@@ -2042,7 +2035,10 @@ fn tool_error(err: DaemonClientError) -> rmcp::ErrorData {
 /// 1. Explicit `project_dir` arg wins; must be absolute.
 /// 2. Otherwise, the parent of `config_hint` (expected `<root>/.ax/config.yaml`).
 /// 3. Otherwise, the MCP server's current working directory.
-fn resolve_project_dir(project_dir: Option<&str>, config_hint: Option<&Path>) -> Result<PathBuf, String> {
+fn resolve_project_dir(
+    project_dir: Option<&str>,
+    config_hint: Option<&Path>,
+) -> Result<PathBuf, String> {
     if let Some(raw) = project_dir {
         let p = PathBuf::from(raw);
         if !p.is_absolute() {
@@ -2056,8 +2052,7 @@ fn resolve_project_dir(project_dir: Option<&str>, config_hint: Option<&Path>) ->
             return Ok(parent.to_path_buf());
         }
     }
-    std::env::current_dir()
-        .map_err(|e| format!("resolve current_dir: {e}"))
+    std::env::current_dir().map_err(|e| format!("resolve current_dir: {e}"))
 }
 
 fn validate_lifecycle_options(

@@ -70,7 +70,10 @@ stale_removed:\n    dir: ./gone\n    description: removed long ago\n    runtime:
 async fn connect_pair(
     handle: &DaemonHandle,
     cfg_path: Option<&Path>,
-) -> (rmcp::service::RunningService<rmcp::RoleClient, StubClient>, tokio::task::JoinHandle<()>) {
+) -> (
+    rmcp::service::RunningService<rmcp::RoleClient, StubClient>,
+    tokio::task::JoinHandle<()>,
+) {
     let daemon = DaemonClient::builder(handle.socket_path(), "alpha")
         .dir("/tmp/alpha")
         .connect()

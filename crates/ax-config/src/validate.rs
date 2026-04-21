@@ -60,19 +60,11 @@ pub enum ValidationError {
     #[error(
         "ax orchestrator tree depth {depth} at {path} exceeds max_orchestrator_depth {cap}; raise the cap or split the project"
     )]
-    OrchestratorDepthExceeded {
-        depth: u32,
-        cap: u32,
-        path: String,
-    },
+    OrchestratorDepthExceeded { depth: u32, cap: u32, path: String },
     #[error(
         "ax config at {path} declares {count} children, exceeding max_children_per_node {cap}; raise the cap or collapse children"
     )]
-    ChildrenPerNodeExceeded {
-        count: u32,
-        cap: u32,
-        path: String,
-    },
+    ChildrenPerNodeExceeded { count: u32, cap: u32, path: String },
 }
 
 /// Run the validation pre-pass that `Config::load` / `Config::load_tree`

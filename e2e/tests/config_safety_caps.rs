@@ -62,7 +62,14 @@ fn depth_cap_fires_through_public_config_load() {
 
     let err = expect_validation(Config::load(default_config_path(root)).unwrap_err());
     assert!(
-        matches!(err, ValidationError::OrchestratorDepthExceeded { depth: 4, cap: 3, .. }),
+        matches!(
+            err,
+            ValidationError::OrchestratorDepthExceeded {
+                depth: 4,
+                cap: 3,
+                ..
+            }
+        ),
         "got {err:?}"
     );
 }
@@ -201,7 +208,14 @@ fn children_cap_fires_through_public_config_load() {
 
     let err = expect_validation(Config::load(default_config_path(root)).unwrap_err());
     assert!(
-        matches!(err, ValidationError::ChildrenPerNodeExceeded { count: 3, cap: 2, .. }),
+        matches!(
+            err,
+            ValidationError::ChildrenPerNodeExceeded {
+                count: 3,
+                cap: 2,
+                ..
+            }
+        ),
         "got {err:?}"
     );
 }

@@ -161,7 +161,10 @@ pub fn plan_team_reconfigure(
     let (current_axis, current_rationale) = parse_axis_headers(&cfg_body);
 
     let cfg: Config = serde_yml::from_str(&cfg_body).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, format!("parse config: {e}"))
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("parse config: {e}"),
+        )
     })?;
 
     let toplevel = scan_toplevel(project_dir)?;

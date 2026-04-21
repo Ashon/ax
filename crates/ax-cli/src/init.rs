@@ -137,10 +137,21 @@ pub(crate) fn run(opts: &InitOptions) -> Result<String, InitError> {
     Ok(String::new())
 }
 
-fn run_setup_agent(project_dir: &Path, config_path: &Path, runtime: &str, axis: Axis) -> Result<(), InitError> {
+fn run_setup_agent(
+    project_dir: &Path,
+    config_path: &Path,
+    runtime: &str,
+    axis: Axis,
+) -> Result<(), InitError> {
     let system_prompt = build_setup_system_prompt(config_path, runtime, axis);
     let user_prompt = "프로젝트 구조를 파악해서 워크스페이스 구성을 결정하고 config.yaml에 작성해주세요. 작성 완료 후 어떤 워크스페이스를 만들었는지 요약해주세요.";
-    invoke_setup_agent(project_dir, config_path, runtime, &system_prompt, user_prompt)
+    invoke_setup_agent(
+        project_dir,
+        config_path,
+        runtime,
+        &system_prompt,
+        user_prompt,
+    )
 }
 
 fn invoke_setup_agent(
@@ -856,7 +867,8 @@ mod tests {
 
     #[test]
     fn reconfigure_prompt_embeds_existing_yaml_and_preserves_axis() {
-        let yaml = "# axis: role\nproject: demo\nworkspaces:\n  api: {dir: ./api, runtime: codex}\n";
+        let yaml =
+            "# axis: role\nproject: demo\nworkspaces:\n  api: {dir: ./api, runtime: codex}\n";
         let p = build_reconfigure_system_prompt(
             Path::new("/tmp/.ax/config.yaml"),
             "codex",
@@ -873,12 +885,8 @@ mod tests {
     #[test]
     fn reconfigure_prompt_handles_missing_axis_comment_gracefully() {
         let yaml = "project: legacy\nworkspaces:\n  worker: {dir: .}\n";
-        let p = build_reconfigure_system_prompt(
-            Path::new("/tmp/.ax/config.yaml"),
-            "codex",
-            None,
-            yaml,
-        );
+        let p =
+            build_reconfigure_system_prompt(Path::new("/tmp/.ax/config.yaml"), "codex", None, yaml);
         assert!(p.contains("현재 `# axis:` 주석이 없습니다"));
         assert!(p.contains("추론한 축을 보존"));
     }

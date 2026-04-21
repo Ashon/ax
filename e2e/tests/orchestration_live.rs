@@ -20,7 +20,10 @@ use ax_e2e::harness::{
 };
 
 fn scenario_dir(name: &str) -> PathBuf {
-    harness::repo_root().join("e2e").join("scenarios").join(name)
+    harness::repo_root()
+        .join("e2e")
+        .join("scenarios")
+        .join(name)
 }
 
 fn live_enabled() -> bool {
@@ -49,15 +52,11 @@ fn drive_scenario(
     let prompt = std::fs::read_to_string(scenario_dir(name).join("prompt.txt"))?;
     session.send_prompt(prompt.trim())?;
 
-    let result = harness::wait_for_settled_success(
-        timeout,
-        Duration::from_secs(10),
-        settle_window,
-        || {
+    let result =
+        harness::wait_for_settled_success(timeout, Duration::from_secs(10), settle_window, || {
             let validate_ok = harness::run_validate_script(&sandbox, "validate.sh").is_ok();
             validate_ok && session.looks_idle()
-        },
-    );
+        });
     // Best-effort ax down so sessions don't leak between scenarios
     // inside a single test binary invocation.
     ax_down(&sandbox, &ax);

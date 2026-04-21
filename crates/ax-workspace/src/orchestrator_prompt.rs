@@ -111,7 +111,12 @@ struct PromptCtx<'a> {
 }
 
 impl<'a> PromptCtx<'a> {
-    fn new(node: &'a ProjectNode, prefix: &'a str, parent_name: &'a str, memories: &'a [Memory]) -> Self {
+    fn new(
+        node: &'a ProjectNode,
+        prefix: &'a str,
+        parent_name: &'a str,
+        memories: &'a [Memory],
+    ) -> Self {
         let self_name = orchestrator_name(prefix);
         let display_name = node.display_name();
         let is_root = parent_name.is_empty();
@@ -185,10 +190,7 @@ fn section_header(ctx: &PromptCtx, out: &mut String) {
             out.push_str(&format!("실제 프로젝트 이름: `{}`\n", ctx.node.name));
         }
         out.push_str(&format!("당신의 ID는 `{}`입니다.\n", ctx.self_name));
-        out.push_str(&format!(
-            "상위 오케스트레이터: `{}`\n\n",
-            ctx.parent_name
-        ));
+        out.push_str(&format!("상위 오케스트레이터: `{}`\n\n", ctx.parent_name));
     }
 }
 
