@@ -122,6 +122,92 @@ async fn workspace_status_and_list_tools_reflect_registry() {
 }
 
 #[tokio::test]
+async fn list_workspaces_reports_current_task_id_for_in_progress_assignee() {
+    let tmp = TempDir::new().expect("tempdir");
+    let handle = spawn_daemon(tmp.path()).await;
+    let orch = connect_server(handle.socket_path(), "orch").await;
+    let worker = connect_server(handle.socket_path(), "worker").await;
+
+    // Pending task: NOT exposed as current_task_id (only InProgress counts).
+    let pending = orch
+        .create_task(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "title": "still pending",
+                "assignee": "worker",
+            }))
+            .expect("decode"),
+        ))
+        .await
+        .expect("create");
+    let pending_body: serde_json::Value =
+        serde_json::from_str(&call_text(&pending)).expect("parse pending body");
+    let _pending_id = pending_body["id"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+
+    let listed = orch.list_workspaces().await.expect("list 1");
+    let body: serde_json::Value = serde_json::from_str(&call_text(&listed)).expect("decode");
+    let worker_entry = body["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["name"] == "worker")
+        .unwrap();
+    assert!(
+        worker_entry["current_task_id"].is_null(),
+        "pending task should not be exposed as current: {body}"
+    );
+
+    // Promote via update_task to InProgress → field populates.
+    let active = orch
+        .create_task(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "title": "running",
+                "assignee": "worker",
+            }))
+            .expect("decode"),
+        ))
+        .await
+        .expect("create2");
+    let active_body: serde_json::Value =
+        serde_json::from_str(&call_text(&active)).expect("parse active body");
+    let active_id = active_body["id"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+    worker
+        .update_task(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "id": active_id,
+                "status": "in_progress",
+                "log": "started",
+            }))
+            .expect("decode"),
+        ))
+        .await
+        .expect("promote");
+
+    let listed2 = orch.list_workspaces().await.expect("list 2");
+    let body2: serde_json::Value = serde_json::from_str(&call_text(&listed2)).expect("decode2");
+    let worker_entry = body2["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["name"] == "worker")
+        .unwrap();
+    assert_eq!(
+        worker_entry["current_task_id"].as_str(),
+        Some(active_id.as_str()),
+        "body: {body2}"
+    );
+
+    worker.daemon().close().await;
+    orch.daemon().close().await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn list_workspaces_reports_active_task_count_per_assignee() {
     let tmp = TempDir::new().expect("tempdir");
     let handle = spawn_daemon(tmp.path()).await;

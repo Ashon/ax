@@ -118,6 +118,7 @@ impl Registry {
             connected_at: Some(now),
             last_activity_at: Some(now),
             active_task_count: 0,
+            current_task_id: None,
         };
         let entry = Entry {
             id,

@@ -3792,6 +3792,7 @@ mod tests {
             connected_at: None,
             last_activity_at: None,
             active_task_count: 0,
+            current_task_id: None,
         }
     }
 

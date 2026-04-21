@@ -49,6 +49,14 @@ pub struct WorkspaceInfo {
     /// enumerating tasks per workspace.
     #[serde(default, skip_serializing_if = "is_zero_i64")]
     pub active_task_count: i64,
+    /// ID of the task this workspace is currently driving, when one
+    /// can be attributed — specifically the most recently updated
+    /// `InProgress` task assigned to this workspace. `None` means
+    /// the workspace is idle or has no attributable task in flight.
+    /// An orchestrator can join this with `get_task` for a cheap
+    /// "what is B working on right now" answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_task_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -120,6 +120,10 @@ pub(crate) fn handle_list_workspaces(
     for workspace in &mut workspaces {
         workspace.git_status = Some(ctx.git_status.status_for(&workspace.dir));
         workspace.active_task_count = ctx.task_store.count_open_for_assignee(&workspace.name);
+        workspace.current_task_id = ctx
+            .task_store
+            .most_recent_in_progress_for_assignee(&workspace.name)
+            .map(|task| task.id);
     }
     response(&env.id, &ListWorkspacesResponse { workspaces })
 }

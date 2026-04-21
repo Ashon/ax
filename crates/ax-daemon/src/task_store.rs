@@ -719,6 +719,23 @@ impl TaskStore {
             .unwrap_or(i64::MAX)
     }
 
+    /// Return the most recently-updated `InProgress` task currently
+    /// assigned to `assignee`. Consumed by `list_workspaces` to
+    /// surface "what is B working on" alongside the liveness signals.
+    /// Returns `None` when the assignee has no in-progress work.
+    pub fn most_recent_in_progress_for_assignee(&self, assignee: &str) -> Option<Task> {
+        let inner = self.inner.lock().expect("task store poisoned");
+        inner
+            .values()
+            .filter(|task| {
+                task.removed_at.is_none()
+                    && task.assignee == assignee
+                    && matches!(task.status, TaskStatus::InProgress)
+            })
+            .max_by_key(|task| task.updated_at)
+            .cloned()
+    }
+
     pub fn runnable_by_assignee(&self, assignee: &str, now: DateTime<Utc>) -> Vec<Task> {
         let inner = self.inner.lock().expect("task store poisoned");
         inner
@@ -1622,6 +1639,37 @@ mod tests {
         let silent = store
             .list_silent_in_progress(Utc::now(), chrono::Duration::seconds(60));
         assert!(silent.is_empty(), "selector should reject all fixtures");
+    }
+
+    #[test]
+    fn most_recent_in_progress_picks_latest_updated_at() {
+        let store = make_store();
+        // Empty case.
+        assert!(store
+            .most_recent_in_progress_for_assignee("worker")
+            .is_none());
+
+        // Seed two in-progress tasks; force the second to have a
+        // later updated_at via direct mutation (simulates a newer
+        // heartbeat).
+        let first = seed_in_progress_task(&store);
+        let second = seed_in_progress_task(&store);
+        {
+            let mut inner = store.inner.lock().expect("lock");
+            let f = inner.get_mut(&first.id).expect("first");
+            f.updated_at = Utc::now() - chrono::Duration::seconds(120);
+            let s = inner.get_mut(&second.id).expect("second");
+            s.updated_at = Utc::now();
+        }
+        let picked = store
+            .most_recent_in_progress_for_assignee("worker")
+            .expect("one must match");
+        assert_eq!(picked.id, second.id);
+
+        // Different assignee is never selected.
+        assert!(store
+            .most_recent_in_progress_for_assignee("nobody")
+            .is_none());
     }
 
     #[test]
