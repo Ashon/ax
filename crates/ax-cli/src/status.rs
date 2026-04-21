@@ -8,7 +8,9 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use ax_config::{Config, ProjectNode};
-use ax_proto::types::{AgentStatus, Task, TaskPriority, TaskStatus, WorkspaceInfo};
+use ax_proto::types::{
+    AgentStatus, Task, TaskPriority, TaskStatus, WorkspaceGitStatus, WorkspaceInfo,
+};
 use ax_tmux::SessionInfo;
 
 use crate::daemon_client::DaemonClient;
@@ -187,6 +189,63 @@ pub(crate) fn workspace_status_preview(
     truncate_str(trimmed, limit)
 }
 
+pub(crate) fn workspace_git_status_preview(
+    workspaces: &BTreeMap<String, WorkspaceInfo>,
+    name: &str,
+    limit: usize,
+) -> String {
+    let Some(git) = workspaces
+        .get(name)
+        .and_then(|info| info.git_status.as_ref())
+    else {
+        return String::new();
+    };
+    truncate_str(&format_git_status(git), limit)
+}
+
+fn format_git_status(git: &WorkspaceGitStatus) -> String {
+    let state = normalized_git_state(git);
+    match state.as_str() {
+        "non_git" => return git_message("git non-git", git),
+        "inaccessible" => return git_message("git inaccessible", git),
+        "error" => return git_message("git error", git),
+        _ => {}
+    }
+
+    let mut out = format!(
+        "git {state} M{} A{} D{} ?{}",
+        git.modified, git.added, git.deleted, git.untracked
+    );
+    if git.files_changed > 0 || git.insertions > 0 || git.deletions > 0 {
+        let _ = write!(
+            out,
+            " · {} files +{} -{}",
+            git.files_changed, git.insertions, git.deletions
+        );
+    }
+    out
+}
+
+fn normalized_git_state(git: &WorkspaceGitStatus) -> String {
+    let state = git.state.trim();
+    if !state.is_empty() {
+        return state.to_owned();
+    }
+    if git.modified + git.added + git.deleted + git.untracked > 0 {
+        "dirty".to_owned()
+    } else {
+        "clean".to_owned()
+    }
+}
+
+fn git_message(prefix: &str, git: &WorkspaceGitStatus) -> String {
+    if git.message.trim().is_empty() {
+        prefix.to_owned()
+    } else {
+        format!("{prefix}: {}", git.message.trim())
+    }
+}
+
 fn truncate_str(s: &str, n: usize) -> String {
     if n == 0 {
         return String::new();
@@ -343,6 +402,8 @@ pub(crate) fn render_status(
                         "detached"
                     };
                     let agent_status = workspace_agent_status(&workspace_infos, &session.workspace);
+                    let git_status =
+                        workspace_git_status_preview(&workspace_infos, &session.workspace, 72);
                     let status_text =
                         workspace_status_preview(&workspace_infos, &session.workspace, 72);
                     let _ = write!(
@@ -350,6 +411,9 @@ pub(crate) fn render_status(
                         "  ● {:<26} {:<10} {:<8} {}",
                         session.workspace, status, agent_status, session.name
                     );
+                    if !git_status.is_empty() {
+                        let _ = write!(out, " | {git_status}");
+                    }
                     if !status_text.is_empty() {
                         let _ = write!(out, " | {status_text}");
                     }
@@ -370,7 +434,7 @@ pub(crate) fn render_status(
     if !sessions.is_empty() {
         let _ = writeln!(
             out,
-            "{:<24} {:<10} {:<8} {:<18} STATUS TEXT",
+            "{:<24} {:<10} {:<8} {:<18} INFO",
             "NAME", "TMUX", "AGENT", "SESSION"
         );
         let _ = writeln!(
@@ -384,6 +448,14 @@ pub(crate) fn render_status(
             } else {
                 "detached"
             };
+            let git_status = workspace_git_status_preview(&workspace_infos, &session.workspace, 48);
+            let status_text = workspace_status_preview(&workspace_infos, &session.workspace, 64);
+            let info = match (git_status.is_empty(), status_text.is_empty()) {
+                (true, true) => String::new(),
+                (false, true) => git_status,
+                (true, false) => status_text,
+                (false, false) => format!("{git_status} | {status_text}"),
+            };
             let _ = writeln!(
                 out,
                 "{:<24} {:<10} {:<8} {:<18} {}",
@@ -391,7 +463,7 @@ pub(crate) fn render_status(
                 status,
                 workspace_agent_status(&workspace_infos, &session.workspace),
                 session.name,
-                workspace_status_preview(&workspace_infos, &session.workspace, 64),
+                info,
             );
         }
     }
@@ -456,6 +528,7 @@ fn print_leaf(
 ) {
     let indent = "  ".repeat(level);
     let agent_status = workspace_agent_status(workspaces, merged_name);
+    let git_status = workspace_git_status_preview(workspaces, merged_name, 72);
     let status_text = workspace_status_preview(workspaces, merged_name, 72);
     if let Some(session) = sessions.get(merged_name) {
         let status = if session.attached {
@@ -468,6 +541,9 @@ fn print_leaf(
             "{indent}● {:<26} {:<10} {:<8} {}",
             label, status, agent_status, session.name
         );
+        if !git_status.is_empty() {
+            let _ = write!(out, " | {git_status}");
+        }
         if !status_text.is_empty() {
             let _ = write!(out, " | {status_text}");
         }
@@ -478,6 +554,9 @@ fn print_leaf(
             out,
             "{indent}○ {label:<26} {tmux_status:<10} {agent_status:<8}"
         );
+        if !git_status.is_empty() {
+            let _ = write!(out, " {git_status}");
+        }
         if !status_text.is_empty() {
             let _ = write!(out, " {status_text}");
         }
@@ -671,5 +750,59 @@ mod tests {
         let preview = workspace_status_preview(&map, "alpha", 10);
         assert_eq!(preview, "long runni…");
         assert_eq!(workspace_status_preview(&map, "missing", 10), "");
+    }
+
+    #[test]
+    fn workspace_git_status_preview_includes_counts_and_diffstat() {
+        let mut map = BTreeMap::new();
+        map.insert(
+            "alpha".to_owned(),
+            WorkspaceInfo {
+                name: "alpha".into(),
+                dir: "/tmp".into(),
+                description: String::new(),
+                status: AgentStatus::Online,
+                status_text: String::new(),
+                git_status: Some(WorkspaceGitStatus {
+                    state: "dirty".into(),
+                    modified: 2,
+                    added: 1,
+                    deleted: 0,
+                    untracked: 3,
+                    files_changed: 4,
+                    insertions: 10,
+                    deletions: 2,
+                    message: String::new(),
+                }),
+                connected_at: None,
+            },
+        );
+
+        let preview = workspace_git_status_preview(&map, "alpha", 80);
+        assert_eq!(preview, "git dirty M2 A1 D0 ?3 · 4 files +10 -2");
+    }
+
+    #[test]
+    fn workspace_git_status_preview_handles_non_git_message() {
+        let mut map = BTreeMap::new();
+        map.insert(
+            "alpha".to_owned(),
+            WorkspaceInfo {
+                name: "alpha".into(),
+                dir: "/tmp".into(),
+                description: String::new(),
+                status: AgentStatus::Online,
+                status_text: String::new(),
+                git_status: Some(WorkspaceGitStatus {
+                    state: "non_git".into(),
+                    message: "no .git directory".into(),
+                    ..WorkspaceGitStatus::default()
+                }),
+                connected_at: None,
+            },
+        );
+
+        let preview = workspace_git_status_preview(&map, "alpha", 80);
+        assert_eq!(preview, "git non-git: no .git directory");
     }
 }
