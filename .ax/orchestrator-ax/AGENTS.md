@@ -28,6 +28,7 @@
 - 현재 기본 recall 범위: `global`, `project:ax`, `workspace:ax.orchestrator`
 
 현재 관련 durable memory:
+- [handoff] `project:ax` Agent detail panel tabbed UX review: Completed design/feasibility review for agent detail panel local tabs (task 3a829307, child 0088bcd0). Recommendation: implement lightweight local tabs inside existing Agents detail pane, not a new focus region or replacement for top-level StreamView tabs. MVP tabs: Overview, Tasks, Messages, Instructions, Activity. Data sources: Overview from current detail/App state; Instructions from App.tree/ProjectNode/WorkspaceRef config fields; Messages from app.messages/message_history.jsonl filtered by selected workspace; Tasks from app.tasks/tasks-state.json filtered by assignee/created_by/claimed_by/log workspace; Activity initially from message-history MCP rows. Non-MVP: structured MCP telemetry reader/query API from telemetry/tool_calls.jsonl, exact generated orchestrator prompt display, nested per-tab selection/actions, deeper token/model breakdown, cross-workspace task graph. UX: keep Tab/Shift-Tab and 1-5 for top-level tabs; use h/l or ,/. only in Agents detail focus for local detail tabs; [/] remains list/detail focus; preserve local tab on agent change but reset detail_scroll; clear empty states. Implementation owner/surface: ax.cli in crates/ax-tui/src/state.rs, input.rs, render.rs plus focused tests. Later collaboration: ax.workspace for exact generated instructions, ax.daemon/ax.mcp-server for structured MCP activity, ax.docs for keybinding docs. Validation was read-only; no code changes; git clean; residual scope=implementation deferred. (tags: agents-panel, completed, design, tui, ux)
 - [decision] `project:ax` idle-agent auto-stop safety policy: Task 1d904085 completed: ax idle-agent auto-stop is handled daemon-side as lifecycle source of truth, using existing background idle-sleep loop and SessionManager::stop_idle/stop cleanup path. No new wire/config schema; registrations with idle_timeout_seconds=0 or empty config_path remain disabled, positive timeout registrations require all safety gates. Safety gates include recent activity from read_messages/set_status, online status, tmux session_exists/is_idle, no pending messages, no pending wake retry, no pending/in_progress/blocked assigned tasks/claimed work. Changed files: crates/ax-daemon/src/{handlers.rs,registry.rs,session_manager.rs}, docs/architecture.md, docs/configuration.md. Validation passed: touched-file rustfmt check, targeted ax-daemon tests, full cargo test -p ax-daemon, git diff --check on touched files. Caveat: full cargo fmt -p ax-daemon -- --check still has unrelated existing diffs in task_helpers.rs/task_store.rs/tests/tasks_dispatch.rs. (tags: daemon, idle-stop, lifecycle)
 - [handoff] `workspace:ax.orchestrator` Completed ax-tui audit and docs update task: Parent task 73fea778-4c7e-4051-a76a-9f68bde84fa5 completed. ax.cli child c055d68e-4fc4-4a28-82ad-6566b37b074a reviewed crates/ax-tui changes, updated crates/ax-tui/COLOR_UX_PLAN.md, and fixed crates/ax-tui/src/render.rs group_git_summary to aggregate only direct child leaf rows with regression test group_git_summary_does_not_duplicate_nested_group_statuses. ax.docs child b2677e09-8f83-44e6-8919-cf8483c177b0 updated docs/operations.md and DEVELOPER_GUIDE.md; README/getting-started audited and left high-level. Validation passed: cargo fmt -p ax-tui; cargo test -p ax-tui --lib (91); NO_COLOR=1 cargo test -p ax-tui --lib (91); cargo build --release --bin ax; git diff --check -- crates/ax-tui; git diff --check -- DEVELOPER_GUIDE.md docs/operations.md; rg audits confirmed theme centralization and removed stream helpers absent. Report sent to orchestrator. remaining owned dirty files=crates/ax-tui/COLOR_UX_PLAN.md, crates/ax-tui/src/agents.rs, crates/ax-tui/src/lib.rs, crates/ax-tui/src/render.rs, crates/ax-tui/src/stream.rs, crates/ax-tui/src/theme.rs, DEVELOPER_GUIDE.md, docs/operations.md; residual scope=none. (tags: completed, docs, review, tui)
 - [handoff] `workspace:ax.orchestrator` Completed ax-tui stream dead_code warning task: Parent task 8e45cb11-007a-4fb3-a0fb-405a3e39dcd6 completed. ax.cli child task fe7c6f30-74f0-44d5-844c-87919491c11a removed release build dead_code warnings from crates/ax-tui/src/stream.rs by deleting obsolete format_message_line/display_width/truncate helpers and two dedicated tests. Cause: render.rs message-span rendering replaced old stream string formatter path, leaving helpers unused. Validation passed: cargo fmt -p ax-tui; cargo test -p ax-tui --lib (90); cargo build --release --bin ax with no ax-tui dead_code warnings; git diff --check -- crates/ax-tui; rg found no remaining helper refs in stream.rs/render.rs. Report sent to orchestrator. remaining owned dirty files=crates/ax-tui/COLOR_UX_PLAN.md, crates/ax-tui/src/agents.rs, crates/ax-tui/src/lib.rs, crates/ax-tui/src/render.rs, crates/ax-tui/src/stream.rs, crates/ax-tui/src/theme.rs; residual scope=none. (tags: completed, dead_code, stream, tui, warning)
@@ -248,7 +249,7 @@ ACK 루프를 방지하기 위해 다음을 반드시 지키세요:
 ### daemon (`ax.daemon`)
 - 데몬 코어, 메시지/작업 큐, registry, team state, wire 프로토콜(ax-proto)의 기본 owner입니다.
   crates/ax-daemon/ 크레이트를 담당합니다.
-  
+
   주요 파일:
   - src/server.rs — Unix 소켓 데몬, 커넥션 핸들링
   - src/handlers.rs — 메시지 라우팅
@@ -259,7 +260,7 @@ ACK 루프를 방지하기 위해 다음을 반드시 지키세요:
   - src/team_reconfigure.rs, team_state_store.rs — team reconfigure state/overlay
   - src/usage_trends.rs, wake_scheduler.rs — usage trend와 wake 스케줄러
   - src/socket_path.rs, daemonutil.rs — 소켓 경로와 데몬 유틸
-  
+
   원칙:
   - 메시지 프로토콜 변경 시 ax-proto의 타입과 handlers.rs를 함께 수정
   - 테스트: cargo test -p ax-daemon
@@ -291,7 +292,7 @@ ACK 루프를 방지하기 위해 다음을 반드시 지키세요:
 ### e2e (`ax.e2e`)
 - 크로스-크레이트 라이브 시나리오 기반 통합 테스트 harness의 기본 owner입니다.
   e2e/ 크레이트(ax-e2e)를 담당합니다.
-  
+
   주요 파일:
   - src/harness.rs — 통합 테스트 harness (임시 홈, 데몬 부트스트랩, 시나리오 실행)
   - tests/init_live.rs — ax init --axis 라이브 시나리오
@@ -299,12 +300,12 @@ ACK 루프를 방지하기 위해 다음을 반드시 지키세요:
   - tests/daemon_roundtrip.rs — daemon 왕복 테스트
   - tests/config_safety_caps.rs — config safety cap 테스트
   - scenarios/ — init_role_auto, init_domain_auto, init_domain_force_role, init_reconfigure_add, delegated_split, hello_workspace 등 시나리오 픽스처
-  
+
   원칙:
   - 시나리오 추가 시 scenarios/에 디렉토리 + tests/에 실행 케이스 추가
   - 크레이트 경계/프로토콜이 변할 때 harness 업데이트 필요 (daemon 부트스트랩, MCP 연결, tmux mock)
   - 테스트: cargo test -p ax-e2e
-  
+
   fallback ownership:
   - 라이브/통합 시나리오 harness, 시나리오 픽스처, e2e-only dev-dependency 관리는 ax.e2e가 owner입니다.
   - 각 subsystem 동작 변화가 시나리오 기대값을 깨는 경우 해당 subsystem owner와 공동 조율합니다.
@@ -312,19 +313,19 @@ ACK 루프를 방지하기 위해 다음을 반드시 지키세요:
 ### mcp (`ax.mcp`)
 - MCP stdio 서버, daemon client, MCP tool surface, planner의 기본 owner입니다.
   crates/ax-mcp-server/ 크레이트를 담당합니다.
-  
+
   주요 파일:
   - src/server.rs — MCP stdio 서버 진입점 및 도구 등록
   - src/daemon_client.rs — daemon 소켓 클라이언트
   - src/planner.rs — plan_initial_team / plan_team_reconfigure MCP 도구
   - src/memory_scope.rs — MCP 메모리 스코프
   - src/telemetry.rs — MCP 계측
-  
+
   원칙:
   - MCP 도구 추가/수정 시 server.rs 등록, daemon_client.rs 대응 메서드, daemon handler 계약을 함께 검토
   - 사용자 노출 MCP schema, 입력 validation, tool naming은 ax.mcp가 owner입니다.
   - 테스트: cargo test -p ax-mcp-server
-  
+
   fallback ownership:
   - MCP 도구 UX, tool naming, MCP client/server glue는 ax.mcp가 owner입니다.
   - wire 프로토콜(ax-proto) 또는 shared type 변경이 필요한 경우 ax.daemon과 공동 조율합니다.
@@ -332,19 +333,19 @@ ACK 루프를 방지하기 위해 다음을 반드시 지키세요:
 ### release (`ax.release`)
 - 빌드, 테스트, CI/CD, 릴리스와 Cargo/rust-toolchain 등 root build/meta 파일의 기본 owner입니다.
   빌드/릴리스 관련 파일을 담당합니다.
-  
+
   주요 파일:
   - Makefile — build, test, snapshot, release 타겟
   - Cargo.toml, Cargo.lock — Rust workspace 정의와 lockfile
   - rust-toolchain.toml — 툴체인 고정
   - rustfmt.toml — 포매터 설정
   - .github/workflows/*.yaml — GitHub Actions 워크플로우
-  
+
   원칙:
   - 릴리스는 git tag 기반: make release {patch|minor|major|dev}
   - 전체 테스트: cargo test --workspace
   - 의존성 추가 시 cargo update 후 Cargo.lock 커밋
-  
+
   fallback ownership:
   - Makefile, Cargo.toml, Cargo.lock, rust-toolchain.toml, rustfmt.toml, .gitignore, .github/workflows/*는 ax.release가 owner입니다.
   - 빌드/릴리스 관점의 repo root 메타 파일은 ax.release로 우선 라우팅합니다.
@@ -352,18 +353,18 @@ ACK 루프를 방지하기 위해 다음을 반드시 지키세요:
 ### runtime (`ax.runtime`)
 - 에이전트 런타임과 Codex/Claude 실행 어댑터(ax-agent 크레이트)의 기본 owner입니다.
   crates/ax-agent/ 크레이트를 담당합니다.
-  
+
   주요 파일:
   - src/runtime.rs — Runtime 트레이트 정의 및 팩토리
   - src/claude.rs, codex.rs — 런타임 구현체
   - src/launch.rs — 런타임 CLI 부트스트랩과 CODEX_HOME 격리
   - src/shell.rs — 런타임 명령 셸 quoting 유틸
-  
+
   원칙:
   - 새 런타임 추가 시 Runtime 트레이트 구현 + runtime.rs 팩토리에 등록
   - 런타임 CLI 인자 passthrough, resume/continue semantics, CODEX_HOME 격리는 ax.runtime가 owner입니다.
   - 테스트: cargo test -p ax-agent
-  
+
   fallback ownership:
   - 런타임별 CLI bootstrap, transcript/runtime 홈 디렉터리 격리, 런타임 공통 helper는 ax.runtime가 owner입니다.
   - ax-cli의 런타임 passthrough glue는 ax.runtime와 ax.cli가 공동 조율합니다.
@@ -371,7 +372,7 @@ ACK 루프를 방지하기 위해 다음을 반드시 지키세요:
 ### usage (`ax.usage`)
 - transcript 기반 usage 집계와 usage 설계 문서의 기본 owner입니다.
   crates/ax-usage/ 크레이트와 usage 설계 문서를 담당합니다.
-  
+
   주요 파일:
   - src/lib.rs — 공개 usage 타입(Tokens, WorkspaceUsage 등) 정의
   - src/parse.rs — Claude/Codex transcript JSONL 레코드 파싱
@@ -379,12 +380,12 @@ ACK 루프를 방지하기 위해 다음을 반드시 지키세요:
   - src/history.rs — transcript 히스토리 조회와 workspace/agent 귀속 로직
   - src/aggregator.rs — usage 집계와 snapshot 계산
   - docs/design/workspace-usage.md — usage 추적 설계 문서
-  
+
   원칙:
   - transcript 포맷 변경 시 parse.rs, codex.rs, history.rs를 함께 검토
   - usage 모델 변경 시 ax-daemon/ax-mcp-server 응답 타입과 ax-tui 소비 지점을 같이 확인
   - 테스트: cargo test -p ax-usage
-  
+
   fallback ownership:
   - docs/design/workspace-usage.md와 usage 관련 설계 문서는 ax.usage가 owner입니다.
   - usage 파이프라인을 소비하는 CLI/daemon 쪽 변경은 해당 owner와 공동 조율합니다.
@@ -392,7 +393,7 @@ ACK 루프를 방지하기 위해 다음을 반드시 지키세요:
 ### workspace (`ax.workspace`)
 - 워크스페이스 lifecycle, orchestrator artifacts, reconcile, tmux lifecycle glue의 기본 owner입니다.
   crates/ax-workspace/ 크레이트를 담당합니다.
-  
+
   주요 파일:
   - src/manager.rs — Manager: Create/Destroy/CreateAll/DestroyAll
   - src/lifecycle.rs, dispatch.rs — 워크스페이스 lifecycle과 메시지 dispatch
@@ -400,12 +401,12 @@ ACK 루프를 방지하기 위해 다음을 반드시 지키세요:
   - src/orchestrator.rs, orchestrator_prompt.rs — 오케스트레이터와 프롬프트 생성
   - src/instructions.rs — 에이전트 지시 파일(CLAUDE.md/AGENTS.md) 생성
   - src/mcp_config.rs — .mcp.json 생성
-  
+
   원칙:
   - workspace/orchestrator artifact 생성 경로, prompt 파일, reconcile state는 ax.workspace가 owner입니다.
   - 워크스페이스 생성/파괴와 세션 lifecycle에서 tmux 호출 경계는 ax.workspace가 우선 owner입니다.
   - 테스트: cargo test -p ax-workspace
-  
+
   fallback ownership:
   - crates/ax-tmux/는 cwd가 달라도 ax.workspace가 owner입니다.
   - tmux session naming, create/destroy/attach/interrupt 정책은 ax.workspace가 owner입니다.

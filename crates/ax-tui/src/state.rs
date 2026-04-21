@@ -63,6 +63,51 @@ pub(crate) enum RefreshNoticeSource {
     Usage,
 }
 
+/// Local tabs shown only inside the Agents detail pane. These are
+/// deliberately separate from the top-level `StreamView` tabs: they
+/// refine the selected agent detail without creating another focus
+/// region.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentDetailTab {
+    Overview,
+    Tasks,
+    Messages,
+    Instructions,
+    Activity,
+}
+
+impl AgentDetailTab {
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Overview,
+        Self::Tasks,
+        Self::Messages,
+        Self::Instructions,
+        Self::Activity,
+    ];
+
+    #[must_use]
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Overview => "overview",
+            Self::Tasks => "tasks",
+            Self::Messages => "messages",
+            Self::Instructions => "instructions",
+            Self::Activity => "activity",
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn short_label(self) -> &'static str {
+        match self {
+            Self::Overview => "ov",
+            Self::Tasks => "task",
+            Self::Messages => "msg",
+            Self::Instructions => "inst",
+            Self::Activity => "act",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RefreshNotice {
     pub(crate) source: RefreshNoticeSource,
@@ -137,6 +182,7 @@ pub(crate) struct App {
     /// Which panel currently owns the keyboard.
     pub(crate) focus: Focus,
     pub(crate) stream: StreamView,
+    pub(crate) agent_detail_tab: AgentDetailTab,
     pub(crate) messages: Vec<HistoryEntry>,
     pub(crate) messages_snapshot_error: Option<String>,
     /// Absolute row index of the currently-selected message (0 =
@@ -163,6 +209,10 @@ pub(crate) struct App {
     /// time; flipping tabs resets the offset so operators don't see
     /// a stray scroll carry over. Render clamps the ceiling.
     pub(crate) detail_scroll: PaneCursor,
+    /// Tail-follow mode for time-ordered local agent detail tabs
+    /// (Messages and Activity). `detail_scroll` remains a top-based
+    /// offset; render snaps it to the bottom while this flag is true.
+    pub(crate) agent_detail_follow_tail: bool,
     pub(crate) quick_actions: QuickActionState,
     pub(crate) quick_notice: Option<Notice>,
     /// Toggle for the `?` help overlay. When true, the TUI draws a
@@ -214,6 +264,7 @@ impl App {
             selected_entry: 0,
             focus: Focus::List,
             stream: StreamView::Agents,
+            agent_detail_tab: AgentDetailTab::Overview,
             messages: Vec::new(),
             messages_snapshot_error: None,
             messages_cursor: PaneCursor::default(),
@@ -224,6 +275,7 @@ impl App {
             task_filter: TaskFilterMode::Active,
             tokens_cursor: PaneCursor::default(),
             detail_scroll: PaneCursor::default(),
+            agent_detail_follow_tail: true,
             quick_actions: QuickActionState::default(),
             quick_notice: None,
             help_open: false,
@@ -258,6 +310,7 @@ impl App {
         let next = ((current as i32 + delta).rem_euclid(n)) as usize;
         self.stream = views[next];
         self.detail_scroll.reset();
+        self.agent_detail_follow_tail = true;
         self.clamp_task_selection();
     }
 
@@ -281,6 +334,7 @@ impl App {
         if let Some(view) = self.stream_tab_views().get(idx) {
             self.stream = *view;
             self.detail_scroll.reset();
+            self.agent_detail_follow_tail = true;
         }
     }
 
@@ -294,7 +348,20 @@ impl App {
             self.stream_cursor.reset();
             self.stream_follow_tail = true;
             self.detail_scroll.reset();
+            self.agent_detail_follow_tail = true;
         }
+    }
+
+    pub(crate) fn step_agent_detail_tab(&mut self, delta: i32) {
+        let current = AgentDetailTab::ALL
+            .iter()
+            .position(|tab| *tab == self.agent_detail_tab)
+            .unwrap_or(0);
+        let n = AgentDetailTab::ALL.len() as i32;
+        let next = (current as i32 + delta).rem_euclid(n) as usize;
+        self.agent_detail_tab = AgentDetailTab::ALL[next];
+        self.detail_scroll.reset();
+        self.agent_detail_follow_tail = true;
     }
 
     /// Filtered view of `self.tasks` using the current filter
@@ -447,23 +514,35 @@ impl App {
         let selectable = selectable_entry_positions(&self.agent_entries);
         if selectable.is_empty() {
             self.selected_entry = 0;
+            if previous_workspace.is_some() {
+                self.detail_scroll.reset();
+                self.agent_detail_follow_tail = true;
+            }
             return;
         }
-        if let Some(workspace) = previous_workspace {
-            if let Some(idx) = selectable
+        let next_entry = if let Some(workspace) = previous_workspace.as_deref() {
+            selectable
                 .iter()
                 .copied()
                 .find(|idx| self.agent_entries[*idx].workspace == workspace)
-            {
-                self.selected_entry = idx;
-                return;
+        } else {
+            None
+        }
+        .unwrap_or_else(|| {
+            selectable
+                .iter()
+                .copied()
+                .find(|idx| *idx >= previous_index)
+                .unwrap_or_else(|| *selectable.last().expect("selectable is non-empty"))
+        });
+        self.selected_entry = next_entry;
+
+        if let Some(workspace) = previous_workspace {
+            if self.selected_workspace() != Some(workspace.as_str()) {
+                self.detail_scroll.reset();
+                self.agent_detail_follow_tail = true;
             }
         }
-        self.selected_entry = selectable
-            .iter()
-            .copied()
-            .find(|idx| *idx >= previous_index)
-            .unwrap_or_else(|| *selectable.last().expect("selectable is non-empty"));
     }
 
     pub(crate) fn move_selection(&mut self, delta: i32) {
@@ -477,7 +556,12 @@ impl App {
             .position(|&idx| idx == self.selected_entry)
             .unwrap_or(0);
         let next = (current_pos as i32 + delta).clamp(0, selectable.len() as i32 - 1) as usize;
-        self.selected_entry = selectable[next];
+        let next_entry = selectable[next];
+        if next_entry != self.selected_entry {
+            self.selected_entry = next_entry;
+            self.detail_scroll.reset();
+            self.agent_detail_follow_tail = true;
+        }
     }
 
     pub(crate) fn set_refresh_notice(
@@ -560,6 +644,23 @@ mod tests {
         app.tasks.truncate(1);
         app.clamp_task_selection();
         assert_eq!(app.task_cursor.index, 0);
+    }
+
+    #[test]
+    fn agent_detail_tabs_cycle_and_reset_detail_scroll() {
+        let mut app = App::new();
+        app.detail_scroll.index = 8;
+
+        app.step_agent_detail_tab(1);
+        assert_eq!(app.agent_detail_tab, AgentDetailTab::Tasks);
+        assert_eq!(app.detail_scroll.index, 0);
+        assert!(app.agent_detail_follow_tail);
+
+        app.detail_scroll.index = 3;
+        app.step_agent_detail_tab(-1);
+        assert_eq!(app.agent_detail_tab, AgentDetailTab::Overview);
+        assert_eq!(app.detail_scroll.index, 0);
+        assert!(app.agent_detail_follow_tail);
     }
 
     fn mock_task() -> ax_proto::types::Task {
@@ -797,6 +898,23 @@ mod tests {
         assert_eq!(app.selected_entry, *selectable.last().unwrap());
         app.move_selection(-10);
         assert_eq!(app.selected_entry, selectable[0]);
+    }
+
+    #[test]
+    fn moving_agents_preserves_detail_tab_but_resets_scroll() {
+        let mut app = App::new();
+        app.sessions = vec![mock_session("a"), mock_session("b")];
+        app.rebuild_agents();
+        app.agent_detail_tab = AgentDetailTab::Messages;
+        app.agent_detail_follow_tail = false;
+        app.detail_scroll.index = 4;
+
+        app.move_selection(1);
+
+        assert_eq!(app.selected_workspace(), Some("b"));
+        assert_eq!(app.agent_detail_tab, AgentDetailTab::Messages);
+        assert_eq!(app.detail_scroll.index, 0);
+        assert!(app.agent_detail_follow_tail);
     }
 
     #[test]

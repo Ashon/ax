@@ -15,10 +15,11 @@ use ratatui::widgets::{
 use ratatui::Frame;
 use throbber_widgets_tui::{Throbber, WhichUse, BRAILLE_SIX};
 
+use ax_config::ProjectNode;
 use ax_proto::types::{AgentStatus, WorkspaceGitStatus};
 
 use crate::agents::AgentEntry;
-use crate::state::{App, Focus};
+use crate::state::{AgentDetailTab, App, Focus};
 use crate::stream::StreamView;
 use crate::theme::{self, Severity};
 
@@ -129,6 +130,7 @@ fn draw_help(f: &mut Frame, frame: Rect, app: &App) {
             "detail",
             vec![
                 ("↑ ↓ / j k", "scroll detail"),
+                ("h / l", "cycle agent detail tab (agents only)"),
                 ("PgUp / PgDn", "scroll by page"),
                 ("g", "top"),
                 ("Esc", "back to list"),
@@ -849,7 +851,7 @@ fn draw_detail_pane(f: &mut Frame, area: Rect, app: &mut App) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let title = detail_title(app);
+    let title = detail_title(app, area.width);
     let block = Block::default()
         .borders(Borders::TOP)
         .border_style(focus_border_style(app, Focus::Detail))
@@ -871,13 +873,14 @@ fn draw_detail_pane(f: &mut Frame, area: Rect, app: &mut App) {
 /// Compose the detail block's top-border title. Surfaces the selected
 /// row identifier so operators can see what the detail is describing
 /// even after scrolling the detail body.
-fn detail_title(app: &App) -> Line<'static> {
+fn detail_title(app: &App, width: u16) -> Line<'static> {
     let focus_detail = app.focus == Focus::Detail;
+    if app.stream == StreamView::Agents {
+        return agent_detail_title(app, focus_detail, width);
+    }
+
     let label = match app.stream {
-        StreamView::Agents => app
-            .selected_workspace()
-            .map(|w| format!(" detail · {w} "))
-            .unwrap_or_else(|| " detail ".to_owned()),
+        StreamView::Agents => unreachable!("handled above"),
         StreamView::Messages => " message detail ".to_owned(),
         StreamView::Tasks => " task detail ".to_owned(),
         StreamView::Tokens => " token detail ".to_owned(),
@@ -893,6 +896,47 @@ fn detail_title(app: &App) -> Line<'static> {
         theme::muted()
     };
     Line::from(Span::styled(label, style))
+}
+
+fn agent_detail_title(app: &App, focus_detail: bool, width: u16) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let Some(workspace) = app.selected_workspace() else {
+        let style = if focus_detail {
+            theme::accent_bold()
+        } else {
+            theme::muted()
+        };
+        return Line::from(Span::styled(" agent detail ".to_owned(), style));
+    };
+    let compact = width < 88;
+    let title_style = if focus_detail {
+        theme::accent_bold()
+    } else {
+        theme::muted()
+    };
+    spans.push(Span::styled(
+        format!(" agent detail · {workspace} · "),
+        title_style,
+    ));
+    for (idx, tab) in AgentDetailTab::ALL.iter().enumerate() {
+        if idx > 0 {
+            spans.push(Span::styled(" ".to_owned(), theme::muted()));
+        }
+        let label = if compact {
+            tab.short_label()
+        } else {
+            tab.label()
+        };
+        let style = if *tab == app.agent_detail_tab {
+            theme::active_label(focus_detail)
+        } else if focus_detail {
+            theme::disabled()
+        } else {
+            theme::muted()
+        };
+        spans.push(Span::styled(format!(" {label} "), style));
+    }
+    Line::from(spans)
 }
 
 /// Build the body block's title as a tab strip. The line sits on the
@@ -1538,30 +1582,40 @@ fn draw_task_detail(f: &mut Frame, area: Rect, app: &App, filtered: &[ax_proto::
     f.render_widget(Paragraph::new(window), area);
 }
 
-/// Agent detail pane. Reads off `selected_workspace` and assembles a
-/// compact dashboard: name/status, reconcile notes, live token
-/// readings, and the tail of the tmux capture so operators don't
-/// have to flip tabs to peek at what the agent is doing.
-fn draw_agents_detail(f: &mut Frame, area: Rect, app: &App) {
+/// Agent detail pane. The local tab strip in the title refines the
+/// selected workspace context without changing the top-level body tab.
+fn draw_agents_detail(f: &mut Frame, area: Rect, app: &mut App) {
     let Some(workspace) = app.selected_workspace().map(ToOwned::to_owned) else {
         let para =
             Paragraph::new("  (select an agent with ↑/↓ to see its detail)").style(theme::muted());
         f.render_widget(para, area);
         return;
     };
-    let info = app.workspace_infos.get(&workspace);
-    let trend = app.usage_trends.get(&workspace);
+    match app.agent_detail_tab {
+        AgentDetailTab::Overview => draw_agent_overview_detail(f, area, app, &workspace),
+        AgentDetailTab::Tasks => draw_agent_tasks_detail(f, area, app, &workspace),
+        AgentDetailTab::Messages => draw_agent_messages_detail(f, area, app, &workspace),
+        AgentDetailTab::Instructions => draw_agent_instructions_detail(f, area, app, &workspace),
+        AgentDetailTab::Activity => draw_agent_activity_detail(f, area, app, &workspace),
+    }
+}
+
+/// Overview preserves the pre-tab dashboard: name/status, reconcile
+/// notes, live token readings, and the tail of the tmux capture.
+fn draw_agent_overview_detail(f: &mut Frame, area: Rect, app: &App, workspace: &str) {
+    let info = app.workspace_infos.get(workspace);
+    let trend = app.usage_trends.get(workspace);
     let capture = app
         .captures
         .entries
-        .get(&workspace)
+        .get(workspace)
         .map_or("", |e| e.content.as_str());
     let session = app.sessions.iter().find(|s| s.workspace == workspace);
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(Line::from(vec![
         Span::styled("workspace  ".to_owned(), theme::muted()),
-        Span::styled(workspace.clone(), theme::strong()),
+        Span::styled(workspace.to_owned(), theme::strong()),
     ]));
     let status_label = info
         .map(|w| agent_status_str(&w.status).to_owned())
@@ -1629,6 +1683,398 @@ fn draw_agents_detail(f: &mut Frame, area: Rect, app: &App) {
     }
 
     apply_detail_scroll(f, area, app, lines);
+}
+
+fn draw_agent_tasks_detail(f: &mut Frame, area: Rect, app: &App, workspace: &str) {
+    let related = agent_related_tasks(&app.tasks, workspace);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        format!("agent tasks · {workspace}"),
+        theme::strong(),
+    )));
+    push_detail_kv(
+        &mut lines,
+        "policy",
+        "assignee / created_by / claimed_by / task log workspace".to_owned(),
+        theme::muted(),
+        area.width as usize,
+    );
+    push_detail_kv(
+        &mut lines,
+        "source",
+        "tasks-state snapshot".to_owned(),
+        theme::muted(),
+        area.width as usize,
+    );
+    if let Some(error) = &app.task_snapshot_error {
+        push_detail_kv(
+            &mut lines,
+            "snapshot",
+            error.clone(),
+            theme::severity(Severity::Danger),
+            area.width as usize,
+        );
+    }
+    if related.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("(no tasks for {workspace} in the loaded task snapshot)"),
+            theme::muted(),
+        )));
+        apply_detail_scroll(f, area, app, lines);
+        return;
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!("{} matching task{}", related.len(), plural(related.len())),
+        theme::muted(),
+    )));
+    lines.push(agent_task_header_line(area.width as usize));
+    for task in related {
+        lines.push(agent_task_line(task, workspace, area.width as usize));
+    }
+    apply_detail_scroll(f, area, app, lines);
+}
+
+fn draw_agent_messages_detail(f: &mut Frame, area: Rect, app: &mut App, workspace: &str) {
+    let related = agent_related_messages(&app.messages, workspace);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        format!("agent messages · {workspace}"),
+        theme::strong(),
+    )));
+    push_detail_kv(
+        &mut lines,
+        "policy",
+        "message from/to selected workspace".to_owned(),
+        theme::muted(),
+        area.width as usize,
+    );
+    push_detail_kv(
+        &mut lines,
+        "source",
+        "message_history loaded tail (max 500 rows)".to_owned(),
+        theme::muted(),
+        area.width as usize,
+    );
+    if let Some(error) = &app.messages_snapshot_error {
+        push_detail_kv(
+            &mut lines,
+            "snapshot",
+            error.clone(),
+            theme::severity(Severity::Danger),
+            area.width as usize,
+        );
+    }
+    if related.is_empty() {
+        lines.push(Line::from(""));
+        let text = if app.messages.is_empty() {
+            "(no message history rows loaded yet)"
+        } else {
+            "(no messages for this workspace in the loaded message tail)"
+        };
+        lines.push(Line::from(Span::styled(text.to_owned(), theme::muted())));
+        apply_tail_detail_scroll(f, area, app, lines);
+        return;
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!(
+            "{} matching message{} in loaded tail; older rows may be absent",
+            related.len(),
+            plural(related.len())
+        ),
+        theme::muted(),
+    )));
+    for entry in related {
+        lines.push(message_list_line(entry, area.width as usize, false, false));
+    }
+    apply_tail_detail_scroll(f, area, app, lines);
+}
+
+fn draw_agent_instructions_detail(f: &mut Frame, area: Rect, app: &App, workspace: &str) {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        format!("agent config · {workspace}"),
+        theme::strong(),
+    )));
+    let Some(mut detail) = find_agent_config_detail(app.tree.as_ref(), workspace) else {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "(selected workspace is not present in the loaded config tree)",
+            theme::muted(),
+        )));
+        lines.push(Line::from(Span::styled(
+            "exact generated orchestrator prompt display is non-MVP",
+            theme::muted(),
+        )));
+        apply_detail_scroll(f, area, app, lines);
+        return;
+    };
+    if let Some(dir) = app.workspace_dirs.get(workspace) {
+        detail.dir = dir.display().to_string();
+    }
+    push_detail_kv(
+        &mut lines,
+        "kind",
+        detail.kind.clone(),
+        theme::info(),
+        area.width as usize,
+    );
+    push_detail_kv(
+        &mut lines,
+        "project",
+        detail.project,
+        theme::muted(),
+        area.width as usize,
+    );
+    push_detail_kv(
+        &mut lines,
+        "dir",
+        detail.dir,
+        theme::muted(),
+        area.width as usize,
+    );
+    push_detail_kv(
+        &mut lines,
+        "runtime",
+        if detail.runtime.is_empty() {
+            "(default)".to_owned()
+        } else {
+            detail.runtime
+        },
+        theme::muted(),
+        area.width as usize,
+    );
+    if !detail.description.is_empty() {
+        push_detail_kv(
+            &mut lines,
+            "description",
+            detail.description,
+            theme::info(),
+            area.width as usize,
+        );
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "instructions:".to_owned(),
+        theme::strong(),
+    )));
+    if detail.instructions.trim().is_empty() {
+        let text = if detail.kind == "orchestrator" {
+            "(generated orchestrator prompt is not displayed in the MVP)"
+        } else {
+            "(no config instructions for this workspace)"
+        };
+        lines.push(Line::from(Span::styled(text.to_owned(), theme::muted())));
+    } else {
+        for raw in detail.instructions.trim().lines() {
+            lines.push(Line::from(Span::raw(crate::tasks::truncate(
+                raw,
+                area.width as usize,
+            ))));
+        }
+    }
+    apply_detail_scroll(f, area, app, lines);
+}
+
+fn draw_agent_activity_detail(f: &mut Frame, area: Rect, app: &mut App, workspace: &str) {
+    let activity = agent_mcp_activity_entries(&app.messages, workspace);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        format!("agent activity · {workspace}"),
+        theme::strong(),
+    )));
+    push_detail_kv(
+        &mut lines,
+        "policy",
+        "MCP tool activity text from message history".to_owned(),
+        theme::muted(),
+        area.width as usize,
+    );
+    push_detail_kv(
+        &mut lines,
+        "source",
+        "message_history loaded tail; structured telemetry is non-MVP".to_owned(),
+        theme::muted(),
+        area.width as usize,
+    );
+    if activity.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "(no MCP activity for this workspace in the loaded message tail)",
+            theme::muted(),
+        )));
+        apply_tail_detail_scroll(f, area, app, lines);
+        return;
+    }
+
+    lines.push(Line::from(""));
+    for entry in activity {
+        lines.push(agent_activity_line(entry, area.width as usize));
+    }
+    apply_tail_detail_scroll(f, area, app, lines);
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
+}
+
+fn agent_related_tasks<'a>(
+    tasks: &'a [ax_proto::types::Task],
+    workspace: &str,
+) -> Vec<&'a ax_proto::types::Task> {
+    tasks
+        .iter()
+        .filter(|task| task_related_to_agent(task, workspace))
+        .collect()
+}
+
+fn task_related_to_agent(task: &ax_proto::types::Task, workspace: &str) -> bool {
+    task.assignee == workspace
+        || task.created_by == workspace
+        || task.claimed_by == workspace
+        || task.logs.iter().any(|log| log.workspace == workspace)
+}
+
+fn agent_task_roles(task: &ax_proto::types::Task, workspace: &str) -> String {
+    let mut roles = Vec::new();
+    if task.assignee == workspace {
+        roles.push("assignee");
+    }
+    if task.created_by == workspace {
+        roles.push("created");
+    }
+    if task.claimed_by == workspace {
+        roles.push("claimed");
+    }
+    if task.logs.iter().any(|log| log.workspace == workspace) {
+        roles.push("log");
+    }
+    roles.join("+")
+}
+
+fn agent_task_header_line(width: usize) -> Line<'static> {
+    let raw = "ID       STATE         RELATION       TITLE";
+    Line::from(Span::styled(
+        crate::tasks::truncate(raw, width.max(1)),
+        theme::column_header(),
+    ))
+}
+
+fn agent_task_line(task: &ax_proto::types::Task, workspace: &str, width: usize) -> Line<'static> {
+    let id = crate::tasks::short_task_id(&task.id);
+    let state = format_task_state(task);
+    let relation = agent_task_roles(task, workspace);
+    let raw = format!(
+        "{id:<8} {:<13} {:<14} {}",
+        crate::tasks::truncate(&state, 13),
+        crate::tasks::truncate(&relation, 14),
+        task.title,
+    );
+    Line::from(vec![Span::styled(
+        crate::tasks::truncate(&raw, width.max(1)),
+        theme::task_status(&task.status, crate::tasks::task_is_stale(task)),
+    )])
+}
+
+fn agent_related_messages<'a>(
+    messages: &'a [ax_daemon::HistoryEntry],
+    workspace: &str,
+) -> Vec<&'a ax_daemon::HistoryEntry> {
+    messages
+        .iter()
+        .filter(|entry| entry.from == workspace || entry.to == workspace)
+        .collect()
+}
+
+fn agent_mcp_activity_entries<'a>(
+    messages: &'a [ax_daemon::HistoryEntry],
+    workspace: &str,
+) -> Vec<&'a ax_daemon::HistoryEntry> {
+    messages
+        .iter()
+        .filter(|entry| {
+            entry.from == workspace
+                && (entry.to == "ax.daemon"
+                    || entry.content.to_ascii_lowercase().starts_with("mcp tool "))
+        })
+        .collect()
+}
+
+fn agent_activity_line(entry: &ax_daemon::HistoryEntry, width: usize) -> Line<'static> {
+    let task = if entry.task_id.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", crate::tasks::short_task_id(&entry.task_id))
+    };
+    let raw = format!(
+        " {}{task}: {}",
+        entry.timestamp.format("%H:%M:%S"),
+        entry.content.replace(['\n', '\r'], " "),
+    );
+    Line::from(Span::styled(
+        crate::tasks::truncate(&raw, width.max(1)),
+        message_body_style(&entry.content),
+    ))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentConfigDetail {
+    kind: String,
+    project: String,
+    dir: String,
+    runtime: String,
+    description: String,
+    instructions: String,
+}
+
+fn find_agent_config_detail(
+    tree: Option<&ProjectNode>,
+    workspace: &str,
+) -> Option<AgentConfigDetail> {
+    find_agent_config_in_node(tree?, workspace)
+}
+
+fn find_agent_config_in_node(node: &ProjectNode, workspace: &str) -> Option<AgentConfigDetail> {
+    let orchestrator = if node.prefix.is_empty() {
+        "orchestrator".to_owned()
+    } else {
+        format!("{}.orchestrator", node.prefix)
+    };
+    if !node.disable_root_orchestrator && workspace == orchestrator {
+        return Some(AgentConfigDetail {
+            kind: "orchestrator".to_owned(),
+            project: node.display_name(),
+            dir: node.dir.display().to_string(),
+            runtime: node.orchestrator_runtime.clone(),
+            description: String::new(),
+            instructions: String::new(),
+        });
+    }
+
+    for ws in &node.workspaces {
+        if ws.merged_name == workspace {
+            return Some(AgentConfigDetail {
+                kind: "workspace".to_owned(),
+                project: node.display_name(),
+                dir: node.dir.display().to_string(),
+                runtime: ws.runtime.clone(),
+                description: ws.description.clone(),
+                instructions: ws.instructions.clone(),
+            });
+        }
+    }
+
+    node.children
+        .iter()
+        .find_map(|child| find_agent_config_in_node(child, workspace))
 }
 
 /// Messages detail. Shows the full content of the message at the
@@ -1806,6 +2252,27 @@ fn apply_detail_scroll(f: &mut Frame, area: Rect, app: &App, lines: Vec<Line<'st
     let total = lines.len();
     let visible = (area.height as usize).min(total);
     let max_scroll = total.saturating_sub(visible);
+    let scroll = app.detail_scroll.index.min(max_scroll);
+    let end = (scroll + visible).min(total);
+    let window: Vec<Line<'static>> = lines.into_iter().skip(scroll).take(end - scroll).collect();
+    f.render_widget(Paragraph::new(window), area);
+}
+
+fn apply_tail_detail_scroll(f: &mut Frame, area: Rect, app: &mut App, lines: Vec<Line<'static>>) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let total = lines.len();
+    let visible = (area.height as usize).min(total);
+    let max_scroll = total.saturating_sub(visible);
+    if app.agent_detail_follow_tail {
+        app.detail_scroll.index = max_scroll;
+    } else {
+        app.detail_scroll.clamp(max_scroll);
+        if app.detail_scroll.index == max_scroll {
+            app.agent_detail_follow_tail = true;
+        }
+    }
     let scroll = app.detail_scroll.index.min(max_scroll);
     let end = (scroll + visible).min(total);
     let window: Vec<Line<'static>> = lines.into_iter().skip(scroll).take(end - scroll).collect();
@@ -2359,7 +2826,20 @@ fn focus_footer_hint(app: &App) -> String {
                 }
             }
         },
-        Focus::Detail => "↑↓/jk scroll · g reset · esc list",
+        Focus::Detail => {
+            if app.stream == StreamView::Agents {
+                if matches!(
+                    app.agent_detail_tab,
+                    AgentDetailTab::Messages | AgentDetailTab::Activity
+                ) {
+                    "h/l detail tab · ↑↓/jk scroll · g/G head/tail · esc list"
+                } else {
+                    "h/l detail tab · ↑↓/jk scroll · g reset · esc list"
+                }
+            } else {
+                "↑↓/jk scroll · g reset · esc list"
+            }
+        }
     };
     format!("[{focus}] {scoped} · {base}", focus = app.focus.label())
 }
@@ -2432,6 +2912,252 @@ mod tests {
         app.streamed_workspace = Some("alpha".into());
         let hint = focus_footer_hint(&app);
         assert!(hint.contains("Tab/1-5 view"));
+    }
+
+    #[test]
+    fn footer_hint_advertises_agent_detail_tabs_only_in_agents_detail() {
+        let mut app = App::new();
+        app.focus = Focus::Detail;
+        app.stream = StreamView::Agents;
+        assert!(focus_footer_hint(&app).contains("h/l detail tab"));
+
+        app.stream = StreamView::Tasks;
+        assert!(!focus_footer_hint(&app).contains("h/l detail tab"));
+    }
+
+    #[test]
+    fn agent_detail_title_marks_local_tab_context() {
+        let mut app = App::new();
+        app.agent_entries = vec![AgentEntry {
+            label: "alpha".into(),
+            workspace: "alpha".into(),
+            session_index: Some(0),
+            level: 0,
+            group: false,
+            reconcile: String::new(),
+        }];
+        app.selected_entry = 0;
+        app.focus = Focus::Detail;
+        app.agent_detail_tab = AgentDetailTab::Messages;
+
+        let line = detail_title(&app, 120);
+        let rendered: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(rendered.contains("agent detail"));
+        assert!(rendered.contains("alpha"));
+        assert!(rendered.contains("messages"));
+    }
+
+    #[test]
+    fn agent_task_filter_covers_safe_relation_fields() {
+        let mut assigned = mock_task();
+        assigned.id = "assigned".into();
+        assigned.assignee = "alpha".into();
+
+        let mut created = mock_task();
+        created.id = "created".into();
+        created.assignee = "beta".into();
+        created.created_by = "alpha".into();
+
+        let mut claimed = mock_task();
+        claimed.id = "claimed".into();
+        claimed.assignee = "beta".into();
+        claimed.created_by = "orch".into();
+        claimed.claimed_by = "alpha".into();
+
+        let mut logged = mock_task();
+        logged.id = "logged".into();
+        logged.assignee = "beta".into();
+        logged.created_by = "orch".into();
+        logged.logs.push(ax_proto::types::TaskLog {
+            timestamp: chrono::Utc::now(),
+            workspace: "alpha".into(),
+            message: "progress".into(),
+        });
+
+        let mut other = mock_task();
+        other.id = "other".into();
+        other.assignee = "beta".into();
+        other.created_by = "orch".into();
+
+        let tasks = vec![assigned, created, claimed, logged, other];
+        let ids: Vec<&str> = agent_related_tasks(&tasks, "alpha")
+            .into_iter()
+            .map(|task| task.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["assigned", "created", "claimed", "logged"]);
+    }
+
+    #[test]
+    fn agent_message_and_activity_filters_use_loaded_history_tail() {
+        let base = chrono::Utc::now();
+        let messages = vec![
+            ax_daemon::HistoryEntry {
+                timestamp: base,
+                from: "alpha".into(),
+                to: "orch".into(),
+                content: "hello".into(),
+                task_id: String::new(),
+            },
+            ax_daemon::HistoryEntry {
+                timestamp: base,
+                from: "beta".into(),
+                to: "alpha".into(),
+                content: "reply".into(),
+                task_id: String::new(),
+            },
+            ax_daemon::HistoryEntry {
+                timestamp: base,
+                from: "alpha".into(),
+                to: "ax.daemon".into(),
+                content: "mcp tool list_tasks ok duration_ms=3".into(),
+                task_id: String::new(),
+            },
+            ax_daemon::HistoryEntry {
+                timestamp: base,
+                from: "beta".into(),
+                to: "ax.daemon".into(),
+                content: "mcp tool read_messages ok".into(),
+                task_id: String::new(),
+            },
+        ];
+
+        assert_eq!(agent_related_messages(&messages, "alpha").len(), 3);
+        let activity = agent_mcp_activity_entries(&messages, "alpha");
+        assert_eq!(activity.len(), 1);
+        assert!(activity[0].content.contains("list_tasks"));
+    }
+
+    #[test]
+    fn agent_config_lookup_reads_workspace_and_orchestrator_config_fields() {
+        let tree = ax_config::ProjectNode {
+            name: "root".into(),
+            alias: String::new(),
+            prefix: String::new(),
+            dir: std::path::PathBuf::from("/repo"),
+            orchestrator_runtime: "codex".into(),
+            disable_root_orchestrator: false,
+            workspaces: vec![ax_config::WorkspaceRef {
+                name: "cli".into(),
+                merged_name: "ax.cli".into(),
+                runtime: "codex".into(),
+                description: "CLI owner".into(),
+                instructions: "Own ax-tui".into(),
+            }],
+            children: Vec::new(),
+        };
+
+        let workspace = find_agent_config_detail(Some(&tree), "ax.cli").expect("workspace config");
+        assert_eq!(workspace.kind, "workspace");
+        assert_eq!(workspace.description, "CLI owner");
+        assert_eq!(workspace.instructions, "Own ax-tui");
+
+        let orchestrator =
+            find_agent_config_detail(Some(&tree), "orchestrator").expect("orchestrator config");
+        assert_eq!(orchestrator.kind, "orchestrator");
+        assert_eq!(orchestrator.runtime, "codex");
+        assert!(orchestrator.instructions.is_empty());
+    }
+
+    #[test]
+    fn draw_renders_selected_agent_local_tab_content() {
+        let mut app = App::new();
+        app.agent_entries = vec![AgentEntry {
+            label: "alpha".into(),
+            workspace: "alpha".into(),
+            session_index: Some(0),
+            level: 0,
+            group: false,
+            reconcile: String::new(),
+        }];
+        app.selected_entry = 0;
+        app.focus = Focus::Detail;
+        app.agent_detail_tab = AgentDetailTab::Messages;
+        app.messages = vec![ax_daemon::HistoryEntry {
+            timestamp: chrono::Utc::now(),
+            from: "alpha".into(),
+            to: "orchestrator".into(),
+            content: "hello from alpha".into(),
+            task_id: String::new(),
+        }];
+
+        let rendered = render_app_to_string(&mut app, 120, 34);
+        assert!(rendered.contains("agent messages"));
+        assert!(rendered.contains("hello from alpha"));
+
+        app.agent_detail_tab = AgentDetailTab::Instructions;
+        app.tree = Some(ax_config::ProjectNode {
+            name: "root".into(),
+            alias: String::new(),
+            prefix: String::new(),
+            dir: std::path::PathBuf::from("/repo"),
+            orchestrator_runtime: String::new(),
+            disable_root_orchestrator: false,
+            workspaces: vec![ax_config::WorkspaceRef {
+                name: "alpha".into(),
+                merged_name: "alpha".into(),
+                runtime: "codex".into(),
+                description: "Alpha worker".into(),
+                instructions: "Handle alpha tasks".into(),
+            }],
+            children: Vec::new(),
+        });
+
+        let rendered = render_app_to_string(&mut app, 120, 34);
+        assert!(rendered.contains("agent config"));
+        assert!(rendered.contains("Handle alpha tasks"));
+    }
+
+    #[test]
+    fn draw_tail_follows_agent_message_detail_until_user_scrolls_away() {
+        let mut app = App::new();
+        app.agent_entries = vec![AgentEntry {
+            label: "alpha".into(),
+            workspace: "alpha".into(),
+            session_index: Some(0),
+            level: 0,
+            group: false,
+            reconcile: String::new(),
+        }];
+        app.selected_entry = 0;
+        app.focus = Focus::Detail;
+        app.agent_detail_tab = AgentDetailTab::Messages;
+        app.messages = (0..16)
+            .map(|idx| ax_daemon::HistoryEntry {
+                timestamp: chrono::Utc::now() + chrono::Duration::seconds(idx),
+                from: "alpha".into(),
+                to: "orchestrator".into(),
+                content: format!("message {idx:02}"),
+                task_id: String::new(),
+            })
+            .collect();
+
+        let rendered = render_app_to_string(&mut app, 120, 18);
+        assert!(app.agent_detail_follow_tail);
+        assert!(app.detail_scroll.index > 0, "initial render snaps to tail");
+        assert!(rendered.contains("message 15"));
+        assert!(!rendered.contains("message 00"));
+
+        let parked = app.detail_scroll.index.saturating_sub(2);
+        app.agent_detail_follow_tail = false;
+        app.detail_scroll.index = parked;
+        app.messages.push(ax_daemon::HistoryEntry {
+            timestamp: chrono::Utc::now() + chrono::Duration::seconds(99),
+            from: "alpha".into(),
+            to: "orchestrator".into(),
+            content: "message 99".into(),
+            task_id: String::new(),
+        });
+
+        let _ = render_app_to_string(&mut app, 120, 18);
+        assert_eq!(
+            app.detail_scroll.index, parked,
+            "parked local message detail does not auto-steal the cursor"
+        );
+        assert!(!app.agent_detail_follow_tail);
     }
 
     #[test]
@@ -2658,5 +3384,20 @@ mod tests {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    fn render_app_to_string(app: &mut App, width: u16, height: u16) -> String {
+        let backend = ratatui::backend::TestBackend::new(width, height);
+        let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
+        terminal.draw(|f| draw(f, app)).expect("draw");
+        let buffer = terminal.backend().buffer();
+        let mut out = String::new();
+        for y in 0..height {
+            for x in 0..width {
+                out.push_str(buffer[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
     }
 }

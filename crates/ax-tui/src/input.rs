@@ -7,7 +7,7 @@ use crate::actions::{
     apply_outcomes, contextual_actions, move_overlay_selection, run_selected, task_actions,
     ActionOutcome, Notice, QuickActionId,
 };
-use crate::state::{App, Focus, PendingLifecycle, PendingTaskAction};
+use crate::state::{AgentDetailTab, App, Focus, PendingLifecycle, PendingTaskAction};
 use crate::stream::StreamView;
 
 pub(crate) fn handle_key(app: &mut App, event: KeyEvent) {
@@ -153,6 +153,59 @@ fn handle_list_key(app: &mut App, event: KeyEvent) {
 }
 
 fn handle_detail_key(app: &mut App, event: KeyEvent) {
+    if app.stream == StreamView::Agents {
+        match event.code {
+            KeyCode::Char('h') => {
+                app.step_agent_detail_tab(-1);
+                return;
+            }
+            KeyCode::Char('l') => {
+                app.step_agent_detail_tab(1);
+                return;
+            }
+            _ => {}
+        }
+        if matches!(
+            app.agent_detail_tab,
+            AgentDetailTab::Messages | AgentDetailTab::Activity
+        ) {
+            match event.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    app.agent_detail_follow_tail = false;
+                    app.detail_scroll.shift(-1);
+                    return;
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    app.detail_scroll.shift(1);
+                    return;
+                }
+                KeyCode::PageUp => {
+                    app.agent_detail_follow_tail = false;
+                    app.detail_scroll.shift(-10);
+                    return;
+                }
+                KeyCode::PageDown => {
+                    app.detail_scroll.shift(10);
+                    return;
+                }
+                KeyCode::Home | KeyCode::Char('g') => {
+                    app.agent_detail_follow_tail = false;
+                    app.detail_scroll.reset();
+                    return;
+                }
+                KeyCode::End | KeyCode::Char('G') => {
+                    app.agent_detail_follow_tail = true;
+                    return;
+                }
+                KeyCode::Esc => {
+                    app.focus = Focus::List;
+                    return;
+                }
+                _ => {}
+            }
+        }
+    }
+
     match event.code {
         KeyCode::Up | KeyCode::Char('k') => app.detail_scroll.shift(-1),
         KeyCode::Down | KeyCode::Char('j') => app.detail_scroll.shift(1),
@@ -531,6 +584,60 @@ mod tests {
         handle_key(&mut app, press(KeyCode::BackTab));
         assert_eq!(app.stream, crate::stream::StreamView::Agents);
         assert_eq!(app.focus, Focus::Detail);
+    }
+
+    #[test]
+    fn agent_detail_h_l_cycles_local_tabs_only_in_agents_detail_focus() {
+        let mut app = App::new();
+        app.focus = Focus::Detail;
+        assert_eq!(app.agent_detail_tab, crate::state::AgentDetailTab::Overview);
+
+        handle_key(&mut app, press(KeyCode::Char('l')));
+        assert_eq!(app.stream, StreamView::Agents);
+        assert_eq!(app.agent_detail_tab, crate::state::AgentDetailTab::Tasks);
+        assert_eq!(app.focus, Focus::Detail);
+
+        handle_key(&mut app, press(KeyCode::Char('h')));
+        assert_eq!(app.agent_detail_tab, crate::state::AgentDetailTab::Overview);
+
+        app.focus = Focus::List;
+        handle_key(&mut app, press(KeyCode::Char('l')));
+        assert_eq!(
+            app.agent_detail_tab,
+            crate::state::AgentDetailTab::Overview,
+            "list focus does not switch local detail tabs"
+        );
+
+        app.focus = Focus::Detail;
+        app.stream = StreamView::Messages;
+        handle_key(&mut app, press(KeyCode::Char('l')));
+        assert_eq!(
+            app.agent_detail_tab,
+            crate::state::AgentDetailTab::Overview,
+            "non-agents detail panes do not consume agent local tab keys"
+        );
+    }
+
+    #[test]
+    fn agent_detail_time_tabs_use_sticky_tail_until_user_scrolls_away() {
+        let mut app = App::new();
+        app.focus = Focus::Detail;
+        app.stream = StreamView::Agents;
+        app.agent_detail_tab = AgentDetailTab::Messages;
+        app.detail_scroll.index = 5;
+        app.agent_detail_follow_tail = true;
+
+        handle_key(&mut app, press(KeyCode::Up));
+        assert!(!app.agent_detail_follow_tail);
+        assert_eq!(app.detail_scroll.index, 4);
+
+        handle_key(&mut app, press(KeyCode::Char('G')));
+        assert!(app.agent_detail_follow_tail);
+
+        app.agent_detail_tab = AgentDetailTab::Activity;
+        handle_key(&mut app, press(KeyCode::Char('g')));
+        assert!(!app.agent_detail_follow_tail);
+        assert_eq!(app.detail_scroll.index, 0);
     }
 
     #[test]
