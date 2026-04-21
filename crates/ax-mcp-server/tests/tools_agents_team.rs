@@ -101,6 +101,33 @@ async fn list_agents_returns_configured_agents_from_yaml() {
 }
 
 #[tokio::test]
+async fn list_agents_active_only_filters_to_registered_agents() {
+    let tmp = TempDir::new().expect("tempdir");
+    let cfg = write_config(tmp.path());
+    let handle = spawn_daemon(tmp.path()).await;
+
+    // alpha is configured and registers itself with the daemon,
+    // beta is configured but never connects.
+    let _alpha = connect_server(handle.socket_path(), "alpha", &cfg).await;
+    let orch = connect_server(handle.socket_path(), "orch", &cfg).await;
+
+    let listed = orch
+        .list_agents(Parameters(
+            serde_json::from_value(serde_json::json!({ "active_only": true }))
+                .expect("decode"),
+        ))
+        .await
+        .expect("list_agents");
+    let body: serde_json::Value = serde_json::from_str(&call_text(&listed)).expect("decode");
+    assert_eq!(body["agent_count"], 1, "body: {body}");
+    assert_eq!(body["agents"][0]["name"], "alpha");
+    assert_eq!(body["agents"][0]["active"], true);
+
+    orch.daemon().close().await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn list_agents_query_filter_matches_by_description() {
     let tmp = TempDir::new().expect("tempdir");
     let cfg = write_config(tmp.path());
