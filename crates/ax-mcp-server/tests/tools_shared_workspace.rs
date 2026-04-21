@@ -142,3 +142,75 @@ async fn get_shared_value_returns_not_found_cleanly() {
     server.daemon().close().await;
     handle.shutdown().await;
 }
+
+#[tokio::test]
+async fn shared_value_is_visible_across_workspaces() {
+    let tmp = TempDir::new().expect("tempdir");
+    let handle = spawn_daemon(tmp.path()).await;
+    let producer = connect_server(handle.socket_path(), "producer").await;
+    let consumer = connect_server(handle.socket_path(), "consumer").await;
+
+    producer
+        .set_shared_value(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "key": "release.version",
+                "value": "2025.04.22",
+            }))
+            .expect("decode request"),
+        ))
+        .await
+        .expect("producer set succeeds");
+
+    let got = consumer
+        .get_shared_value(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "key": "release.version",
+            }))
+            .expect("decode request"),
+        ))
+        .await
+        .expect("consumer get succeeds");
+    let body = call_text(&got);
+    assert!(body.contains("\"found\": true"), "body: {body}");
+    assert!(body.contains("2025.04.22"), "body: {body}");
+
+    producer.daemon().close().await;
+    consumer.daemon().close().await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn set_shared_value_overwrites_previous_value() {
+    let tmp = TempDir::new().expect("tempdir");
+    let handle = spawn_daemon(tmp.path()).await;
+    let server = connect_server(handle.socket_path(), "orch").await;
+
+    for value in ["v1", "v2"] {
+        server
+            .set_shared_value(Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "key": "current.build",
+                    "value": value,
+                }))
+                .expect("decode request"),
+            ))
+            .await
+            .expect("set succeeds");
+    }
+
+    let got = server
+        .get_shared_value(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "key": "current.build",
+            }))
+            .expect("decode request"),
+        ))
+        .await
+        .expect("get succeeds");
+    let body = call_text(&got);
+    assert!(body.contains("v2"), "body: {body}");
+    assert!(!body.contains("v1"), "body: {body}");
+
+    server.daemon().close().await;
+    handle.shutdown().await;
+}
