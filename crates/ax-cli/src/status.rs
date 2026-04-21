@@ -749,6 +749,7 @@ mod tests {
                 active_task_count: 0,
                 current_task_id: None,
                 connection_generation: 0,
+                idle_timeout_seconds: 0,
             },
         );
         let preview = workspace_status_preview(&map, "alpha", 10);
@@ -783,6 +784,7 @@ mod tests {
                 active_task_count: 0,
                 current_task_id: None,
                 connection_generation: 0,
+                idle_timeout_seconds: 0,
             },
         );
 
@@ -811,6 +813,7 @@ mod tests {
                 active_task_count: 0,
                 current_task_id: None,
                 connection_generation: 0,
+                idle_timeout_seconds: 0,
             },
         );
 

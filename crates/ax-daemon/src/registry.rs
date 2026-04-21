@@ -120,6 +120,7 @@ impl Registry {
             active_task_count: 0,
             current_task_id: None,
             connection_generation: id,
+            idle_timeout_seconds: i64::try_from(idle_timeout.as_secs()).unwrap_or(i64::MAX),
         };
         let entry = Entry {
             id,
@@ -202,6 +203,8 @@ impl Registry {
                 let mut info = e.info.clone();
                 info.last_activity_at = Some(e.last_active_at);
                 info.connection_generation = e.id;
+                info.idle_timeout_seconds = i64::try_from(e.idle_timeout.as_secs())
+                    .unwrap_or(i64::MAX);
                 info
             })
             .collect()

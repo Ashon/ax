@@ -65,6 +65,14 @@ pub struct WorkspaceInfo {
     /// connection. `0` is treated as "unknown" for offline peers.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub connection_generation: u64,
+    /// Idle timeout the workspace declared at registration time, in
+    /// seconds. A peer that has been quiet for longer than this is a
+    /// candidate for `stop_idle` — orchestrators can compare against
+    /// `last_activity_at` to decide whether to intervene before the
+    /// daemon does. `0` means the peer did not declare an idle
+    /// timeout (idle-sleep is disabled for it).
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub idle_timeout_seconds: i64,
 }
 
 fn is_zero_u64(n: &u64) -> bool {

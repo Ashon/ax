@@ -122,6 +122,58 @@ async fn workspace_status_and_list_tools_reflect_registry() {
 }
 
 #[tokio::test]
+async fn list_workspaces_exposes_declared_idle_timeout() {
+    use std::time::Duration;
+
+    let tmp = TempDir::new().expect("tempdir");
+    let handle = spawn_daemon(tmp.path()).await;
+
+    // Register `worker` with an explicit 45-second idle timeout and
+    // verify it surfaces intact so an orchestrator can compare it
+    // against last_activity_at for proactive stale detection.
+    let worker_daemon = DaemonClient::builder(handle.socket_path(), "worker")
+        .idle_timeout(Duration::from_secs(45))
+        .connect()
+        .await
+        .expect("worker connects");
+    let worker = Server::new(worker_daemon);
+    let orch = connect_server(handle.socket_path(), "orch").await;
+
+    let listed = orch.list_workspaces().await.expect("list");
+    let body: serde_json::Value =
+        serde_json::from_str(&call_text(&listed)).expect("decode");
+    let worker_entry = body["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["name"] == "worker")
+        .expect("worker in body");
+    assert_eq!(
+        worker_entry["idle_timeout_seconds"].as_i64(),
+        Some(45),
+        "body: {body}"
+    );
+
+    // orch declared no idle timeout (default) → field should be
+    // omitted (serde skip_serializing_if is_zero_i64).
+    let orch_entry = body["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["name"] == "orch")
+        .expect("orch in body");
+    assert!(
+        orch_entry.get("idle_timeout_seconds").is_none()
+            || orch_entry["idle_timeout_seconds"].as_i64() == Some(0),
+        "default-timeout peer should omit the field: {orch_entry}"
+    );
+
+    worker.daemon().close().await;
+    orch.daemon().close().await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn connection_generation_bumps_when_peer_reregisters() {
     let tmp = TempDir::new().expect("tempdir");
     let handle = spawn_daemon(tmp.path()).await;
