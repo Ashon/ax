@@ -453,6 +453,79 @@ async fn completion_contract_rejection_enqueues_reminder_in_worker_inbox() {
 }
 
 #[tokio::test]
+async fn report_task_failed_transitions_and_notifies_creator() {
+    let tmp = TempDir::new().expect("tempdir");
+    let handle = spawn_daemon(tmp.path()).await;
+    let orch = connect_server(handle.socket_path(), "orch").await;
+    let worker = connect_server(handle.socket_path(), "worker").await;
+
+    let created = orch
+        .create_task(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "title": "broken-thing",
+                "assignee": "worker",
+            }))
+            .expect("decode"),
+        ))
+        .await
+        .expect("create");
+    let task_id = call_json::<serde_json::Value>(&created)["id"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+
+    let resp = worker
+        .report_task_failed(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "id": task_id,
+                "reason": "upstream API returned 503 repeatedly",
+            }))
+            .expect("decode"),
+        ))
+        .await
+        .expect("fail succeeds");
+    let task: serde_json::Value = call_json(&resp);
+    assert_eq!(task["status"], "failed");
+
+    let inbox = orch
+        .read_messages(Parameters(
+            serde_json::from_value(serde_json::json!({})).expect("decode"),
+        ))
+        .await
+        .expect("read");
+    let body = call_text(&inbox);
+    assert!(body.contains("[task-failed]"), "body: {body}");
+    assert!(body.contains(&task_id), "body: {body}");
+    assert!(body.contains("503"), "body: {body}");
+
+    orch.daemon().close().await;
+    worker.daemon().close().await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn report_task_failed_rejects_empty_reason() {
+    let tmp = TempDir::new().expect("tempdir");
+    let handle = spawn_daemon(tmp.path()).await;
+    let worker = connect_server(handle.socket_path(), "worker").await;
+
+    let err = worker
+        .report_task_failed(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "id": "t-anything",
+                "reason": "   ",
+            }))
+            .expect("decode"),
+        ))
+        .await
+        .expect_err("empty reason must reject");
+    assert!(err.to_string().contains("reason"), "body: {err}");
+
+    worker.daemon().close().await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn report_task_blocked_transitions_and_notifies_creator() {
     let tmp = TempDir::new().expect("tempdir");
     let handle = spawn_daemon(tmp.path()).await;

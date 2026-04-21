@@ -383,6 +383,14 @@ pub struct ReportTaskProgressRequest {
 }
 
 #[derive(Debug, schemars::JsonSchema, Deserialize)]
+pub struct ReportTaskFailedRequest {
+    pub id: String,
+    /// Why the task could not be completed — what you attempted,
+    /// what went wrong, whether it is worth retrying or not.
+    pub reason: String,
+}
+
+#[derive(Debug, schemars::JsonSchema, Deserialize)]
 pub struct ReportTaskBlockedRequest {
     pub id: String,
     /// Why progress is stuck — what you tried, what went wrong, what
@@ -1034,6 +1042,42 @@ impl Server {
             status: target_status,
             result: None,
             log: Some(note.to_owned()),
+            confirm: None,
+        };
+        let resp: TaskResponse = self
+            .daemon
+            .request(MessageType::UpdateTask, &payload)
+            .await
+            .map_err(tool_error)?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&resp.task).unwrap_or_default(),
+        )]))
+    }
+
+    /// `report_task_failed` — transition a task to `failed` with a
+    /// structured reason. Parallels `report_task_completion` for the
+    /// negative path; no leftover-scope marker is required because
+    /// failure implies the task did not close its contract. Creator
+    /// is notified via the terminal-status push.
+    #[tool(
+        description = "Mark a task as failed with a structured reason. Use this when the task cannot be completed (hard error, environment missing, requirement invalid) and you want the creator to know without leaving the task `in_progress`."
+    )]
+    pub async fn report_task_failed(
+        &self,
+        Parameters(req): Parameters<ReportTaskFailedRequest>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let reason = req.reason.trim();
+        if reason.is_empty() {
+            return Err(rmcp::ErrorData::invalid_params(
+                "reason is required",
+                None,
+            ));
+        }
+        let payload = UpdateTaskPayload {
+            id: req.id,
+            status: Some(TaskStatus::Failed),
+            result: Some(format!("failed: {reason}")),
+            log: Some(format!("failed: {reason}")),
             confirm: None,
         };
         let resp: TaskResponse = self
