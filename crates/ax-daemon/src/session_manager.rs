@@ -405,6 +405,7 @@ mod tests {
                 git_status: None,
                 connected_at: Some(Utc::now()),
                 last_activity_at: Some(Utc::now()),
+                active_task_count: 0,
             },
             config_path: "/tmp/config.yaml".into(),
             idle_timeout: Duration::from_secs(30),

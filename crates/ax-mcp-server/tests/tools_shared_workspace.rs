@@ -122,6 +122,62 @@ async fn workspace_status_and_list_tools_reflect_registry() {
 }
 
 #[tokio::test]
+async fn list_workspaces_reports_active_task_count_per_assignee() {
+    let tmp = TempDir::new().expect("tempdir");
+    let handle = spawn_daemon(tmp.path()).await;
+    let orch = connect_server(handle.socket_path(), "orch").await;
+    let worker = connect_server(handle.socket_path(), "worker").await;
+
+    // Assign two tasks to the worker and one task to orch. The view
+    // should credit each workspace with its own open-task count so
+    // callers can see relative load in one field.
+    for title in ["t1", "t2"] {
+        orch.create_task(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "title": title,
+                "assignee": "worker",
+            }))
+            .expect("decode"),
+        ))
+        .await
+        .expect("create worker task");
+    }
+    orch.create_task(Parameters(
+        serde_json::from_value(serde_json::json!({
+            "title": "self-owned",
+            "assignee": "orch",
+        }))
+        .expect("decode"),
+    ))
+    .await
+    .expect("create orch task");
+
+    let listed = orch.list_workspaces().await.expect("list succeeds");
+    let body: serde_json::Value =
+        serde_json::from_str(&call_text(&listed)).expect("decode list_workspaces");
+    let by_name: std::collections::BTreeMap<String, &serde_json::Value> = body["workspaces"]
+        .as_array()
+        .expect("workspaces")
+        .iter()
+        .map(|w| (w["name"].as_str().unwrap().to_owned(), w))
+        .collect();
+    assert_eq!(
+        by_name["worker"]["active_task_count"].as_i64(),
+        Some(2),
+        "worker should report 2 open tasks, body: {body}"
+    );
+    assert_eq!(
+        by_name["orch"]["active_task_count"].as_i64(),
+        Some(1),
+        "orch should report 1 open task, body: {body}"
+    );
+
+    worker.daemon().close().await;
+    orch.daemon().close().await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn list_workspaces_exposes_last_activity_at_per_peer() {
     let tmp = TempDir::new().expect("tempdir");
     let handle = spawn_daemon(tmp.path()).await;

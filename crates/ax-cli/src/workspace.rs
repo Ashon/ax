@@ -416,6 +416,7 @@ mod tests {
             git_status: None,
             connected_at: None,
             last_activity_at: None,
+            active_task_count: 0,
         }
     }
 

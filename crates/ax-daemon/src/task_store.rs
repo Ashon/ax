@@ -697,6 +697,28 @@ impl TaskStore {
             .collect()
     }
 
+    /// Count tasks assigned to `assignee` that are still open — i.e.
+    /// not removed and not in a terminal status. Used by
+    /// `list_workspaces` to surface a workspace's current load in
+    /// one integer so orchestrators can balance / back off without
+    /// enumerating the full task table.
+    pub fn count_open_for_assignee(&self, assignee: &str) -> i64 {
+        let inner = self.inner.lock().expect("task store poisoned");
+        inner
+            .values()
+            .filter(|task| {
+                task.removed_at.is_none()
+                    && task.assignee == assignee
+                    && matches!(
+                        task.status,
+                        TaskStatus::Pending | TaskStatus::InProgress | TaskStatus::Blocked
+                    )
+            })
+            .count()
+            .try_into()
+            .unwrap_or(i64::MAX)
+    }
+
     pub fn runnable_by_assignee(&self, assignee: &str, now: DateTime<Utc>) -> Vec<Task> {
         let inner = self.inner.lock().expect("task store poisoned");
         inner
@@ -1600,6 +1622,40 @@ mod tests {
         let silent = store
             .list_silent_in_progress(Utc::now(), chrono::Duration::seconds(60));
         assert!(silent.is_empty(), "selector should reject all fixtures");
+    }
+
+    #[test]
+    fn count_open_for_assignee_skips_removed_and_terminal() {
+        let store = make_store();
+        let live = seed_in_progress_task(&store);
+        assert_eq!(store.count_open_for_assignee("worker"), 1);
+        assert_eq!(store.count_open_for_assignee("orch"), 0);
+
+        // Complete the task → should drop out of the count.
+        store
+            .update_with_confirm(
+                &live.id,
+                Some(TaskStatus::Completed),
+                Some("done; remaining owned dirty files=<none>".into()),
+                None,
+                Some(true),
+                "worker",
+            )
+            .expect("complete");
+        assert_eq!(store.count_open_for_assignee("worker"), 0);
+
+        // Blocked still counts as open (worker is still owning it).
+        let blocked = seed_in_progress_task(&store);
+        store
+            .update(
+                &blocked.id,
+                Some(TaskStatus::Blocked),
+                None,
+                None,
+                "worker",
+            )
+            .expect("block");
+        assert_eq!(store.count_open_for_assignee("worker"), 1);
     }
 
     #[test]

@@ -43,6 +43,12 @@ pub struct WorkspaceInfo {
     /// quiet" signal that presence alone cannot answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_activity_at: Option<DateTime<Utc>>,
+    /// Count of non-removed tasks assigned to this workspace that are
+    /// still open (`Pending` / `InProgress` / `Blocked`). Lets an
+    /// orchestrator answer "how loaded is B right now" without
+    /// enumerating tasks per workspace.
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub active_task_count: i64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -117,6 +117,7 @@ impl Registry {
             git_status: None,
             connected_at: Some(now),
             last_activity_at: Some(now),
+            active_task_count: 0,
         };
         let entry = Entry {
             id,

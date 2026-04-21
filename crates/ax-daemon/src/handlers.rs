@@ -119,6 +119,7 @@ pub(crate) fn handle_list_workspaces(
     let mut workspaces = ctx.registry.list();
     for workspace in &mut workspaces {
         workspace.git_status = Some(ctx.git_status.status_for(&workspace.dir));
+        workspace.active_task_count = ctx.task_store.count_open_for_assignee(&workspace.name);
     }
     response(&env.id, &ListWorkspacesResponse { workspaces })
 }
