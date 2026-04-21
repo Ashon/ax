@@ -202,3 +202,94 @@ fn prepare_claude_launch(dir: &Path, fresh: bool) -> Result<(), LaunchError> {
         }),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn claude_command_args_skips_prompt_injection_when_no_instructions_file() {
+        let tmp = TempDir::new().expect("tempdir");
+        let args = claude_command_args(tmp.path(), false, &[]).expect("build args");
+        assert_eq!(args, vec!["--dangerously-skip-permissions".to_owned()]);
+    }
+
+    #[test]
+    fn claude_command_args_injects_system_prompt_when_file_present() {
+        let tmp = TempDir::new().expect("tempdir");
+        fs::write(tmp.path().join("CLAUDE.md"), "act as an orchestrator").unwrap();
+        let args = claude_command_args(tmp.path(), false, &[]).expect("build args");
+        assert_eq!(args.len(), 3);
+        assert_eq!(args[0], "--dangerously-skip-permissions");
+        assert_eq!(args[1], "--append-system-prompt");
+        assert_eq!(args[2], "act as an orchestrator");
+    }
+
+    #[test]
+    fn claude_command_args_appends_continue_flag_when_requested() {
+        let tmp = TempDir::new().expect("tempdir");
+        let args = claude_command_args(tmp.path(), true, &[]).expect("build args");
+        assert!(args.contains(&"--continue".to_owned()));
+    }
+
+    #[test]
+    fn claude_command_args_appends_caller_extra_args_last() {
+        let tmp = TempDir::new().expect("tempdir");
+        let extras = vec!["--resume".to_owned(), "abc".to_owned()];
+        let args = claude_command_args(tmp.path(), false, &extras).expect("build args");
+        assert_eq!(&args[args.len() - 2..], extras.as_slice());
+    }
+
+    #[test]
+    fn codex_command_args_always_include_base_flags_and_dir() {
+        let tmp = TempDir::new().expect("tempdir");
+        let args = codex_command_args(tmp.path(), &[]);
+        assert!(args.contains(&"--dangerously-bypass-approvals-and-sandbox".to_owned()));
+        assert!(args.contains(&"--no-alt-screen".to_owned()));
+        assert_eq!(args.iter().position(|a| a == "-C").map(|i| i + 1), Some(3));
+        assert_eq!(args[3], tmp.path().display().to_string());
+    }
+
+    #[test]
+    fn codex_command_args_appends_caller_extra_args_last() {
+        let tmp = TempDir::new().expect("tempdir");
+        let extras = vec!["--resume".to_owned(), "last".to_owned()];
+        let args = codex_command_args(tmp.path(), &extras);
+        assert_eq!(&args[args.len() - 2..], extras.as_slice());
+    }
+
+    #[test]
+    fn load_instructions_file_returns_none_when_missing() {
+        let tmp = TempDir::new().expect("tempdir");
+        let result = load_instructions_file(tmp.path(), "CLAUDE.md").expect("load");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn load_instructions_file_returns_content_when_present() {
+        let tmp = TempDir::new().expect("tempdir");
+        fs::write(tmp.path().join("AGENTS.md"), "be helpful").unwrap();
+        let result = load_instructions_file(tmp.path(), "AGENTS.md").expect("load");
+        assert_eq!(result.as_deref(), Some("be helpful"));
+    }
+
+    #[test]
+    fn run_in_dir_with_options_rejects_unknown_runtime() {
+        let tmp = TempDir::new().expect("tempdir");
+        let err = run_in_dir_with_options(
+            "wolfram",
+            tmp.path(),
+            "orch",
+            Path::new("/tmp/ax.sock"),
+            Path::new("/tmp/ax"),
+            None,
+            &LaunchOptions::default(),
+        )
+        .expect_err("unknown runtime must be rejected before launch");
+        match err {
+            LaunchError::UnsupportedRuntime(name) => assert_eq!(name, "wolfram"),
+            other => panic!("expected UnsupportedRuntime, got {other:?}"),
+        }
+    }
+}
