@@ -171,6 +171,73 @@ async fn failing_tool_records_error_kind() {
 }
 
 #[tokio::test]
+async fn tool_error_result_records_error_without_protocol_error() {
+    let tmp = TempDir::new().expect("tempdir");
+    let state_dir: PathBuf = tmp.path().to_path_buf();
+    let handle = spawn_daemon(&state_dir).await;
+
+    let daemon = DaemonClient::builder(handle.socket_path(), "alpha")
+        .dir("/tmp/alpha")
+        .connect()
+        .await
+        .expect("daemon client connects");
+
+    let telemetry_path = state_dir.join("telemetry").join("tool_calls.jsonl");
+    let server = Server::new(daemon).with_telemetry(TelemetrySink::new(&telemetry_path));
+
+    let (server_transport, client_transport) = tokio::io::duplex(8 * 1024);
+    let server_handle = tokio::spawn(async move {
+        server
+            .serve(server_transport)
+            .await
+            .unwrap()
+            .waiting()
+            .await
+    });
+    let client = StubClient
+        .serve(client_transport)
+        .await
+        .expect("client handshake");
+
+    let req = CallToolRequestParams::new("start_task").with_arguments(
+        serde_json::json!({
+            "title": "bad dispatch body",
+            "assignee": "worker",
+            "message": "Task ID: 11111111-2222-3333-4444-555555555555 do work",
+        })
+        .as_object()
+        .cloned()
+        .expect("object"),
+    );
+    let result = client
+        .call_tool(req)
+        .await
+        .expect("tool execution failure should not be a protocol error");
+    assert_eq!(result.is_error, Some(true));
+
+    drop(client);
+    let _ = server_handle.await;
+
+    let body = std::fs::read_to_string(&telemetry_path).expect("telemetry file written");
+    let last = body.lines().last().expect("at least one event");
+    let event: TelemetryEvent = serde_json::from_str(last).expect("parse event");
+    assert_eq!(event.tool, "start_task");
+    assert!(!event.ok);
+    assert!(
+        event.err_kind.contains("Task ID"),
+        "expected tool error text in telemetry: {event:?}"
+    );
+
+    let entries = read_history_entries(&state_dir, 1).await;
+    assert_eq!(entries[0].from, "alpha");
+    assert_eq!(entries[0].to, "ax.daemon");
+    assert!(entries[0].content.starts_with("mcp tool start_task error"));
+    assert!(entries[0].content.contains("error_kind=TOOL_ERROR"));
+
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn activity_write_failure_does_not_break_tool_result() {
     let tmp = TempDir::new().expect("tempdir");
     let state_dir: PathBuf = tmp.path().to_path_buf();

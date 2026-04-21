@@ -918,11 +918,11 @@ impl Server {
             priority: req.priority.unwrap_or_default(),
             stale_after_seconds: req.stale_after_seconds.unwrap_or(0),
         };
-        let resp: StartTaskResponse = self
-            .daemon
-            .request(MessageType::StartTask, &payload)
-            .await
-            .map_err(tool_error)?;
+        let resp: StartTaskResponse =
+            match self.daemon.request(MessageType::StartTask, &payload).await {
+                Ok(resp) => resp,
+                Err(e) => return Ok(daemon_tool_execution_error(e)),
+            };
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&resp).unwrap_or_default(),
         )]))
@@ -1713,9 +1713,13 @@ impl Server {
             "{question}\n\n[ax] 작업 완료 후 반드시 send_message(to=\"{caller}\") 로 결과를 보내주세요."
         );
 
-        let sent = self
+        let sent = match self
             .send_workspace_message(&req.name, &full_message, &cfg_path)
-            .await?;
+            .await
+        {
+            Ok(sent) => sent,
+            Err(e) => return Ok(tool_execution_error(format!("Failed to send message: {e}"))),
+        };
         if sent.message_id.is_empty() {
             return Ok(CallToolResult::success(vec![Content::text(format!(
                 "Inspection request to {:?} was suppressed as a duplicate no-op/status update.",
@@ -1723,10 +1727,10 @@ impl Server {
             ))]));
         }
 
-        let reply = self
-            .poll_for_reply(&req.name, timeout)
-            .await
-            .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
+        let reply = match self.poll_for_reply(&req.name, timeout).await {
+            Ok(reply) => reply,
+            Err(e) => return Ok(tool_execution_error(e)),
+        };
 
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&serde_json::json!({
@@ -1760,23 +1764,24 @@ impl Server {
             req.message
         );
 
-        let sent = self
+        let sent = match self
             .send_workspace_message(&req.to, &full_message, &cfg_path)
-            .await?;
+            .await
+        {
+            Ok(sent) => sent,
+            Err(e) => return Ok(tool_execution_error(format!("Failed to send message: {e}"))),
+        };
         if sent.message_id.is_empty() {
-            return Err(rmcp::ErrorData::internal_error(
-                format!(
-                    "Request to {:?} was suppressed as a duplicate no-op/status update",
-                    req.to
-                ),
-                None,
-            ));
+            return Ok(tool_execution_error(format!(
+                "Request to {:?} was suppressed as a duplicate no-op/status update",
+                req.to
+            )));
         }
 
-        let reply = self
-            .poll_for_reply(&req.to, timeout)
-            .await
-            .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
+        let reply = match self.poll_for_reply(&req.to, timeout).await {
+            Ok(reply) => reply,
+            Err(e) => return Ok(tool_execution_error(e)),
+        };
         Ok(CallToolResult::success(vec![Content::text(reply)]))
     }
 
@@ -1885,7 +1890,7 @@ impl Server {
         target: &str,
         message: &str,
         config_path: &Path,
-    ) -> Result<SendMessageResponse, rmcp::ErrorData> {
+    ) -> Result<SendMessageResponse, DaemonClientError> {
         self.daemon
             .request::<_, SendMessageResponse>(
                 MessageType::SendMessage,
@@ -1896,9 +1901,6 @@ impl Server {
                 },
             )
             .await
-            .map_err(|e| {
-                rmcp::ErrorData::internal_error(format!("Failed to send message: {e}"), None)
-            })
     }
 
     async fn poll_for_reply(&self, from: &str, timeout_secs: i64) -> Result<String, String> {
@@ -2056,6 +2058,11 @@ impl ServerHandler for Server {
         let result = self.tool_router.call(tcc).await;
         let duration_ms = started.elapsed().as_millis() as u64;
         let (ok, telemetry_err_kind, activity_err_kind) = match &result {
+            Ok(tool_result) if tool_result.is_error == Some(true) => (
+                false,
+                call_tool_result_error_text(tool_result),
+                "TOOL_ERROR".to_owned(),
+            ),
             Ok(_) => (true, String::new(), String::new()),
             Err(e) => (false, e.message.to_string(), mcp_error_kind(e)),
         };
@@ -2068,6 +2075,28 @@ impl ServerHandler for Server {
 #[allow(clippy::needless_pass_by_value)]
 fn tool_error(err: DaemonClientError) -> rmcp::ErrorData {
     rmcp::ErrorData::internal_error(err.to_string(), None)
+}
+
+fn tool_execution_error(message: impl Into<String>) -> CallToolResult {
+    CallToolResult::error(vec![Content::text(message.into())])
+}
+
+fn daemon_tool_execution_error(err: DaemonClientError) -> CallToolResult {
+    tool_execution_error(err.to_string())
+}
+
+fn call_tool_result_error_text(result: &CallToolResult) -> String {
+    let text = result
+        .content
+        .iter()
+        .filter_map(|content| content.as_text().map(|t| t.text.as_str()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.trim().is_empty() {
+        "tool returned isError=true".to_owned()
+    } else {
+        text
+    }
 }
 
 fn mcp_error_kind(err: &rmcp::ErrorData) -> String {

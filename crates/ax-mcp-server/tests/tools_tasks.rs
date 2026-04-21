@@ -258,6 +258,40 @@ async fn update_task_rejects_unknown_status_value() {
 }
 
 #[tokio::test]
+async fn start_task_validation_error_returns_tool_error_result() {
+    let tmp = TempDir::new().expect("tempdir");
+    let handle = spawn_daemon(tmp.path()).await;
+    let orch = connect_server(handle.socket_path(), "orch").await;
+
+    let result = orch
+        .start_task(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "title": "bad dispatch body",
+                "assignee": "worker",
+                "message": "Task ID: 11111111-2222-3333-4444-555555555555 do work",
+            }))
+            .expect("decode"),
+        ))
+        .await
+        .expect("daemon validation should be a tool error result");
+    assert_eq!(result.is_error, Some(true));
+    let body = call_text(&result);
+    assert!(body.contains("Task ID"), "body: {body}");
+    assert!(body.contains("start_task injects"), "body: {body}");
+
+    let listed = orch
+        .list_tasks(Parameters(
+            serde_json::from_value(serde_json::json!({})).expect("decode"),
+        ))
+        .await
+        .expect("list");
+    assert!(call_text(&listed).contains("No tasks found."));
+
+    orch.daemon().close().await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn list_workspace_tasks_rejects_invalid_view() {
     let tmp = TempDir::new().expect("tempdir");
     let handle = spawn_daemon(tmp.path()).await;
