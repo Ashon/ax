@@ -221,3 +221,50 @@ async fn broadcast_returns_no_recipients_message_when_alone() {
     server.daemon().close().await;
     handle.shutdown().await;
 }
+
+#[tokio::test]
+async fn send_message_rejects_empty_recipient() {
+    let tmp = TempDir::new().expect("tempdir");
+    let handle = spawn_daemon(tmp.path()).await;
+    let orch = connect_server(handle.socket_path(), "orch").await;
+
+    let err = orch
+        .send_message(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "to": "   ",
+                "message": "hi",
+            }))
+            .expect("decode request"),
+        ))
+        .await
+        .expect_err("empty recipient must be rejected");
+    assert!(
+        err.to_string().contains("missing recipient"),
+        "body: {err}"
+    );
+
+    orch.daemon().close().await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn send_message_rejects_self_recipient() {
+    let tmp = TempDir::new().expect("tempdir");
+    let handle = spawn_daemon(tmp.path()).await;
+    let orch = connect_server(handle.socket_path(), "orch").await;
+
+    let err = orch
+        .send_message(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "to": "orch",
+                "message": "talking to myself",
+            }))
+            .expect("decode request"),
+        ))
+        .await
+        .expect_err("self-addressed must be rejected");
+    assert!(err.to_string().contains("cannot send"), "body: {err}");
+
+    orch.daemon().close().await;
+    handle.shutdown().await;
+}
