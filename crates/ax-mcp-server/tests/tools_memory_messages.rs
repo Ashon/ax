@@ -204,6 +204,71 @@ async fn broadcast_reports_recipient_names() {
 }
 
 #[tokio::test]
+async fn broadcast_does_not_enqueue_for_sender() {
+    let tmp = TempDir::new().expect("tempdir");
+    let handle = spawn_daemon(tmp.path()).await;
+    let orch = connect_server(handle.socket_path(), "orch").await;
+    let _a = connect_server(handle.socket_path(), "a").await;
+
+    orch.broadcast_message(Parameters(
+        serde_json::from_value(serde_json::json!({ "message": "rollout today" }))
+            .expect("decode request"),
+    ))
+    .await
+    .expect("broadcast succeeds");
+
+    let own_inbox = orch
+        .read_messages(Parameters(
+            serde_json::from_value(serde_json::json!({})).expect("decode"),
+        ))
+        .await
+        .expect("read succeeds");
+    assert!(
+        call_text(&own_inbox).contains("No pending messages."),
+        "body: {}",
+        call_text(&own_inbox)
+    );
+
+    orch.daemon().close().await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn broadcast_delivers_identical_content_to_every_recipient() {
+    let tmp = TempDir::new().expect("tempdir");
+    let handle = spawn_daemon(tmp.path()).await;
+    let orch = connect_server(handle.socket_path(), "orch").await;
+    let a = connect_server(handle.socket_path(), "a").await;
+    let b = connect_server(handle.socket_path(), "b").await;
+
+    orch.broadcast_message(Parameters(
+        serde_json::from_value(serde_json::json!({ "message": "standup in 5" }))
+            .expect("decode request"),
+    ))
+    .await
+    .expect("broadcast succeeds");
+
+    for reader in [&a, &b] {
+        let body = call_text(
+            &reader
+                .read_messages(Parameters(
+                    serde_json::from_value(serde_json::json!({})).expect("decode"),
+                ))
+                .await
+                .expect("read succeeds"),
+        );
+        assert!(body.contains("1 message(s):"), "body: {body}");
+        assert!(body.contains("From: orch"), "body: {body}");
+        assert!(body.contains("standup in 5"), "body: {body}");
+    }
+
+    orch.daemon().close().await;
+    a.daemon().close().await;
+    b.daemon().close().await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn broadcast_returns_no_recipients_message_when_alone() {
     let tmp = TempDir::new().expect("tempdir");
     let handle = spawn_daemon(tmp.path()).await;
