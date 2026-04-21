@@ -395,6 +395,64 @@ async fn task_completion_notifies_creator_inbox() {
 }
 
 #[tokio::test]
+async fn completion_contract_rejection_enqueues_reminder_in_worker_inbox() {
+    let tmp = TempDir::new().expect("tempdir");
+    let handle = spawn_daemon(tmp.path()).await;
+    let orch = connect_server(handle.socket_path(), "orch").await;
+    let worker = connect_server(handle.socket_path(), "worker").await;
+
+    let created = orch
+        .create_task(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "title": "build it",
+                "assignee": "worker",
+            }))
+            .expect("decode"),
+        ))
+        .await
+        .expect("create");
+    let task_id = call_json::<serde_json::Value>(&created)["id"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+
+    // Worker tries to complete without the leftover-scope marker.
+    let err = worker
+        .update_task(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "id": task_id,
+                "status": "completed",
+                "result": "looks good to me",
+                "confirm": true,
+            }))
+            .expect("decode"),
+        ))
+        .await
+        .expect_err("missing marker must reject");
+    assert!(
+        err.to_string().contains("leftover-scope"),
+        "body: {err}"
+    );
+
+    // The worker's inbox should now have a durable reminder so next
+    // poll surfaces the contract requirement again.
+    let inbox = worker
+        .read_messages(Parameters(
+            serde_json::from_value(serde_json::json!({})).expect("decode"),
+        ))
+        .await
+        .expect("read");
+    let body = call_text(&inbox);
+    assert!(body.contains("[task-completion-rejected]"), "body: {body}");
+    assert!(body.contains(&task_id), "body: {body}");
+    assert!(body.contains("remaining owned dirty files"), "body: {body}");
+
+    orch.daemon().close().await;
+    worker.daemon().close().await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn self_assigned_task_completion_does_not_notify() {
     // When creator == assignee (orch working on its own task), we
     // should not enqueue a notification to orch's own inbox.

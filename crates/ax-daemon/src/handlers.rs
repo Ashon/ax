@@ -43,7 +43,7 @@ use crate::task_helpers::{
     build_task_reminder_message, normalize_task_dispatch_body, parse_task_lifecycle_options,
     task_aware_message,
 };
-use crate::task_store::{CreateTaskInput, TaskStore};
+use crate::task_store::{CreateTaskInput, TaskStore, TaskStoreError};
 use crate::team_reconfigure::TeamController;
 use crate::wake_scheduler::{RealWakeBackend, WakeScheduler};
 
@@ -762,20 +762,55 @@ pub(crate) fn handle_update_task(
         .decode_payload()
         .map_err(|e| HandlerError::DecodePayload("update_task", e))?;
     require_registered(workspace)?;
-    let task = ctx
-        .task_store
-        .update_with_confirm(
-            &payload.id,
-            payload.status,
-            payload.result,
-            payload.log,
-            payload.confirm,
-            workspace,
-        )
-        .map_err(|e| HandlerError::Logic(e.to_string()))?;
+    let task = match ctx.task_store.update_with_confirm(
+        &payload.id,
+        payload.status,
+        payload.result,
+        payload.log,
+        payload.confirm,
+        workspace,
+    ) {
+        Ok(task) => task,
+        Err(err) => {
+            // Completion contract failures leave the task stuck
+            // InProgress. An agent that doesn't immediately re-read
+            // the MCP error (e.g. because it moved on) will look
+            // stale to the orchestrator. Mirror the error as a
+            // durable inbox reminder so the next `read_messages`
+            // surfaces it too, without changing the error contract.
+            if matches!(
+                err,
+                TaskStoreError::MissingCompletionEvidence(_)
+                    | TaskStoreError::CompletionRequiresConfirmation(_)
+            ) {
+                enqueue_completion_contract_reminder(ctx, workspace, &payload.id, &err);
+            }
+            return Err(HandlerError::Logic(err.to_string()));
+        }
+    };
     ctx.registry.touch(workspace, Utc::now());
     apply_task_state_followup(ctx, &task);
     response(&env.id, &TaskResponse { task })
+}
+
+/// Push a durable inbox reminder to the caller when their
+/// completion attempt was rejected. The MCP error already carries
+/// the remediation text, but agents sometimes drop errors on the
+/// floor; the inbox copy gives the next `read_messages` cycle a
+/// second chance to resurface the contract requirement.
+fn enqueue_completion_contract_reminder(
+    ctx: &HandlerCtx,
+    workspace: &str,
+    task_id: &str,
+    err: &TaskStoreError,
+) {
+    let content = format!(
+        "[task-completion-rejected] Task ID: {task_id} — your last update_task was refused. {err}"
+    );
+    let msg = task_aware_message("ax-daemon", workspace, &content);
+    let msg = ctx.queue.enqueue(msg);
+    ctx.history.append_message(&msg);
+    push_if_registered(ctx, workspace, &msg);
 }
 
 pub(crate) fn handle_cancel_task(
