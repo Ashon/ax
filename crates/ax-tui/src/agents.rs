@@ -376,10 +376,7 @@ mod tests {
             reconfigure_agent_state("alpha", &desired, false, false),
             "desired"
         );
-        assert_eq!(
-            reconfigure_agent_state("alpha", &desired, true, false),
-            ""
-        );
+        assert_eq!(reconfigure_agent_state("alpha", &desired, true, false), "");
         assert_eq!(
             reconfigure_agent_state("ghost", &desired, true, false),
             "runtime-only"
