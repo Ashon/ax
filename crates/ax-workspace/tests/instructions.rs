@@ -10,7 +10,18 @@ const MANAGED_HEADERS: &[&str] = &[
     "## Durable Memory Contract",
     "## Message Handling Contract",
     "## Task Intake Contract",
+    "## Task Lifecycle Tools",
     "## Completion Reporting Contract",
+];
+
+/// Phrases the Task Lifecycle Tools contract must advertise so any
+/// agent reading CLAUDE.md / AGENTS.md discovers the ergonomic
+/// surface rather than bottoming out in raw `update_task`.
+const LIFECYCLE_TOOL_NAMES: &[&str] = &[
+    "report_task_progress",
+    "report_task_completion",
+    "report_task_failed",
+    "report_task_blocked",
 ];
 
 #[test]
@@ -119,6 +130,70 @@ fn remove_instructions_strips_every_runtime_file() {
     remove_instructions(dir.path()).unwrap();
     // With no non-managed content left, the file is removed.
     assert!(!dir.path().join("CLAUDE.md").exists());
+}
+
+#[test]
+fn task_lifecycle_tools_contract_lands_in_agents_md() {
+    let dir = tempfile::tempdir().unwrap();
+    write_instructions(dir.path(), "worker", "codex", "").unwrap();
+    let text = fs::read_to_string(dir.path().join("AGENTS.md")).unwrap();
+    assert!(text.contains("## Task Lifecycle Tools"));
+    for tool in LIFECYCLE_TOOL_NAMES {
+        assert!(
+            text.contains(tool),
+            "AGENTS.md must advertise `{tool}` in the Task Lifecycle Tools contract"
+        );
+    }
+}
+
+#[test]
+fn task_lifecycle_tools_contract_lands_in_claude_md() {
+    let dir = tempfile::tempdir().unwrap();
+    write_instructions(dir.path(), "worker", "claude", "").unwrap();
+    let text = fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
+    assert!(text.contains("## Task Lifecycle Tools"));
+    for tool in LIFECYCLE_TOOL_NAMES {
+        assert!(
+            text.contains(tool),
+            "CLAUDE.md must advertise `{tool}` in the Task Lifecycle Tools contract"
+        );
+    }
+}
+
+#[test]
+fn both_runtimes_receive_identical_lifecycle_contract() {
+    // The whole point of the managed section is that Claude and Codex
+    // see the same operational contract. If a runtime starts to
+    // diverge on lifecycle-tool instructions, agents behave
+    // differently for the same task — exactly the staleness symptom
+    // we are trying to remove. Lock identity.
+    let claude_dir = tempfile::tempdir().unwrap();
+    let codex_dir = tempfile::tempdir().unwrap();
+    write_instructions(claude_dir.path(), "worker", "claude", "").unwrap();
+    write_instructions(codex_dir.path(), "worker", "codex", "").unwrap();
+
+    let claude_body = fs::read_to_string(claude_dir.path().join("CLAUDE.md")).unwrap();
+    let codex_body = fs::read_to_string(codex_dir.path().join("AGENTS.md")).unwrap();
+
+    // Extract the lifecycle section from each and compare.
+    let extract_lifecycle = |body: &str| -> String {
+        let start = body
+            .find("## Task Lifecycle Tools")
+            .expect("lifecycle header present");
+        let rest = &body[start..];
+        // Stop at the next `## ` header or the end marker.
+        let end = rest[2..] // skip the leading "## " of the header itself
+            .find("\n## ")
+            .map(|i| i + 2)
+            .or_else(|| rest.find("\n<!-- ax:instructions:end -->"))
+            .unwrap_or(rest.len());
+        rest[..end].trim().to_owned()
+    };
+    assert_eq!(
+        extract_lifecycle(&claude_body),
+        extract_lifecycle(&codex_body),
+        "Task Lifecycle Tools contract must be byte-identical across runtimes"
+    );
 }
 
 #[test]

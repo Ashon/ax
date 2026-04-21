@@ -139,7 +139,7 @@ fn strip_managed_section(path: &Path) -> Result<(), InstructionsError> {
 }
 
 fn managed_workspace_instructions(custom: &str) -> String {
-    let mut sections: Vec<String> = Vec::with_capacity(5);
+    let mut sections: Vec<String> = Vec::with_capacity(6);
     let trimmed = custom.trim();
     if !trimmed.is_empty() {
         sections.push(trimmed.to_owned());
@@ -147,6 +147,7 @@ fn managed_workspace_instructions(custom: &str) -> String {
     sections.push(durable_memory_instruction_contract());
     sections.push(message_handling_instruction_contract());
     sections.push(task_intake_instruction_contract());
+    sections.push(task_lifecycle_tools_instruction_contract());
     sections.push(completion_reporting_instruction_contract());
     sections.join("\n\n")
 }
@@ -190,6 +191,20 @@ fn task_intake_instruction_contract() -> String {
         "  4. structured evidence와 함께 completion",
         "- owner mismatch나 missing dependency가 보이면 fail fast 하세요. 다른 owner/API/file이 필요한지 구체적으로 적고 task를 오래 붙잡지 마세요.",
         "- 같은 `Task ID:`에 대해 substantive result를 이미 보냈다면, 그 뒤 도착한 concise current-status re-ask에는 같은 요약을 반복하지 말고 새 delta가 있을 때만 회신하세요.",
+    ]
+    .join("\n")
+}
+
+fn task_lifecycle_tools_instruction_contract() -> String {
+    [
+        "## Task Lifecycle Tools",
+        "- task 상태 전환에는 아래 네 개 ergonomic MCP 툴을 **raw `update_task`보다 먼저** 사용하세요. Completion Reporting Contract 마커 포맷을 자동으로 구성하고, task creator에게 terminal 상태 변화를 즉시 알립니다. Claude/Codex 등 MCP를 말하는 어떤 런타임도 동일한 surface를 사용합니다.",
+        "- `report_task_progress(id, note)`: 장시간 단위 작업 중 heartbeat. Pending이면 자동으로 in_progress로 승격되고, `updated_at`이 갱신되어 silent-exit 리컨실러가 잘못 깨우지 않습니다.",
+        "- `report_task_completion(id, summary, dirty_files, residual_scope?)`: task 종료. clean이면 `dirty_files=[]`, 남은 게 있으면 경로들 + 반드시 `residual_scope` 문자열로 설명. 서버가 `remaining owned dirty files=` 마커를 정확한 shape으로 만들어서 붙이고 `confirm=true`로 전송합니다.",
+        "- `report_task_failed(id, reason)`: 하드 실패. 무엇을 시도했고 왜 안 됐는지, 재시도가 유의미한지 적으세요. Completion 마커는 필요 없습니다.",
+        "- `report_task_blocked(id, reason, needs_help_from?)`: 외부 입력이 없으면 진전이 불가능할 때. `needs_help_from`에 peer 워크스페이스를 지정하면 그쪽 inbox에 `[task-blocked-help]` 메시지도 같이 발송합니다.",
+        "- 위 툴 중 하나가 에러를 돌려주면 그 즉시 버리지 말고 응답 본문을 읽으세요. daemon이 에러와 동시에 같은 요지의 reminder를 당신의 inbox에도 넣으므로, 다음 `read_messages`에서도 다시 나타납니다 — 두 신호가 같은 방향을 가리키면 호출 인자를 수정해서 재시도하세요.",
+        "- raw `update_task`와 `Completion Reporting Contract` 규약은 여전히 유효하며, custom 도구/저수준 경로가 필요할 때 쓰세요. 일반적인 완료/실패/블록 시그널링에는 위 네 개가 기본값입니다.",
     ]
     .join("\n")
 }
