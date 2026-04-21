@@ -73,6 +73,43 @@ fn call_text(result: &CallToolResult) -> String {
 }
 
 #[tokio::test]
+async fn list_agents_surfaces_peer_liveness_fields_for_registered_workspace() {
+    let tmp = TempDir::new().expect("tempdir");
+    let cfg = write_config(tmp.path());
+    let handle = spawn_daemon(tmp.path()).await;
+    // alpha registers itself → should carry liveness fields through
+    // to list_agents.
+    let alpha = connect_server(handle.socket_path(), "alpha", &cfg).await;
+    let orch = connect_server(handle.socket_path(), "orch", &cfg).await;
+
+    let listed = orch
+        .list_agents(Parameters(
+            serde_json::from_value(serde_json::json!({ "active_only": true })).expect("decode"),
+        ))
+        .await
+        .expect("list_agents");
+    let body: serde_json::Value =
+        serde_json::from_str(&call_text(&listed)).expect("decode list_agents");
+    let alpha_entry = body["agents"]
+        .as_array()
+        .expect("agents")
+        .iter()
+        .find(|a| a["name"] == "alpha")
+        .expect("alpha must be present");
+    // last_activity_at is a liveness stamp populated from the
+    // registry's watermark — must be present for any registered
+    // peer so downstream consumers can compute quiet-time.
+    let ts = alpha_entry["last_activity_at"]
+        .as_str()
+        .expect("last_activity_at must be serialised as RFC3339 string");
+    assert!(ts.contains('T'), "unexpected timestamp shape: {ts}");
+
+    alpha.daemon().close().await;
+    orch.daemon().close().await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn list_agents_returns_configured_agents_from_yaml() {
     let tmp = TempDir::new().expect("tempdir");
     let cfg = write_config(tmp.path());

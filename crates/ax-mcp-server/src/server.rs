@@ -1547,6 +1547,24 @@ impl Server {
                         serde_json::Value::String(ts.to_rfc3339()),
                     );
                 }
+                if let Some(ts) = ws_info.last_activity_at {
+                    info.insert(
+                        "last_activity_at".into(),
+                        serde_json::Value::String(ts.to_rfc3339()),
+                    );
+                }
+                if ws_info.active_task_count > 0 {
+                    info.insert(
+                        "active_task_count".into(),
+                        serde_json::Value::Number(ws_info.active_task_count.into()),
+                    );
+                }
+                if let Some(tid) = ws_info.current_task_id {
+                    info.insert(
+                        "current_task_id".into(),
+                        serde_json::Value::String(tid),
+                    );
+                }
             }
             if let Some(path) = instruction_file {
                 info.insert("instruction_file".into(), serde_json::Value::String(path));
