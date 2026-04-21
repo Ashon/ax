@@ -440,8 +440,8 @@ struct AgentColumns {
 
 impl AgentColumns {
     fn fit(width: u16) -> Self {
-        // INFO absorbs status/reconcile notes and group-level git
-        // summaries so agent names stay concise.
+        // INFO absorbs status/reconcile notes while NAME carries
+        // group-level git summaries next to the group label.
         let compact = width < 104;
         let name = if compact { 34 } else { 44 };
         let state = if compact { 8 } else { 11 };
@@ -629,14 +629,15 @@ fn agent_group_row<'a>(
     indent: &str,
 ) -> ListItem<'a> {
     let label = format!("{indent}{}", entry.label);
-    let git = group_git_summary(idx, app, cols.info >= 20);
+    let git = group_git_summary(idx, app, cols.name >= 44);
     let mut spans = Vec::new();
-    push_padded_span(
-        &mut spans,
-        label,
-        cols.name,
-        theme::workspace(entry.level).add_modifier(ratatui::style::Modifier::BOLD),
-    );
+    let label_style = theme::workspace(entry.level).add_modifier(ratatui::style::Modifier::BOLD);
+    if let Some((summary, style)) = git {
+        let suffix = format!(" git {summary}");
+        push_padded_split_span(&mut spans, &label, &suffix, cols.name, label_style, style);
+    } else {
+        push_padded_span(&mut spans, label, cols.name, label_style);
+    }
     push_gap(&mut spans);
     push_padded_span(&mut spans, "", cols.state, theme::muted());
     push_gap(&mut spans);
@@ -646,11 +647,7 @@ fn agent_group_row<'a>(
     push_gap(&mut spans);
     push_padded_span(&mut spans, "", cols.cost, theme::muted());
     push_gap(&mut spans);
-    if let Some((summary, style)) = git {
-        push_padded_span(&mut spans, format!("git {summary}"), cols.info, style);
-    } else {
-        push_padded_span(&mut spans, "", cols.info, theme::muted());
-    }
+    push_padded_span(&mut spans, "", cols.info, theme::muted());
     ListItem::new(Line::from(spans))
 }
 
@@ -777,6 +774,43 @@ fn push_padded_span(
     style: Style,
 ) {
     spans.push(Span::styled(pad_or_trunc(text.as_ref(), width), style));
+}
+
+fn push_padded_split_span(
+    spans: &mut Vec<Span<'static>>,
+    label: &str,
+    suffix: &str,
+    width: usize,
+    label_style: Style,
+    suffix_style: Style,
+) {
+    if width == 0 {
+        return;
+    }
+
+    let label_len = label.chars().count();
+    let suffix_len = suffix.chars().count();
+    if suffix_len >= width {
+        push_padded_span(spans, format!("{label}{suffix}"), width, label_style);
+        return;
+    }
+
+    let label_width = width - suffix_len;
+    if label_len > label_width {
+        spans.push(Span::styled(
+            crate::tasks::truncate(label, label_width),
+            label_style,
+        ));
+        spans.push(Span::styled(suffix.to_owned(), suffix_style));
+        return;
+    }
+
+    spans.push(Span::styled(label.to_owned(), label_style));
+    spans.push(Span::styled(suffix.to_owned(), suffix_style));
+    spans.push(Span::styled(
+        " ".repeat(width - label_len - suffix_len),
+        label_style,
+    ));
 }
 
 fn metric_style(raw: &str, style: Style) -> Style {
@@ -1223,6 +1257,24 @@ fn message_body_style(text: &str) -> Style {
     }
 }
 
+fn token_trend_style(series: &[u64]) -> Style {
+    let Some(first) = series.iter().copied().find(|value| *value > 0) else {
+        return theme::muted();
+    };
+    let last = series
+        .iter()
+        .rev()
+        .copied()
+        .find(|value| *value > 0)
+        .unwrap_or(first);
+
+    match last.cmp(&first) {
+        std::cmp::Ordering::Greater => theme::severity(Severity::Warning),
+        std::cmp::Ordering::Less => theme::severity(Severity::Success),
+        std::cmp::Ordering::Equal => theme::accent(),
+    }
+}
+
 fn draw_tokens(f: &mut Frame, area: Rect, app: &App) {
     // `area` is the body block's inner rect — no additional border.
     let inner = area;
@@ -1293,18 +1345,12 @@ fn draw_tokens(f: &mut Frame, area: Rect, app: &App) {
         inner.height - header_rows,
     );
 
-    // Slice the sorted row set by the scroll offset so arrow keys
-    // walk the view without losing the stable A→Z order.
+    // Tokens uses the same list policy as Messages/Tasks: the cursor
+    // selects a workspace row, and the viewport follows to keep that
+    // row visible without losing the stable A→Z order.
     let total_rows = rows.len();
-    let budget = (list_area.height as usize).min(total_rows);
-    let max_scroll = total_rows.saturating_sub(budget);
-    let scroll = app.tokens_cursor.index.min(max_scroll);
-    let viewport = Viewport {
-        start: scroll,
-        end: scroll + budget,
-        visible: budget,
-        total: total_rows,
-    };
+    let selected = app.tokens_cursor.index.min(total_rows.saturating_sub(1));
+    let viewport = compute_viewport(total_rows, selected, list_area.height as usize);
     let content_area = viewport.content_area(list_area);
 
     // Text column reserves a fixed width; the sparkline absorbs the
@@ -1322,7 +1368,8 @@ fn draw_tokens(f: &mut Frame, area: Rect, app: &App) {
     let spark_col = chunks[1];
 
     let now = chrono::Utc::now();
-    for (idx, trend) in rows.into_iter().skip(scroll).take(budget).enumerate() {
+    for (idx, trend) in rows[viewport.start..viewport.end].iter().enumerate() {
+        let absolute = viewport.start + idx;
         let y = content_area.y + idx as u16;
         let row_text = Rect::new(text_col.x, y, text_col.width, 1);
         let row_spark = Rect::new(spark_col.x, y, spark_col.width, 1);
@@ -1358,11 +1405,15 @@ fn draw_tokens(f: &mut Frame, area: Rect, app: &App) {
             .last_activity
             .map(|ts| format_last_activity(now, ts))
             .unwrap_or_else(|| "-".to_owned());
-        let style = if max_total > 0.0 && total >= max_total * 0.8 {
-            theme::severity(Severity::Warning)
-        } else {
-            Style::default()
-        };
+        let selected_style =
+            (absolute == selected).then(|| theme::selection(app.focus == Focus::List));
+        let style = selected_style.unwrap_or_else(|| {
+            if max_total > 0.0 && total >= max_total * 0.8 {
+                theme::severity(Severity::Warning)
+            } else {
+                Style::default()
+            }
+        });
 
         let row = if compact {
             format!(
@@ -1399,11 +1450,12 @@ fn draw_tokens(f: &mut Frame, area: Rect, app: &App) {
             .iter()
             .map(|b| b.totals.total().max(0) as u64)
             .collect();
+        let trend_style = token_trend_style(&series);
         if series.iter().any(|v| *v > 0) {
-            let spark = Sparkline::default().data(&series).style(theme::accent());
+            let spark = Sparkline::default().data(&series).style(trend_style);
             f.render_widget(spark, row_spark);
         } else {
-            f.render_widget(Paragraph::new(" (flat)").style(theme::muted()), row_spark);
+            f.render_widget(Paragraph::new(" (flat)").style(trend_style), row_spark);
         }
     }
 
@@ -2306,8 +2358,24 @@ impl Viewport {
 
     fn scroll_state(self) -> ScrollbarState {
         ScrollbarState::new(self.total)
-            .position(self.start)
+            .position(self.scrollbar_position())
             .viewport_content_length(self.visible)
+    }
+
+    fn scrollbar_position(self) -> usize {
+        if self.total == 0 || self.visible == 0 {
+            return 0;
+        }
+        let max_start = self.total.saturating_sub(self.visible);
+        if max_start == 0 {
+            return 0;
+        }
+        let start = self.start.min(max_start);
+        let max_position = self.total.saturating_sub(1);
+        start
+            .saturating_mul(max_position)
+            .saturating_add(max_start / 2)
+            / max_start
     }
 }
 
@@ -2342,6 +2410,11 @@ fn compute_viewport(total: usize, selected: usize, budget: usize) -> Viewport {
 fn viewport_range(total: usize, selected: usize, budget: usize) -> (usize, usize) {
     let viewport = compute_viewport(total, selected, budget);
     (viewport.start, viewport.end)
+}
+
+#[cfg(test)]
+fn viewport_scrollbar_position(total: usize, selected: usize, budget: usize) -> usize {
+    compute_viewport(total, selected, budget).scrollbar_position()
 }
 
 fn render_scrollbar(f: &mut Frame, area: Rect, viewport: Viewport) {
@@ -2856,7 +2929,8 @@ fn agent_status_str(status: &AgentStatus) -> &'static str {
 mod tests {
     use super::*;
     use ax_proto::types::{Task, TaskStartMode, TaskStatus, WorkspaceInfo};
-    use ratatui::style::Modifier;
+    use ax_proto::usage::{Tokens, UsageBucket, WorkspaceTrend};
+    use ratatui::style::{Color, Modifier};
 
     #[test]
     fn viewport_range_handles_empty_and_small_windows() {
@@ -2870,6 +2944,13 @@ mod tests {
         assert_eq!(viewport_range(20, 4, 5), (0, 5));
         assert_eq!(viewport_range(20, 5, 5), (1, 6));
         assert_eq!(viewport_range(20, 19, 5), (15, 20));
+    }
+
+    #[test]
+    fn viewport_scrollbar_position_maps_bottom_window_to_track_end() {
+        assert_eq!(viewport_scrollbar_position(20, 0, 5), 0);
+        assert_eq!(viewport_scrollbar_position(20, 4, 5), 0);
+        assert_eq!(viewport_scrollbar_position(20, 19, 5), 19);
     }
 
     #[test]
@@ -3112,6 +3193,50 @@ mod tests {
     }
 
     #[test]
+    fn agents_panel_scrollbar_reaches_bottom_when_last_agent_visible() {
+        let mut app = App::new();
+        app.stream = StreamView::Agents;
+        app.focus = Focus::List;
+        app.agent_entries = (0..12)
+            .map(|idx| AgentEntry {
+                label: format!("agent-{idx:02}"),
+                workspace: format!("agent-{idx:02}"),
+                session_index: Some(idx),
+                level: 0,
+                group: false,
+                reconcile: String::new(),
+            })
+            .collect();
+        app.selected_entry = app.agent_entries.len() - 1;
+
+        let width = 100;
+        let height = 20;
+        let buffer = render_app_to_buffer(&mut app, width, height);
+        let body_area = Rect::new(0, 1, width, height - 2);
+        let (pane_area, _) = split_body_inner(body_area);
+        let rows_area = Rect::new(
+            pane_area.x,
+            pane_area.y + 1,
+            pane_area.width,
+            pane_area.height.saturating_sub(1),
+        );
+        let scrollbar_x = rows_area.right().saturating_sub(1);
+        let bottom_y = rows_area.bottom().saturating_sub(1);
+
+        let (_, selected_y) =
+            first_cell_for(&buffer, width, height, "agent-11").expect("last agent visible");
+        assert_eq!(
+            selected_y, bottom_y,
+            "selected last agent should sit on the final visible row"
+        );
+        assert_eq!(
+            buffer[(scrollbar_x, bottom_y)].symbol(),
+            symbols::block::FULL,
+            "bottom-scrolled agents scrollbar thumb reaches the track end"
+        );
+    }
+
+    #[test]
     fn draw_tail_follows_agent_message_detail_until_user_scrolls_away() {
         let mut app = App::new();
         app.agent_entries = vec![AgentEntry {
@@ -3161,6 +3286,101 @@ mod tests {
     }
 
     #[test]
+    fn tokens_panel_highlights_selected_usage_row() {
+        let mut app = App::new();
+        app.stream = StreamView::Tokens;
+        app.focus = Focus::List;
+        app.usage_trends
+            .insert("alpha".into(), token_trend("alpha", 10));
+        app.usage_trends
+            .insert("beta".into(), token_trend("beta", 20));
+        app.tokens_cursor.index = 1;
+
+        let buffer = render_app_to_buffer(&mut app, 120, 24);
+        let (x, y) = first_cell_for(&buffer, 120, 24, "beta").expect("selected row visible");
+        assert!(
+            buffer[(x, y)].modifier.contains(Modifier::REVERSED),
+            "selected token row is highlighted"
+        );
+        let (trend_x, _) =
+            first_cell_for_on_row(&buffer, 120, y, "(flat)").expect("selected trend cell visible");
+        assert!(
+            !buffer[(trend_x, y)].modifier.contains(Modifier::REVERSED),
+            "selected token trend stays foreground-only"
+        );
+    }
+
+    #[test]
+    fn tokens_panel_scrolls_selected_usage_row_into_view() {
+        let mut app = App::new();
+        app.stream = StreamView::Tokens;
+        app.focus = Focus::List;
+        for name in [
+            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel",
+        ] {
+            app.usage_trends.insert(name.into(), token_trend(name, 10));
+        }
+        app.tokens_cursor.index = 7;
+
+        let buffer = render_app_to_buffer(&mut app, 96, 14);
+        let (x, y) = first_cell_for(&buffer, 96, 14, "hotel").expect("selected row visible");
+        assert!(
+            buffer[(x, y)].modifier.contains(Modifier::REVERSED),
+            "viewport follows the selected token row"
+        );
+    }
+
+    #[test]
+    fn tokens_panel_selected_sparkline_uses_foreground_only_style() {
+        let mut app = App::new();
+        app.stream = StreamView::Tokens;
+        app.focus = Focus::List;
+        app.usage_trends.insert(
+            "alpha".into(),
+            token_trend_with_series("alpha", &[1, 4, 2, 8]),
+        );
+        app.tokens_cursor.index = 0;
+
+        let buffer = render_app_to_buffer(&mut app, 120, 24);
+        let (_, y) = first_cell_for(&buffer, 120, 24, "alpha").expect("selected row visible");
+        let (spark_x, _) =
+            first_non_space_after(&buffer, 120, y, 92).expect("sparkline cell visible");
+        assert_eq!(
+            buffer[(spark_x, y)].bg,
+            Color::Reset,
+            "trend does not use background-heavy styling"
+        );
+        assert!(
+            !buffer[(spark_x, y)].modifier.contains(Modifier::REVERSED),
+            "selected sparkline is not inverse/reversed"
+        );
+        if theme::colors_enabled() {
+            assert_ne!(
+                buffer[(spark_x, y)].fg,
+                Color::Reset,
+                "colored terminals get foreground trend color"
+            );
+        }
+    }
+
+    #[test]
+    fn token_trend_style_uses_plain_foreground_semantics() {
+        let rising = token_trend_style(&[1, 2, 4]);
+        let falling = token_trend_style(&[4, 2, 1]);
+        let neutral = token_trend_style(&[3, 3, 3]);
+        let flat = token_trend_style(&[]);
+
+        for style in [rising, falling, neutral, flat] {
+            assert!(style.bg.is_none());
+            assert!(!style.add_modifier.contains(Modifier::REVERSED));
+        }
+        if theme::colors_enabled() {
+            assert_ne!(rising.fg, falling.fg);
+            assert_ne!(rising.fg, neutral.fg);
+        }
+    }
+
+    #[test]
     fn group_git_summary_rolls_up_identical_child_statuses() {
         let git = WorkspaceGitStatus {
             state: "dirty".into(),
@@ -3204,6 +3424,121 @@ mod tests {
 
         let (summary, _) = group_git_summary(0, &app, true).expect("group git summary");
         assert_eq!(summary, "changed:2 ?1");
+    }
+
+    #[test]
+    fn agents_panel_places_group_git_summary_next_to_name_once() {
+        let git = WorkspaceGitStatus {
+            state: "dirty".into(),
+            modified: 2,
+            untracked: 1,
+            ..WorkspaceGitStatus::default()
+        };
+        let mut app = App::new();
+        app.agent_entries = vec![
+            AgentEntry {
+                label: "▾ ax".into(),
+                workspace: String::new(),
+                session_index: None,
+                level: 0,
+                group: true,
+                reconcile: String::new(),
+            },
+            AgentEntry {
+                label: "orchestrator".into(),
+                workspace: "orchestrator".into(),
+                session_index: Some(0),
+                level: 1,
+                group: false,
+                reconcile: String::new(),
+            },
+            AgentEntry {
+                label: "cli".into(),
+                workspace: "cli".into(),
+                session_index: Some(1),
+                level: 1,
+                group: false,
+                reconcile: String::new(),
+            },
+        ];
+        app.workspace_infos.insert(
+            "orchestrator".into(),
+            workspace_info("orchestrator", git.clone()),
+        );
+        app.workspace_infos
+            .insert("cli".into(), workspace_info("cli", git));
+
+        let rendered = render_app_to_string(&mut app, 120, 18);
+        assert!(rendered.contains("▾ ax git changed:2 ?1"));
+        assert_eq!(rendered.matches("git changed:2 ?1").count(), 1);
+    }
+
+    #[test]
+    fn group_git_summary_marks_mixed_child_statuses() {
+        let dirty = WorkspaceGitStatus {
+            state: "dirty".into(),
+            modified: 2,
+            untracked: 1,
+            ..WorkspaceGitStatus::default()
+        };
+        let clean = WorkspaceGitStatus {
+            state: "clean".into(),
+            ..WorkspaceGitStatus::default()
+        };
+        let mut app = App::new();
+        app.agent_entries = vec![
+            AgentEntry {
+                label: "▾ ax".into(),
+                workspace: String::new(),
+                session_index: None,
+                level: 0,
+                group: true,
+                reconcile: String::new(),
+            },
+            AgentEntry {
+                label: "orchestrator".into(),
+                workspace: "orchestrator".into(),
+                session_index: Some(0),
+                level: 1,
+                group: false,
+                reconcile: String::new(),
+            },
+            AgentEntry {
+                label: "cli".into(),
+                workspace: "cli".into(),
+                session_index: Some(1),
+                level: 1,
+                group: false,
+                reconcile: String::new(),
+            },
+        ];
+        app.workspace_infos
+            .insert("orchestrator".into(), workspace_info("orchestrator", dirty));
+        app.workspace_infos
+            .insert("cli".into(), workspace_info("cli", clean));
+
+        let (summary, _) = group_git_summary(0, &app, true).expect("group git summary");
+        assert_eq!(summary, "mixed");
+
+        let rendered = render_app_to_string(&mut app, 120, 18);
+        assert!(rendered.contains("▾ ax git mixed"));
+    }
+
+    #[test]
+    fn git_summary_suffix_truncates_inside_name_column() {
+        let mut spans = Vec::new();
+        push_padded_split_span(
+            &mut spans,
+            "▾ very-long-project-name",
+            " git mixed",
+            20,
+            Style::default(),
+            theme::severity(Severity::Warning),
+        );
+
+        let rendered = span_text(&spans);
+        assert_eq!(rendered.chars().count(), 20);
+        assert!(rendered.ends_with(" git mixed"));
     }
 
     #[test]
@@ -3347,6 +3682,38 @@ mod tests {
         }
     }
 
+    fn token_trend(name: &str, input: i64) -> WorkspaceTrend {
+        WorkspaceTrend {
+            workspace: name.into(),
+            available: true,
+            total: Tokens {
+                input,
+                output: 1,
+                cache_read: 0,
+                cache_creation: 0,
+            },
+            latest_model: "gpt-test".into(),
+            ..WorkspaceTrend::default()
+        }
+    }
+
+    fn token_trend_with_series(name: &str, series: &[i64]) -> WorkspaceTrend {
+        let mut trend = token_trend(name, series.iter().sum::<i64>().max(1));
+        trend.buckets = series
+            .iter()
+            .map(|total| UsageBucket {
+                totals: Tokens {
+                    input: *total,
+                    output: 0,
+                    cache_read: 0,
+                    cache_creation: 0,
+                },
+                ..UsageBucket::default()
+            })
+            .collect();
+        trend
+    }
+
     fn mock_task() -> Task {
         let now = chrono::Utc::now();
         Task {
@@ -3387,10 +3754,18 @@ mod tests {
     }
 
     fn render_app_to_string(app: &mut App, width: u16, height: u16) -> String {
+        let buffer = render_app_to_buffer(app, width, height);
+        buffer_to_string(&buffer, width, height)
+    }
+
+    fn render_app_to_buffer(app: &mut App, width: u16, height: u16) -> ratatui::buffer::Buffer {
         let backend = ratatui::backend::TestBackend::new(width, height);
         let mut terminal = ratatui::Terminal::new(backend).expect("terminal");
         terminal.draw(|f| draw(f, app)).expect("draw");
-        let buffer = terminal.backend().buffer();
+        terminal.backend().buffer().clone()
+    }
+
+    fn buffer_to_string(buffer: &ratatui::buffer::Buffer, width: u16, height: u16) -> String {
         let mut out = String::new();
         for y in 0..height {
             for x in 0..width {
@@ -3399,5 +3774,57 @@ mod tests {
             out.push('\n');
         }
         out
+    }
+
+    fn first_cell_for(
+        buffer: &ratatui::buffer::Buffer,
+        width: u16,
+        height: u16,
+        needle: &str,
+    ) -> Option<(u16, u16)> {
+        for y in 0..height {
+            let mut line = String::new();
+            for x in 0..width {
+                line.push_str(buffer[(x, y)].symbol());
+            }
+            if let Some(byte_x) = line.find(needle) {
+                let x = line[..byte_x].chars().count() as u16;
+                return Some((x, y));
+            }
+        }
+        None
+    }
+
+    fn first_cell_for_on_row(
+        buffer: &ratatui::buffer::Buffer,
+        width: u16,
+        y: u16,
+        needle: &str,
+    ) -> Option<(u16, u16)> {
+        let mut line = String::new();
+        for x in 0..width {
+            line.push_str(buffer[(x, y)].symbol());
+        }
+        let byte_x = line.find(needle)?;
+        let x = line[..byte_x].chars().count() as u16;
+        Some((x, y))
+    }
+
+    fn first_non_space_after(
+        buffer: &ratatui::buffer::Buffer,
+        width: u16,
+        y: u16,
+        start: u16,
+    ) -> Option<(u16, u16)> {
+        for x in start..width {
+            if buffer[(x, y)].symbol() != " " {
+                return Some((x, y));
+            }
+        }
+        None
+    }
+
+    fn span_text(spans: &[Span<'_>]) -> String {
+        spans.iter().map(|span| span.content.as_ref()).collect()
     }
 }

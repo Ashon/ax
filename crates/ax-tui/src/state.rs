@@ -127,11 +127,10 @@ impl Focus {
 }
 
 /// Shared cursor primitive for every stream view. Carries a single
-/// `index` whose meaning is view-specific — messages read it as
-/// "entries back from the tail", tokens as "first visible row",
-/// tasks as "selected row index". The type stays dumb on purpose:
-/// floor clamping happens here, ceiling clamping happens in render
-/// where the pane height is known.
+/// `index` whose meaning is view-specific, but list-like views use it
+/// as the selected row index. The type stays dumb on purpose: floor
+/// clamping happens here, ceiling clamping happens in the owner where
+/// the row set is known.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct PaneCursor {
     pub(crate) index: usize,
@@ -200,9 +199,9 @@ pub(crate) struct App {
     pub(crate) task_snapshot_error: Option<String>,
     pub(crate) task_cursor: PaneCursor,
     pub(crate) task_filter: TaskFilterMode,
-    /// First visible row index in the tokens table. Clamped at render
-    /// so shrinking `usage_trends` doesn't strand the view past the
-    /// last row.
+    /// Selected workspace row in the tokens table. Render computes a
+    /// viewport around this index so the selected row stays visible
+    /// while the detail pane resolves the same workspace.
     pub(crate) tokens_cursor: PaneCursor,
     /// Scroll offset for the detail pane (bottom half of the body).
     /// Shared across tabs because only one detail is visible at a
@@ -312,6 +311,7 @@ impl App {
         self.detail_scroll.reset();
         self.agent_detail_follow_tail = true;
         self.clamp_task_selection();
+        self.clamp_token_selection();
     }
 
     /// Advance the keyboard focus one panel forward (+1) or backward
@@ -335,6 +335,8 @@ impl App {
             self.stream = *view;
             self.detail_scroll.reset();
             self.agent_detail_follow_tail = true;
+            self.clamp_task_selection();
+            self.clamp_token_selection();
         }
     }
 
@@ -446,10 +448,16 @@ impl App {
         }
     }
 
-    /// Shift the tokens list viewport. Positive `delta` moves the
-    /// view down (toward the last row); negative moves up.
+    /// Move the token-list selection. The rendered viewport follows
+    /// this cursor, matching Messages and Tasks behavior.
     pub(crate) fn scroll_tokens(&mut self, delta: i32) {
+        let n = self.token_row_count();
+        if n == 0 {
+            self.tokens_cursor.reset();
+            return;
+        }
         self.tokens_cursor.shift(delta);
+        self.tokens_cursor.clamp(n - 1);
     }
 
     pub(crate) fn tokens_to_head(&mut self) {
@@ -457,7 +465,12 @@ impl App {
     }
 
     pub(crate) fn tokens_to_tail(&mut self) {
-        self.tokens_cursor.jump_to(self.token_row_count());
+        let n = self.token_row_count();
+        if n == 0 {
+            self.tokens_cursor.reset();
+        } else {
+            self.tokens_cursor.jump_to(n - 1);
+        }
     }
 
     pub(crate) fn scroll_stream(&mut self, delta: i32) {
@@ -485,6 +498,15 @@ impl App {
             .values()
             .filter(|t| t.available && t.total.total() > 0)
             .count()
+    }
+
+    pub(crate) fn clamp_token_selection(&mut self) {
+        let n = self.token_row_count();
+        if n == 0 {
+            self.tokens_cursor.reset();
+            return;
+        }
+        self.tokens_cursor.clamp(n - 1);
     }
 
     /// Called after each refresh so an out-of-range selection (tasks
@@ -797,13 +819,30 @@ mod tests {
         app.usage_trends.insert("b".into(), mock_trend("b"));
 
         app.scroll_tokens(3);
-        assert_eq!(app.tokens_cursor.index, 3);
+        assert_eq!(app.tokens_cursor.index, 1, "selection clamps at last row");
         app.scroll_tokens(-10);
         assert_eq!(app.tokens_cursor.index, 0, "floor clamps at top");
 
         app.tokens_to_tail();
-        assert_eq!(app.tokens_cursor.index, 2, "tail = row count");
+        assert_eq!(app.tokens_cursor.index, 1, "tail selects last row");
         app.tokens_to_head();
+        assert_eq!(app.tokens_cursor.index, 0);
+    }
+
+    #[test]
+    fn clamp_token_selection_snaps_back_when_usage_rows_shrink() {
+        let mut app = App::new();
+        app.usage_trends.insert("a".into(), mock_trend("a"));
+        app.usage_trends.insert("b".into(), mock_trend("b"));
+        app.usage_trends.insert("c".into(), mock_trend("c"));
+        app.tokens_cursor.index = 2;
+
+        app.usage_trends.remove("c");
+        app.clamp_token_selection();
+        assert_eq!(app.tokens_cursor.index, 1);
+
+        app.usage_trends.clear();
+        app.clamp_token_selection();
         assert_eq!(app.tokens_cursor.index, 0);
     }
 

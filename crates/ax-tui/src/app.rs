@@ -264,6 +264,7 @@ fn refresh_usage(app: &mut App, opts: &RunOptions) {
                 .into_iter()
                 .map(|t| (t.workspace.clone(), t))
                 .collect();
+            app.clamp_token_selection();
             app.last_usage_refresh = Some(Instant::now());
             app.clear_refresh_notice(RefreshNoticeSource::Usage);
         }

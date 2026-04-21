@@ -127,7 +127,8 @@ fn handle_list_key(app: &mut App, event: KeyEvent) {
             KeyCode::End | KeyCode::Char('G') => app.messages_to_tail(),
             _ => {}
         },
-        // Tokens is a top-anchored sorted list.
+        // Tokens is a selected workspace-usage list; render keeps the
+        // selected row visible.
         StreamView::Tokens => match event.code {
             KeyCode::Up | KeyCode::Char('k') => app.scroll_tokens(-1),
             KeyCode::Down | KeyCode::Char('j') => app.scroll_tokens(1),
@@ -226,7 +227,7 @@ fn handle_detail_key(app: &mut App, event: KeyEvent) {
 ///
 /// Mapping mirrors the keyboard: Agents moves the selection cursor,
 /// Tasks the task cursor, Messages walks history (wheel-up = older),
-/// Tokens pans the sorted list.
+/// Tokens moves the selected workspace-usage row.
 pub(crate) fn handle_scroll(app: &mut App, direction: i32) {
     if app.quick_actions.open || app.help_open {
         // Overlays swallow the wheel so a stray scroll doesn't flicker
@@ -379,6 +380,7 @@ mod tests {
     use super::*;
     use crate::actions::QuickActionId;
     use ax_proto::types::{Task, TaskStartMode, TaskStatus};
+    use ax_proto::usage::{Tokens, WorkspaceTrend};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn press(code: KeyCode) -> KeyEvent {
@@ -392,6 +394,20 @@ mod tests {
             to: "orch".into(),
             content: "hi".into(),
             task_id: String::new(),
+        }
+    }
+
+    fn mock_trend(name: &str) -> WorkspaceTrend {
+        WorkspaceTrend {
+            workspace: name.into(),
+            available: true,
+            total: Tokens {
+                input: 10,
+                output: 10,
+                cache_read: 0,
+                cache_creation: 0,
+            },
+            ..WorkspaceTrend::default()
         }
     }
 
@@ -753,8 +769,10 @@ mod tests {
         handle_scroll(&mut app, 1);
         assert_eq!(app.messages_cursor.index, 2);
 
-        // List + Tokens: wheel-down pans toward the last row.
+        // List + Tokens: wheel-down moves selection toward the last row.
         app.stream = StreamView::Tokens;
+        app.usage_trends.insert("a".into(), mock_trend("a"));
+        app.usage_trends.insert("b".into(), mock_trend("b"));
         handle_scroll(&mut app, 1);
         assert_eq!(app.tokens_cursor.index, 1);
 
