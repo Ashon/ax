@@ -383,6 +383,19 @@ pub struct ReportTaskProgressRequest {
 }
 
 #[derive(Debug, schemars::JsonSchema, Deserialize)]
+pub struct ReportTaskBlockedRequest {
+    pub id: String,
+    /// Why progress is stuck — what you tried, what went wrong, what
+    /// a human or another agent needs to unblock you.
+    pub reason: String,
+    /// Optional workspace name to notify in addition to the creator.
+    /// Use this when a specific peer owns the blocker (e.g. another
+    /// agent's task output, a missing config file the user maintains).
+    #[serde(default)]
+    pub needs_help_from: Option<String>,
+}
+
+#[derive(Debug, schemars::JsonSchema, Deserialize)]
 pub struct ReportTaskCompletionRequest {
     pub id: String,
     /// Human-readable summary of what was done.
@@ -1028,6 +1041,70 @@ impl Server {
             .request(MessageType::UpdateTask, &payload)
             .await
             .map_err(tool_error)?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&resp.task).unwrap_or_default(),
+        )]))
+    }
+
+    /// `report_task_blocked` — escalate a stuck task to `blocked`
+    /// with a structured reason. Transitions the task (notifying the
+    /// creator via the terminal-status push) and optionally sends an
+    /// explicit help request to a named peer. Use this instead of
+    /// `update_task(status=blocked)` so the reason is captured
+    /// consistently and escalation is one call.
+    #[tool(
+        description = "Mark a task blocked with a structured reason. Notifies the task creator automatically and optionally delivers a help-request message to `needs_help_from`. Use this whenever you are stuck and cannot make progress without external input."
+    )]
+    pub async fn report_task_blocked(
+        &self,
+        Parameters(req): Parameters<ReportTaskBlockedRequest>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let reason = req.reason.trim();
+        if reason.is_empty() {
+            return Err(rmcp::ErrorData::invalid_params(
+                "reason is required",
+                None,
+            ));
+        }
+        let update_payload = UpdateTaskPayload {
+            id: req.id.clone(),
+            status: Some(TaskStatus::Blocked),
+            result: None,
+            log: Some(format!("blocked: {reason}")),
+            confirm: None,
+        };
+        let resp: TaskResponse = self
+            .daemon
+            .request(MessageType::UpdateTask, &update_payload)
+            .await
+            .map_err(tool_error)?;
+
+        if let Some(peer) = req.needs_help_from.as_deref().map(str::trim) {
+            if !peer.is_empty() {
+                let help_content = format!(
+                    "[task-blocked-help] Task ID: {id} — blocked by: {reason}",
+                    id = req.id,
+                );
+                let dispatch_path = self
+                    .effective_config()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
+                let send_payload = SendMessagePayload {
+                    to: peer.to_owned(),
+                    message: help_content,
+                    config_path: dispatch_path,
+                };
+                // Best-effort: if the peer rejects (self, empty,
+                // unregistered workspace), keep the Blocked transition
+                // and surface the send error to the caller.
+                let _sent: SendMessageResponse = self
+                    .daemon
+                    .request(MessageType::SendMessage, &send_payload)
+                    .await
+                    .map_err(tool_error)?;
+            }
+        }
+
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string_pretty(&resp.task).unwrap_or_default(),
         )]))
