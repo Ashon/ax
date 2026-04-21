@@ -221,10 +221,16 @@ async fn inspect_agent_timeout_returns_tool_error_result() {
         .await
         .expect("timeout should be a tool error result");
     assert_eq!(result.is_error, Some(true));
+    let body = call_text(&result);
     assert!(
-        call_text(&result).contains("Timeout: no reply from \"worker\" within 1s"),
-        "body: {}",
-        call_text(&result)
+        body.contains("Timeout: no reply from \"worker\" within 1s"),
+        "body: {body}"
+    );
+    // Timeout should carry target's last-activity watermark so the
+    // caller can tell "never woke up" from "was active moments ago".
+    assert!(
+        body.contains("target last active at"),
+        "timeout error must include last_activity_at hint: {body}"
     );
 
     orch.daemon().close().await;

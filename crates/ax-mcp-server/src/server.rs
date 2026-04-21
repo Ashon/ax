@@ -2031,7 +2031,22 @@ impl Server {
 
         let reply = match self.poll_for_reply(&req.name, timeout).await {
             Ok(reply) => reply,
-            Err(e) => return Ok(tool_execution_error(e)),
+            Err(mut e) => {
+                // Enrich the timeout message with the target's
+                // last-activity watermark so callers can tell "B
+                // never even woke up" from "B was active recently
+                // but is still mid-work". target_entry was captured
+                // above in the pre-check.
+                if let Some(entry) = &target_entry {
+                    if let Some(ts) = entry.last_activity_at {
+                        e = format!(
+                            "{e} (target last active at {activity})",
+                            activity = ts.to_rfc3339(),
+                        );
+                    }
+                }
+                return Ok(tool_execution_error(e));
+            }
         };
 
         Ok(CallToolResult::success(vec![Content::text(
