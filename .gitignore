@@ -6,3 +6,4 @@ dist/
 target/
 **/AGENTS.md
 **/CLAUDE.md
+autoresearch-results.tsv
