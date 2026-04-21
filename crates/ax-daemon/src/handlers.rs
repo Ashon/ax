@@ -162,6 +162,7 @@ pub(crate) fn handle_record_mcp_tool_activity(
     }
 
     let now = Utc::now();
+    let task_id = payload.task_id.trim().to_owned();
     let entry = HistoryEntry {
         timestamp: now,
         from: workspace.to_owned(),
@@ -172,10 +173,17 @@ pub(crate) fn handle_record_mcp_tool_activity(
             payload.duration_ms,
             &payload.error_kind,
         ),
-        task_id: payload.task_id.trim().to_owned(),
+        task_id: task_id.clone(),
     };
     ctx.history.append(&entry);
     ctx.registry.touch(workspace, now);
+    // When the client tags the tool call with a task id, treat it
+    // as an implicit heartbeat: any MCP tool call counts as liveness
+    // on the task, so silent-exit detection doesn't nudge an agent
+    // that is actively working but hasn't called `update_task` yet.
+    if !task_id.is_empty() {
+        ctx.task_store.mark_tool_activity(&task_id, workspace, now);
+    }
 
     response(
         &env.id,

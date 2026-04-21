@@ -613,6 +613,37 @@ impl TaskStore {
             .collect()
     }
 
+    /// Heartbeat the task by bumping `updated_at` when the assignee
+    /// records MCP tool activity tagged with this task. Only mutates
+    /// live (`InProgress`) tasks assigned to `by`; everything else
+    /// is a silent no-op so malformed or speculative task_ids cannot
+    /// reshape state. Returns the snapshot on success.
+    pub fn mark_tool_activity(
+        &self,
+        id: &str,
+        by: &str,
+        when: DateTime<Utc>,
+    ) -> Option<Task> {
+        let mut inner = self.inner.lock().expect("task store poisoned");
+        let task = inner.get_mut(id)?;
+        if task.removed_at.is_some()
+            || !matches!(task.status, TaskStatus::InProgress)
+            || task.assignee != by
+        {
+            return None;
+        }
+        let stamp = if when.timestamp() == 0 {
+            Utc::now()
+        } else {
+            when
+        };
+        task.updated_at = stamp;
+        task.version += 1;
+        let snapshot = task.clone();
+        let _ = self.persist_locked(&inner);
+        Some(snapshot)
+    }
+
     pub fn record_dispatch(&self, id: &str, to: &str, when: DateTime<Utc>) -> Option<Task> {
         let mut inner = self.inner.lock().expect("task store poisoned");
         let task = inner.get_mut(id)?;
@@ -1569,6 +1600,65 @@ mod tests {
         let silent = store
             .list_silent_in_progress(Utc::now(), chrono::Duration::seconds(60));
         assert!(silent.is_empty(), "selector should reject all fixtures");
+    }
+
+    #[test]
+    fn mark_tool_activity_refreshes_updated_at_for_live_assignee() {
+        let store = make_store();
+        let task = seed_in_progress_task(&store);
+        // Age the task so it would show up as silent without activity.
+        {
+            let mut inner = store.inner.lock().expect("lock");
+            let t = inner.get_mut(&task.id).expect("task");
+            t.updated_at = Utc::now() - chrono::Duration::seconds(500);
+        }
+        let before = store.get(&task.id).expect("task").updated_at;
+
+        let now = Utc::now();
+        let snapshot = store
+            .mark_tool_activity(&task.id, "worker", now)
+            .expect("live InProgress task assigned to worker must heartbeat");
+        assert!(snapshot.updated_at > before);
+
+        let silent = store.list_silent_in_progress(now, chrono::Duration::seconds(60));
+        assert!(
+            silent.is_empty(),
+            "heartbeat must clear silent-exit state"
+        );
+    }
+
+    #[test]
+    fn mark_tool_activity_rejects_wrong_assignee() {
+        let store = make_store();
+        let task = seed_in_progress_task(&store);
+        let result = store.mark_tool_activity(&task.id, "someone-else", Utc::now());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn mark_tool_activity_rejects_non_in_progress_task() {
+        let store = make_store();
+        let task = seed_in_progress_task(&store);
+        // Push to a terminal status.
+        store
+            .update_with_confirm(
+                &task.id,
+                Some(TaskStatus::Completed),
+                Some("done; remaining owned dirty files=<none>".into()),
+                None,
+                Some(true),
+                "worker",
+            )
+            .expect("complete");
+        let result = store.mark_tool_activity(&task.id, "worker", Utc::now());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn mark_tool_activity_rejects_unknown_task() {
+        let store = make_store();
+        let result = store.mark_tool_activity("t-ghost-99", "worker", Utc::now());
+        assert!(result.is_none());
     }
 
     #[test]
