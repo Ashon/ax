@@ -54,3 +54,40 @@ fn normalize_path(path: &Path) -> String {
         joined
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_path_preserves_absolute_root() {
+        assert_eq!(normalize_path(Path::new("/")), "/");
+        assert_eq!(normalize_path(Path::new("/tmp/ws")), "/tmp/ws");
+    }
+
+    #[test]
+    fn normalize_path_collapses_redundant_separators_and_dots() {
+        assert_eq!(normalize_path(Path::new("/tmp//ws/./sub")), "/tmp/ws/sub");
+        assert_eq!(normalize_path(Path::new("tmp//./ws")), "tmp/ws");
+    }
+
+    #[test]
+    fn normalize_path_resolves_double_dot_within_absolute_path() {
+        assert_eq!(normalize_path(Path::new("/a/b/../c")), "/a/c");
+        assert_eq!(normalize_path(Path::new("/a/../../b")), "/b");
+    }
+
+    #[test]
+    fn normalize_path_returns_dot_for_empty_relative_components() {
+        assert_eq!(normalize_path(Path::new(".")), ".");
+        assert_eq!(normalize_path(Path::new("./.")), ".");
+    }
+
+    #[test]
+    fn encode_project_key_replaces_slashes_and_dots_with_dashes() {
+        assert_eq!(encode_project_key("/tmp/my.project"), "-tmp-my-project");
+        assert_eq!(encode_project_key("/a/b/c"), "-a-b-c");
+        assert_eq!(encode_project_key("relative.dir"), "relative-dir");
+    }
+
+}
