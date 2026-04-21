@@ -2082,7 +2082,41 @@ impl Server {
 
         let reply = match self.poll_for_reply(&req.to, timeout).await {
             Ok(reply) => reply,
-            Err(e) => return Ok(tool_execution_error(e)),
+            Err(mut e) => {
+                // Best-effort enrichment: snapshot the registry and
+                // splice the target's last_activity_at into the
+                // timeout body so the caller can distinguish "target
+                // never woke" from "target was active but didn't
+                // reply in time". Failure to reach the daemon here
+                // is swallowed — we still surface the original
+                // timeout message.
+                if let Ok(active) = self
+                    .daemon
+                    .request::<serde_json::Value, ListWorkspacesResponse>(
+                        MessageType::ListWorkspaces,
+                        &serde_json::json!({}),
+                    )
+                    .await
+                {
+                    if let Some(ts) = active
+                        .workspaces
+                        .iter()
+                        .find(|w| w.name == req.to)
+                        .and_then(|w| w.last_activity_at)
+                    {
+                        e = format!(
+                            "{e} (target last active at {})",
+                            ts.to_rfc3339(),
+                        );
+                    } else {
+                        e = format!(
+                            "{e} (target {:?} is not currently registered)",
+                            req.to,
+                        );
+                    }
+                }
+                return Ok(tool_execution_error(e));
+            }
         };
         Ok(CallToolResult::success(vec![Content::text(reply)]))
     }

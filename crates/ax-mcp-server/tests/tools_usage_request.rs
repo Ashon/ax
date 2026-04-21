@@ -233,6 +233,71 @@ async fn inspect_agent_timeout_returns_tool_error_result() {
 }
 
 #[tokio::test]
+async fn request_message_timeout_includes_target_last_activity_hint() {
+    let tmp = TempDir::new().expect("tempdir");
+    let cfg = write_config(tmp.path());
+    let handle = spawn_daemon(tmp.path()).await;
+    let orch = connect_server(handle.socket_path(), "orch", &cfg).await;
+    let worker = connect_server(handle.socket_path(), "worker", &cfg).await;
+
+    let result = orch
+        .request_message(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "to": "worker",
+                "message": "please look at this",
+                "timeout": 1,
+            }))
+            .expect("decode"),
+        ))
+        .await
+        .expect("timeout should be a tool error result");
+    assert_eq!(result.is_error, Some(true));
+    let body = call_text(&result);
+    assert!(
+        body.to_lowercase().contains("timeout"),
+        "body: {body}"
+    );
+    assert!(
+        body.contains("target last active at"),
+        "registered target's timeout should carry activity hint: {body}"
+    );
+
+    orch.daemon().close().await;
+    worker.daemon().close().await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn request_message_timeout_flags_unregistered_target() {
+    let tmp = TempDir::new().expect("tempdir");
+    let cfg = write_config(tmp.path());
+    let handle = spawn_daemon(tmp.path()).await;
+    let orch = connect_server(handle.socket_path(), "orch", &cfg).await;
+    // No `worker` connection — request will queue and then time out.
+
+    let result = orch
+        .request_message(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "to": "worker",
+                "message": "are you there",
+                "timeout": 1,
+            }))
+            .expect("decode"),
+        ))
+        .await
+        .expect("timeout result");
+    assert_eq!(result.is_error, Some(true));
+    let body = call_text(&result);
+    assert!(
+        body.contains("not currently registered"),
+        "unregistered target timeout should flag presence: {body}"
+    );
+
+    orch.daemon().close().await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn request_message_times_out_when_reply_never_arrives() {
     let tmp = TempDir::new().expect("tempdir");
     let cfg = write_config(tmp.path());
