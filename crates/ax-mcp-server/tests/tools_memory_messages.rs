@@ -268,3 +268,103 @@ async fn send_message_rejects_self_recipient() {
     orch.daemon().close().await;
     handle.shutdown().await;
 }
+
+#[tokio::test]
+async fn read_messages_respects_limit_parameter() {
+    let tmp = TempDir::new().expect("tempdir");
+    let handle = spawn_daemon(tmp.path()).await;
+    let orch = connect_server(handle.socket_path(), "orch").await;
+    let worker = connect_server(handle.socket_path(), "worker").await;
+
+    for idx in 0..3 {
+        orch.send_message(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "to": "worker",
+                "message": format!("msg-{idx}"),
+            }))
+            .expect("decode request"),
+        ))
+        .await
+        .expect("send succeeds");
+    }
+
+    let read = worker
+        .read_messages(Parameters(
+            serde_json::from_value(serde_json::json!({ "limit": 2 })).expect("decode"),
+        ))
+        .await
+        .expect("read succeeds");
+    let body = call_text(&read);
+    assert!(body.contains("2 message(s):"), "body: {body}");
+
+    // Remaining message is still available on the next read.
+    let rest = worker
+        .read_messages(Parameters(
+            serde_json::from_value(serde_json::json!({})).expect("decode"),
+        ))
+        .await
+        .expect("read succeeds");
+    assert!(call_text(&rest).contains("1 message(s):"));
+
+    orch.daemon().close().await;
+    worker.daemon().close().await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn read_messages_filters_by_sender() {
+    let tmp = TempDir::new().expect("tempdir");
+    let handle = spawn_daemon(tmp.path()).await;
+    let alice = connect_server(handle.socket_path(), "alice").await;
+    let bob = connect_server(handle.socket_path(), "bob").await;
+    let carol = connect_server(handle.socket_path(), "carol").await;
+
+    alice
+        .send_message(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "to": "carol",
+                "message": "from alice",
+            }))
+            .expect("decode request"),
+        ))
+        .await
+        .expect("alice sends");
+    bob.send_message(Parameters(
+        serde_json::from_value(serde_json::json!({
+            "to": "carol",
+            "message": "from bob",
+        }))
+        .expect("decode request"),
+    ))
+    .await
+    .expect("bob sends");
+
+    let filtered = carol
+        .read_messages(Parameters(
+            serde_json::from_value(serde_json::json!({ "from": "alice" })).expect("decode"),
+        ))
+        .await
+        .expect("filtered read succeeds");
+    let body = call_text(&filtered);
+    assert!(body.contains("1 message(s):"), "body: {body}");
+    assert!(body.contains("From: alice"), "body: {body}");
+    assert!(!body.contains("From: bob"), "body: {body}");
+
+    // Bob's message is still pending — the filter does not drain it.
+    let remaining = carol
+        .read_messages(Parameters(
+            serde_json::from_value(serde_json::json!({})).expect("decode"),
+        ))
+        .await
+        .expect("unfiltered read succeeds");
+    assert!(
+        call_text(&remaining).contains("From: bob"),
+        "body: {}",
+        call_text(&remaining)
+    );
+
+    alice.daemon().close().await;
+    bob.daemon().close().await;
+    carol.daemon().close().await;
+    handle.shutdown().await;
+}
