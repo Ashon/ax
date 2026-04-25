@@ -205,6 +205,7 @@ fn reconcile_desired_state_creates_and_cleans_generated_artifacts() {
             config_path: config_path.clone(),
             workspaces: BTreeMap::new(),
             orchestrators: BTreeMap::new(),
+            agent_provider_hashes: BTreeMap::new(),
             max_concurrent_agents: 0,
         };
         desired.workspaces.insert(
@@ -225,6 +226,7 @@ fn reconcile_desired_state_creates_and_cleans_generated_artifacts() {
             config_path: config_path.clone(),
             workspaces: BTreeMap::new(),
             orchestrators: BTreeMap::new(),
+            agent_provider_hashes: BTreeMap::new(),
             max_concurrent_agents: 0,
         };
         previous.workspaces.insert(
@@ -281,6 +283,7 @@ fn reconcile_desired_state_blocks_busy_workspace_restart() {
             config_path: config_path.clone(),
             workspaces: BTreeMap::new(),
             orchestrators: BTreeMap::new(),
+            agent_provider_hashes: BTreeMap::new(),
             max_concurrent_agents: 0,
         };
         previous.workspaces.insert(
@@ -326,6 +329,7 @@ fn reconcile_desired_state_blocks_busy_workspace_restart() {
             config_path,
             workspaces: BTreeMap::new(),
             orchestrators: BTreeMap::new(),
+            agent_provider_hashes: BTreeMap::new(),
             max_concurrent_agents: 0,
         };
         desired.workspaces.insert(

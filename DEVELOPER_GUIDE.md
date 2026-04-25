@@ -239,6 +239,29 @@ cargo test -p ax-daemon task_store::tests::refresh   # 특정 테스트
 - `crates/ax-daemon/src/wake_scheduler.rs`, `task_helpers.rs`: stale/divergence/wake 상태 계산
 - `crates/ax-proto/tests/`: wire 포맷 golden JSON fixture roundtrip
 
+### 커스텀 provider live e2e
+
+커스텀 LLM provider는 일반 CI와 live e2e를 분리해서 관리한다. 기본 테스트에는 URL, 모델명, API key 같은 환경별 값이 들어가면 안 된다. 기본 테스트는 YAML 파싱, provider merge, managed `CODEX_HOME/config.toml` 생성, `wire_api`, `web_search` 반영처럼 deterministic한 동작만 검증한다.
+
+실제 endpoint 호출은 opt-in live e2e로만 실행한다. 테스트 코드는 `#[ignore]` 또는 `AX_LLM_E2E=1` 같은 명시적 플래그 없이는 skip되어야 하며, endpoint/model/key는 모두 환경 변수로 주입한다.
+
+```bash
+AX_LLM_E2E=1 \
+AX_LLM_BASE_URL="http://127.0.0.1:8000/v1" \
+AX_LLM_MODEL="local-model" \
+AX_LLM_API_KEY_ENV="LOCAL_LLM_API_KEY" \
+cargo test -p ax-e2e --test local_llm_provider -- --ignored --nocapture
+```
+
+live provider e2e 작성 규칙:
+
+- repo에 내부 도메인, 실제 모델명, 실제 API key 이름을 커밋하지 않는다.
+- 로그에는 전체 `base_url`이나 secret 값을 출력하지 않는다. 필요하면 host/path를 마스킹한다.
+- 테스트는 임시 `CODEX_HOME`과 임시 project config를 만들고, host `~/.codex` 설정을 수정하지 않는다.
+- OpenAI-compatible local endpoint는 Codex 현재 설정에 맞춰 `wire_api: responses`를 우선 사용한다.
+- endpoint가 Codex 기본 tool을 거절할 수 있으므로 local provider 예시는 `web_search: disabled`를 기본으로 둔다.
+- private/self-hosted runner나 protected environment에서만 live e2e를 실행한다. PR 기본 CI에는 포함하지 않는다.
+
 ---
 
 ## 설정 파일
@@ -257,12 +280,22 @@ cargo test -p ax-daemon task_store::tests::refresh   # 특정 테스트
 project: my-project                  # 프로젝트 이름
 
 orchestrator_runtime: claude         # 오케스트레이터 런타임 (선택)
+default_agent_provider: local        # 기본 모델 provider (선택)
+
+agent_providers:
+  local:
+    runtime: codex
+    model: local-model
+    base_url: http://127.0.0.1:8000/v1
+    wire_api: responses
+    web_search: disabled
 
 workspaces:
   frontend:
     dir: ./frontend                  # 작업 디렉터리 (상대/절대/~ 경로)
     description: "React 프론트엔드"   # 에이전트 설명
     runtime: claude                  # claude 또는 codex (기본: claude)
+    agent_provider: local            # agent_providers 키 (선택)
     instructions: |                  # 에이전트에게 전달할 지시사항
       React와 TypeScript를 사용합니다.
       테스트는 vitest로 실행합니다.
@@ -295,6 +328,7 @@ children:                            # 자식 프로젝트 (계층 구조)
 pub struct Config {
     pub project: String,
     pub orchestrator_runtime: String,
+    pub default_agent_provider: String,
     pub disable_root_orchestrator: bool,
     pub experimental_mcp_team_reconfigure: bool,
     pub codex_model_reasoning_effort: String,
@@ -302,8 +336,18 @@ pub struct Config {
     pub max_orchestrator_depth: u32,
     pub max_children_per_node: u32,
     pub max_concurrent_agents: u32,
+    pub agent_providers: BTreeMap<String, AgentProvider>,
     pub children: BTreeMap<String, Child>,
     pub workspaces: BTreeMap<String, Workspace>,
+}
+
+pub struct AgentProvider {
+    pub runtime: String,
+    pub model: String,
+    pub base_url: String,
+    pub env_key: String,
+    pub wire_api: String,
+    pub web_search: String,
 }
 
 pub struct Workspace {
@@ -311,6 +355,7 @@ pub struct Workspace {
     pub description: String,
     pub shell: String,
     pub runtime: String,
+    pub agent_provider: String,
     pub codex_model_reasoning_effort: String,
     pub agent: String,
     pub instructions: String,
@@ -547,6 +592,7 @@ impl Runtime {
 
 런타임 실행/세션 부트스트랩은 `crates/ax-agent/src/launch.rs`의 `run_with_options`가 담당하며,
 Codex 전용 `CODEX_HOME` 격리는 `crates/ax-agent/src/codex.rs`에서 관리한다.
+`agent_providers` / `agent_provider` 설정은 runtime 선택과 분리되어 있으며, Codex runtime이면 managed `CODEX_HOME/config.toml`에 `model_provider`, `model`, `[model_providers.<id>]` (`base_url`, `env_key`, `wire_api`)와 local endpoint용 `web_search`로 반영된다.
 
 ### 지원 런타임
 

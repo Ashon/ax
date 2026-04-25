@@ -355,12 +355,16 @@ fn load_validated_config(abs: &Path) -> Result<Config, TreeError> {
     }
     let project_dir = crate::paths::ConfigRoot::from_config_path(abs).0;
     let fallback_effort = cfg.codex_model_reasoning_effort.trim().to_owned();
+    let fallback_provider = cfg.default_agent_provider.trim().to_owned();
     let ws_names: Vec<_> = cfg.workspaces.keys().cloned().collect();
     for name in ws_names {
         if let Some(ws) = cfg.workspaces.get_mut(&name) {
             ws.dir = resolve_dir(&project_dir, &ws.dir)
                 .to_string_lossy()
                 .into_owned();
+            if ws.agent_provider.trim().is_empty() {
+                ws.agent_provider.clone_from(&fallback_provider);
+            }
             if ws.codex_model_reasoning_effort.trim().is_empty() {
                 ws.codex_model_reasoning_effort.clone_from(&fallback_effort);
             }

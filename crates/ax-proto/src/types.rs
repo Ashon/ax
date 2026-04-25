@@ -190,6 +190,8 @@ pub struct TeamWorkspaceSpec {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub runtime: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub agent_provider: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub codex_model_reasoning_effort: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub agent: String,

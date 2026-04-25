@@ -8,6 +8,13 @@
 project: my-project
 orchestrator_runtime: claude
 idle_timeout_minutes: 15
+default_agent_provider: local
+
+agent_providers:
+  local:
+    runtime: codex
+    model: local-model
+    base_url: http://127.0.0.1:8000/v1
 
 workspaces:
   frontend:
@@ -36,6 +43,8 @@ children:
 |---|---|
 | `project` | 프로젝트 이름 |
 | `orchestrator_runtime` | root / child orchestrator 기본 runtime |
+| `default_agent_provider` | workspace에 `agent_provider`가 없을 때 사용할 기본 provider |
+| `agent_providers` | runtime별 모델 접속 설정. 현재 Codex provider는 `model`, `base_url`, `env_key`, `wire_api`, `web_search`를 managed `CODEX_HOME/config.toml`에 반영합니다. |
 | `disable_root_orchestrator` | managed root orchestrator state 비활성화 |
 | `experimental_mcp_team_reconfigure` | team reconfigure 실험 기능 |
 | `codex_model_reasoning_effort` | Codex 기본 reasoning effort |
@@ -50,11 +59,36 @@ children:
 | `dir` | 작업 디렉터리 |
 | `description` | 역할 설명 |
 | `runtime` | `claude` 또는 `codex` |
+| `agent_provider` | `agent_providers`에 정의된 provider 이름 |
 | `codex_model_reasoning_effort` | workspace별 Codex reasoning effort override |
 | `instructions` | workspace instruction body |
 | `agent` | 커스텀 명령. `"none"`이면 runtime 대신 셸만 유지 |
 | `shell` | `agent: none`일 때 사용할 셸 |
 | `env` | 세션에 주입할 환경 변수 |
+
+## 로컬 LLM provider
+
+Codex runtime은 OpenAI-compatible endpoint를 provider로 지정할 수 있습니다.
+
+```yaml
+default_agent_provider: local
+
+agent_providers:
+  local:
+    runtime: codex
+    model: <local-model-name>
+    base_url: http://127.0.0.1:8000/v1
+    wire_api: responses
+    web_search: disabled
+
+workspaces:
+  backend:
+    dir: ./backend
+    runtime: codex
+    agent_provider: local
+```
+
+`env_key`가 비어 있으면 별도 API key env var를 쓰지 않습니다. `wire_api`를 생략하면 Codex의 현재 provider 설정에 맞춰 `responses`로 기록됩니다. `base_url`이 있는 provider는 Codex 기본 web search tool이 로컬 endpoint에서 거절되는 것을 피하기 위해 `web_search: disabled`가 기본값입니다.
 
 ## on-demand lifecycle과 설정의 관계
 

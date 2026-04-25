@@ -28,6 +28,8 @@ pub struct ManagedPolicyOverlay {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orchestrator_runtime: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_agent_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disable_root_orchestrator: Option<bool>,
 }
 
@@ -43,6 +45,8 @@ pub struct ManagedWorkspacePatch {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -118,6 +122,9 @@ impl ManagedOverlay {
         if let Some(runtime) = &self.policies.orchestrator_runtime {
             cfg.orchestrator_runtime.clone_from(runtime);
         }
+        if let Some(provider) = &self.policies.default_agent_provider {
+            cfg.default_agent_provider.clone_from(provider);
+        }
         if let Some(flag) = self.policies.disable_root_orchestrator {
             cfg.disable_root_orchestrator = flag;
         }
@@ -140,6 +147,9 @@ impl ManagedOverlay {
             }
             if let Some(v) = &patch.runtime {
                 entry.runtime.clone_from(v);
+            }
+            if let Some(v) = &patch.agent_provider {
+                entry.agent_provider.clone_from(v);
             }
             if let Some(v) = &patch.shell {
                 entry.shell.clone_from(v);
@@ -172,7 +182,9 @@ fn is_disabled(enabled: Option<bool>) -> bool {
 }
 
 fn managed_policy_is_empty(p: &ManagedPolicyOverlay) -> bool {
-    p.orchestrator_runtime.is_none() && p.disable_root_orchestrator.is_none()
+    p.orchestrator_runtime.is_none()
+        && p.default_agent_provider.is_none()
+        && p.disable_root_orchestrator.is_none()
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]

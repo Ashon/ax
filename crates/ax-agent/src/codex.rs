@@ -11,7 +11,7 @@ use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
-use ax_config::{Config, DEFAULT_CODEX_REASONING_EFFORT};
+use ax_config::{AgentProvider, Config, DEFAULT_CODEX_REASONING_EFFORT};
 use sha1::{Digest, Sha1};
 
 #[derive(Debug, thiserror::Error)]
@@ -199,13 +199,16 @@ pub fn prepare_codex_home(
     )?;
 
     let base_config = load_base_codex_config(&home.join(".codex").join("config.toml"))?;
-    let reasoning_effort = resolve_codex_reasoning_effort(config_path, workspace);
+    let resolved_config = resolve_codex_config(config_path, workspace);
 
     let mut content = upsert_top_level_key(
         &base_config,
         "model_reasoning_effort",
-        &toml_quote(&reasoning_effort),
+        &toml_quote(&resolved_config.reasoning_effort),
     );
+    if let Some(provider) = &resolved_config.agent_provider {
+        content = apply_agent_provider_config(content, provider);
+    }
     content = upsert_key_in_section(
         &content,
         &format!("[projects.{}]", toml_quote(dir)),
@@ -359,17 +362,39 @@ fn create_symlink(src: &Path, dst: &Path) -> io::Result<()> {
     std::os::windows::fs::symlink_file(src, dst)
 }
 
-fn resolve_codex_reasoning_effort(config_path: Option<&Path>, workspace: &str) -> String {
+#[derive(Debug, Clone)]
+struct ResolvedCodexConfig {
+    reasoning_effort: String,
+    agent_provider: Option<ResolvedAgentProvider>,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedAgentProvider {
+    id: String,
+    provider: AgentProvider,
+}
+
+fn resolve_codex_config(config_path: Option<&Path>, workspace: &str) -> ResolvedCodexConfig {
     let Some(path) = config_path else {
-        return DEFAULT_CODEX_REASONING_EFFORT.to_owned();
+        return default_codex_config();
     };
     if path.as_os_str().is_empty() {
-        return DEFAULT_CODEX_REASONING_EFFORT.to_owned();
+        return default_codex_config();
     }
 
     match Config::load(path) {
-        Ok(cfg) => codex_reasoning_effort_for_workspace(&cfg, workspace),
-        Err(_) => DEFAULT_CODEX_REASONING_EFFORT.to_owned(),
+        Ok(cfg) => ResolvedCodexConfig {
+            reasoning_effort: codex_reasoning_effort_for_workspace(&cfg, workspace),
+            agent_provider: codex_agent_provider_for_workspace(&cfg, workspace),
+        },
+        Err(_) => default_codex_config(),
+    }
+}
+
+fn default_codex_config() -> ResolvedCodexConfig {
+    ResolvedCodexConfig {
+        reasoning_effort: DEFAULT_CODEX_REASONING_EFFORT.to_owned(),
+        agent_provider: None,
     }
 }
 
@@ -385,6 +410,67 @@ fn codex_reasoning_effort_for_workspace(cfg: &Config, workspace: &str) -> String
         return trimmed.to_owned();
     }
     DEFAULT_CODEX_REASONING_EFFORT.to_owned()
+}
+
+fn codex_agent_provider_for_workspace(
+    cfg: &Config,
+    workspace: &str,
+) -> Option<ResolvedAgentProvider> {
+    let name = cfg
+        .workspaces
+        .get(workspace)
+        .and_then(|ws| non_empty(&ws.agent_provider))
+        .or_else(|| non_empty(&cfg.default_agent_provider))?;
+    let provider = cfg.agent_providers.get(name)?.clone();
+    Some(ResolvedAgentProvider {
+        id: name.to_owned(),
+        provider,
+    })
+}
+
+fn apply_agent_provider_config(mut content: String, resolved: &ResolvedAgentProvider) -> String {
+    let runtime = resolved.provider.runtime.trim().to_ascii_lowercase();
+    if !runtime.is_empty() && runtime != "codex" {
+        return content;
+    }
+
+    content = upsert_top_level_key(&content, "model_provider", &toml_quote(&resolved.id));
+    if let Some(model) = non_empty(&resolved.provider.model) {
+        content = upsert_top_level_key(&content, "model", &toml_quote(model));
+    }
+
+    let Some(base_url) = non_empty(&resolved.provider.base_url) else {
+        return content;
+    };
+    let header = format!("[model_providers.{}]", toml_quote(&resolved.id));
+    content = upsert_key_in_section(
+        &content,
+        &header,
+        "name",
+        &toml_quote(&provider_display_name(resolved)),
+    );
+    content = upsert_key_in_section(&content, &header, "base_url", &toml_quote(base_url));
+    if let Some(env_key) = non_empty(&resolved.provider.env_key) {
+        content = upsert_key_in_section(&content, &header, "env_key", &toml_quote(env_key));
+    }
+    let wire_api = non_empty(&resolved.provider.wire_api).unwrap_or("responses");
+    content = upsert_key_in_section(&content, &header, "wire_api", &toml_quote(wire_api));
+
+    let web_search = non_empty(&resolved.provider.web_search).unwrap_or("disabled");
+    upsert_top_level_key(&content, "web_search", &toml_quote(web_search))
+}
+
+fn provider_display_name(resolved: &ResolvedAgentProvider) -> String {
+    resolved.id.clone()
+}
+
+fn non_empty(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
 }
 
 fn upsert_key_in_section(content: &str, header: &str, key: &str, value: &str) -> String {

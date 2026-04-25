@@ -102,6 +102,8 @@ pub struct DesiredState {
     pub config_path: PathBuf,
     pub workspaces: BTreeMap<String, DesiredWorkspace>,
     pub orchestrators: BTreeMap<String, DesiredOrchestrator>,
+    #[allow(dead_code)]
+    pub agent_provider_hashes: BTreeMap<String, String>,
     /// Root-config cap enforced by spawn paths; 0 disables.
     pub max_concurrent_agents: u32,
 }
@@ -111,6 +113,10 @@ pub struct WorkspaceState {
     pub name: String,
     pub dir: String,
     pub runtime: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub agent_provider: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub agent_provider_hash: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub agent: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -239,7 +245,7 @@ impl<B: TmuxBackend + Clone> Reconciler<B> {
                 .workspaces
                 .get(&name)
                 .expect("desired workspace exists");
-            let record = desired_workspace_state(entry);
+            let record = desired_workspace_state(entry, desired);
             let prev_record = previous.workspaces.get(&name).cloned();
             let session = sessions.get(&name).cloned().unwrap_or_default();
             let matches = prev_record
@@ -534,6 +540,7 @@ pub fn build_desired_state(
         config_path,
         workspaces,
         orchestrators: BTreeMap::new(),
+        agent_provider_hashes: agent_provider_hashes(config),
         max_concurrent_agents: config.max_concurrent_agents,
     }
 }
@@ -629,11 +636,17 @@ impl RuntimeState {
     }
 }
 
-fn desired_workspace_state(entry: &DesiredWorkspace) -> WorkspaceState {
+fn desired_workspace_state(entry: &DesiredWorkspace, desired: &DesiredState) -> WorkspaceState {
     WorkspaceState {
         name: entry.name.clone(),
         dir: clean_path_str(&entry.workspace.dir),
         runtime: clean_runtime(&entry.workspace.runtime),
+        agent_provider: entry.workspace.agent_provider.trim().to_owned(),
+        agent_provider_hash: desired
+            .agent_provider_hashes
+            .get(&entry.name)
+            .cloned()
+            .unwrap_or_default(),
         agent: entry.workspace.agent.trim().to_owned(),
         shell: entry.workspace.shell.trim().to_owned(),
         env: entry.workspace.env.clone(),
@@ -657,6 +670,8 @@ fn workspace_state_matches(a: &WorkspaceState, b: &WorkspaceState) -> bool {
     a.name == b.name
         && a.dir == b.dir
         && a.runtime == b.runtime
+        && a.agent_provider == b.agent_provider
+        && a.agent_provider_hash == b.agent_provider_hash
         && a.agent == b.agent
         && a.shell == b.shell
         && a.instructions_hash == b.instructions_hash
@@ -671,6 +686,44 @@ fn orchestrator_state_matches(a: &OrchestratorState, b: &OrchestratorState) -> b
         && a.prompt_hash == b.prompt_hash
         && a.managed_session == b.managed_session
         && a.root == b.root
+}
+
+fn agent_provider_hashes(config: &Config) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for (workspace_name, workspace) in &config.workspaces {
+        let provider_name = non_empty(&workspace.agent_provider)
+            .or_else(|| non_empty(&config.default_agent_provider))
+            .unwrap_or_default();
+        if provider_name.is_empty() {
+            continue;
+        }
+        let mut fingerprint = format!("id={provider_name}");
+        if let Some(provider) = config.agent_providers.get(provider_name) {
+            fingerprint.push_str("\nruntime=");
+            fingerprint.push_str(provider.runtime.trim());
+            fingerprint.push_str("\nmodel=");
+            fingerprint.push_str(provider.model.trim());
+            fingerprint.push_str("\nbase_url=");
+            fingerprint.push_str(provider.base_url.trim());
+            fingerprint.push_str("\nenv_key=");
+            fingerprint.push_str(provider.env_key.trim());
+            fingerprint.push_str("\nwire_api=");
+            fingerprint.push_str(provider.wire_api.trim());
+            fingerprint.push_str("\nweb_search=");
+            fingerprint.push_str(provider.web_search.trim());
+        }
+        out.insert(workspace_name.clone(), hash_text(&fingerprint));
+    }
+    out
+}
+
+fn non_empty(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
 }
 
 fn load_runtime_state(path: &Path) -> Result<RuntimeState, ReconcileError> {

@@ -83,6 +83,15 @@ fn load_recursive(path: &Path, seen: &mut BTreeSet<PathBuf>) -> Result<Config, T
                 });
             }
         };
+        for (provider_name, provider) in child_cfg.agent_providers {
+            if cfg.agent_providers.contains_key(&provider_name) {
+                eprintln!(
+                    "warning: duplicate agent provider {provider_name:?} from child {name:?}, skipping"
+                );
+                continue;
+            }
+            cfg.agent_providers.insert(provider_name, provider);
+        }
         for (ws_name, ws) in child_cfg.workspaces {
             let merged = qualify_name(&child.prefix, &ws_name);
             if cfg.workspaces.contains_key(&merged) {
@@ -237,10 +246,14 @@ fn normalize_local(cfg: &mut Config, path: &Path) {
     let project_dir = ConfigRoot::from_config_path(path).0;
 
     let fallback_effort = cfg.codex_model_reasoning_effort.trim().to_owned();
+    let fallback_provider = cfg.default_agent_provider.trim().to_owned();
     let workspace_names: Vec<_> = cfg.workspaces.keys().cloned().collect();
     for name in workspace_names {
         if let Some(ws) = cfg.workspaces.get_mut(&name) {
             ws.dir = resolve_dir(&project_dir, &ws.dir);
+            if ws.agent_provider.trim().is_empty() {
+                ws.agent_provider.clone_from(&fallback_provider);
+            }
             if ws.codex_model_reasoning_effort.trim().is_empty() {
                 ws.codex_model_reasoning_effort.clone_from(&fallback_effort);
             }

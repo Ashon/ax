@@ -69,6 +69,8 @@ pub struct Config {
     pub project: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub orchestrator_runtime: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub default_agent_provider: String,
     #[serde(default, skip_serializing_if = "is_false")]
     pub disable_root_orchestrator: bool,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -100,9 +102,27 @@ pub struct Config {
     )]
     pub max_concurrent_agents: u32,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub agent_providers: BTreeMap<String, AgentProvider>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub children: BTreeMap<String, Child>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub workspaces: BTreeMap<String, Workspace>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentProvider {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub runtime: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub base_url: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub env_key: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub wire_api: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub web_search: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -123,6 +143,8 @@ pub struct Workspace {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub runtime: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub agent_provider: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub codex_model_reasoning_effort: String,
     /// Custom command that replaces the runtime default when non-empty.
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -139,6 +161,7 @@ impl Default for Config {
         Self {
             project: String::new(),
             orchestrator_runtime: String::new(),
+            default_agent_provider: String::new(),
             disable_root_orchestrator: false,
             experimental_mcp_team_reconfigure: false,
             codex_model_reasoning_effort: String::new(),
@@ -146,6 +169,7 @@ impl Default for Config {
             max_orchestrator_depth: DEFAULT_MAX_ORCHESTRATOR_DEPTH,
             max_children_per_node: DEFAULT_MAX_CHILDREN_PER_NODE,
             max_concurrent_agents: DEFAULT_MAX_CONCURRENT_AGENTS,
+            agent_providers: BTreeMap::new(),
             children: BTreeMap::new(),
             workspaces: BTreeMap::new(),
         }

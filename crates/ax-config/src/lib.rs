@@ -22,7 +22,7 @@ pub use paths::{
     DEFAULT_CONFIG_DIR, DEFAULT_CONFIG_FILE, LEGACY_CONFIG_FILE,
 };
 pub use schema::{
-    default_idle_timeout_minutes, Child, Config, LoadError, Workspace,
+    default_idle_timeout_minutes, AgentProvider, Child, Config, LoadError, Workspace,
     DEFAULT_CODEX_REASONING_EFFORT, DEFAULT_IDLE_TIMEOUT_MINUTES, DEFAULT_MAX_CHILDREN_PER_NODE,
     DEFAULT_MAX_CONCURRENT_AGENTS, DEFAULT_MAX_ORCHESTRATOR_DEPTH,
 };

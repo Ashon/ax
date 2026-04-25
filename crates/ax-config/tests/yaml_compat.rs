@@ -96,3 +96,37 @@ fn save_then_read_local_is_stable() {
     assert_eq!(reloaded.workspaces.len(), 2);
     assert!(reloaded.children.contains_key("sub"));
 }
+
+#[test]
+fn parses_agent_provider_settings() {
+    let cfg = Config::from_yaml(
+        "\
+project: demo
+default_agent_provider: local
+agent_providers:
+  local:
+    runtime: codex
+    model: local-model
+    base_url: http://127.0.0.1:8000/v1
+    env_key: LOCAL_LLM_API_KEY
+    wire_api: responses
+    web_search: disabled
+workspaces:
+  worker:
+    dir: .
+    runtime: codex
+    agent_provider: local
+",
+    )
+    .expect("parse");
+
+    assert_eq!(cfg.default_agent_provider, "local");
+    let provider = cfg.agent_providers.get("local").expect("provider");
+    assert_eq!(provider.runtime, "codex");
+    assert_eq!(provider.model, "local-model");
+    assert_eq!(provider.base_url, "http://127.0.0.1:8000/v1");
+    assert_eq!(provider.env_key, "LOCAL_LLM_API_KEY");
+    assert_eq!(provider.wire_api, "responses");
+    assert_eq!(provider.web_search, "disabled");
+    assert_eq!(cfg.workspaces["worker"].agent_provider, "local");
+}

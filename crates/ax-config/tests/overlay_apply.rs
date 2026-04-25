@@ -30,6 +30,7 @@ fn apply_to_adds_patches_and_respects_delete_flag() {
         policies: ManagedPolicyOverlay {
             orchestrator_runtime: Some("codex".to_owned()),
             disable_root_orchestrator: Some(true),
+            ..Default::default()
         },
         ..Default::default()
     };

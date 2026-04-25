@@ -12,6 +12,7 @@ use ax_daemon::{Daemon, DaemonHandle};
 use ax_mcp_server::{DaemonClient, Server};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
+use uuid::Uuid;
 
 async fn spawn_daemon(state_dir: &Path) -> DaemonHandle {
     let socket_path = state_dir.join("daemon.sock");
@@ -38,28 +39,47 @@ async fn connect_server(socket: &Path, workspace: &str, config_path: &Path) -> S
     Server::new(daemon).with_config_path(config_path.to_path_buf())
 }
 
+struct TmuxCleanup(String);
+
+impl Drop for TmuxCleanup {
+    fn drop(&mut self) {
+        let _ = ax_tmux::destroy_session(&self.0);
+    }
+}
+
+fn unique_worker() -> String {
+    format!("worker-{}", Uuid::new_v4().simple())
+}
+
 fn write_config(dir: &Path) -> PathBuf {
+    write_config_with_worker(dir, "worker")
+}
+
+fn write_config_with_worker(dir: &Path, worker: &str) -> PathBuf {
     let ax_dir = dir.join(".ax");
     std::fs::create_dir_all(&ax_dir).expect("mkdir .ax");
     let path = ax_dir.join("config.yaml");
     std::fs::write(
         &path,
-        concat!(
-            "project: demo\n",
-            "disable_root_orchestrator: true\n",
-            "workspaces:\n",
-            "  alpha:\n",
-            "    dir: /tmp/alpha\n",
-            "    description: cli workspace\n",
-            "    runtime: codex\n",
-            "  beta:\n",
-            "    dir: /tmp/beta\n",
-            "    description: other workspace\n",
-            "    agent: none\n",
-            "  worker:\n",
-            "    dir: /tmp/worker\n",
-            "    description: reply target\n",
-            "    agent: none\n",
+        format!(
+            concat!(
+                "project: demo\n",
+                "disable_root_orchestrator: true\n",
+                "workspaces:\n",
+                "  alpha:\n",
+                "    dir: /tmp/alpha\n",
+                "    description: cli workspace\n",
+                "    runtime: codex\n",
+                "  beta:\n",
+                "    dir: /tmp/beta\n",
+                "    description: other workspace\n",
+                "    agent: none\n",
+                "  {worker}:\n",
+                "    dir: /tmp/worker\n",
+                "    description: reply target\n",
+                "    agent: none\n",
+            ),
+            worker = worker
         ),
     )
     .expect("write config");
@@ -186,10 +206,7 @@ async fn inspect_agent_fails_fast_when_target_not_registered() {
 
     assert_eq!(result.is_error, Some(true));
     let body = call_text(&result);
-    assert!(
-        body.contains("not currently registered"),
-        "body: {body}"
-    );
+    assert!(body.contains("not currently registered"), "body: {body}");
     // Pre-check must be effectively instantaneous — if we waited
     // close to the 60s timeout, the pre-check wasn't consulted.
     assert!(
@@ -204,15 +221,17 @@ async fn inspect_agent_fails_fast_when_target_not_registered() {
 #[tokio::test]
 async fn inspect_agent_timeout_returns_tool_error_result() {
     let tmp = TempDir::new().expect("tempdir");
-    let cfg = write_config(tmp.path());
+    let worker_name = unique_worker();
+    let _cleanup = TmuxCleanup(worker_name.clone());
+    let cfg = write_config_with_worker(tmp.path(), &worker_name);
     let handle = spawn_daemon(tmp.path()).await;
     let orch = connect_server(handle.socket_path(), "orch", &cfg).await;
-    let worker = connect_server(handle.socket_path(), "worker", &cfg).await;
+    let worker = connect_server(handle.socket_path(), &worker_name, &cfg).await;
 
     let result = orch
         .inspect_agent(Parameters(
             serde_json::from_value(serde_json::json!({
-                "name": "worker",
+                "name": worker_name,
                 "question": "status?",
                 "timeout": 1,
             }))
@@ -222,7 +241,10 @@ async fn inspect_agent_timeout_returns_tool_error_result() {
         .expect("timeout should be a tool error result");
     assert_eq!(result.is_error, Some(true));
     assert!(
-        call_text(&result).contains("Timeout: no reply from \"worker\" within 1s"),
+        call_text(&result).contains(&format!(
+            "Timeout: no reply from {:?} within 1s",
+            worker_name
+        )),
         "body: {}",
         call_text(&result)
     );
@@ -235,15 +257,17 @@ async fn inspect_agent_timeout_returns_tool_error_result() {
 #[tokio::test]
 async fn request_message_timeout_includes_target_last_activity_hint() {
     let tmp = TempDir::new().expect("tempdir");
-    let cfg = write_config(tmp.path());
+    let worker_name = unique_worker();
+    let _cleanup = TmuxCleanup(worker_name.clone());
+    let cfg = write_config_with_worker(tmp.path(), &worker_name);
     let handle = spawn_daemon(tmp.path()).await;
     let orch = connect_server(handle.socket_path(), "orch", &cfg).await;
-    let worker = connect_server(handle.socket_path(), "worker", &cfg).await;
+    let worker = connect_server(handle.socket_path(), &worker_name, &cfg).await;
 
     let result = orch
         .request_message(Parameters(
             serde_json::from_value(serde_json::json!({
-                "to": "worker",
+                "to": worker_name,
                 "message": "please look at this",
                 "timeout": 1,
             }))
@@ -253,10 +277,7 @@ async fn request_message_timeout_includes_target_last_activity_hint() {
         .expect("timeout should be a tool error result");
     assert_eq!(result.is_error, Some(true));
     let body = call_text(&result);
-    assert!(
-        body.to_lowercase().contains("timeout"),
-        "body: {body}"
-    );
+    assert!(body.to_lowercase().contains("timeout"), "body: {body}");
     assert!(
         body.contains("target last active at"),
         "registered target's timeout should carry activity hint: {body}"
@@ -270,7 +291,9 @@ async fn request_message_timeout_includes_target_last_activity_hint() {
 #[tokio::test]
 async fn request_message_timeout_flags_unregistered_target() {
     let tmp = TempDir::new().expect("tempdir");
-    let cfg = write_config(tmp.path());
+    let worker_name = unique_worker();
+    let _cleanup = TmuxCleanup(worker_name.clone());
+    let cfg = write_config_with_worker(tmp.path(), &worker_name);
     let handle = spawn_daemon(tmp.path()).await;
     let orch = connect_server(handle.socket_path(), "orch", &cfg).await;
     // No `worker` connection — request will queue and then time out.
@@ -278,7 +301,7 @@ async fn request_message_timeout_flags_unregistered_target() {
     let result = orch
         .request_message(Parameters(
             serde_json::from_value(serde_json::json!({
-                "to": "worker",
+                "to": worker_name,
                 "message": "are you there",
                 "timeout": 1,
             }))
@@ -300,16 +323,18 @@ async fn request_message_timeout_flags_unregistered_target() {
 #[tokio::test]
 async fn request_message_times_out_when_reply_never_arrives() {
     let tmp = TempDir::new().expect("tempdir");
-    let cfg = write_config(tmp.path());
+    let worker_name = unique_worker();
+    let _cleanup = TmuxCleanup(worker_name.clone());
+    let cfg = write_config_with_worker(tmp.path(), &worker_name);
     let handle = spawn_daemon(tmp.path()).await;
     let orch = connect_server(handle.socket_path(), "orch", &cfg).await;
-    let worker = connect_server(handle.socket_path(), "worker", &cfg).await;
+    let worker = connect_server(handle.socket_path(), &worker_name, &cfg).await;
 
     // timeout=1 makes the polling loop give up after the first tick.
     let result = orch
         .request_message(Parameters(
             serde_json::from_value(serde_json::json!({
-                "to": "worker",
+                "to": worker_name,
                 "message": "please review PR",
                 "timeout": 1,
             }))

@@ -93,6 +93,50 @@ workspaces:
 }
 
 #[test]
+fn prepare_codex_home_writes_codex_agent_provider_config() {
+    let home = tempfile::tempdir().unwrap();
+    with_home(home.path(), || {
+        fs::create_dir_all(home.path().join(".codex")).unwrap();
+
+        let config_path = home.path().join(".ax").join("config.yaml");
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        fs::write(
+            &config_path,
+            "\
+default_agent_provider: local
+agent_providers:
+  local:
+    runtime: codex
+    model: local-test-model
+    base_url: http://127.0.0.1:8000/v1
+workspaces:
+  ws:
+    dir: .
+    runtime: codex
+",
+        )
+        .unwrap();
+
+        let codex_home = prepare_codex_home(
+            "ws",
+            &home.path().display().to_string(),
+            Path::new("/tmp/ax.sock"),
+            Path::new("/tmp/ax"),
+            Some(&config_path),
+        )
+        .unwrap();
+
+        let content = fs::read_to_string(codex_home.join("config.toml")).unwrap();
+        assert!(content.contains("model_provider = \"local\""));
+        assert!(content.contains("model = \"local-test-model\""));
+        assert!(content.contains("[model_providers.\"local\"]"));
+        assert!(content.contains("base_url = \"http://127.0.0.1:8000/v1\""));
+        assert!(content.contains("wire_api = \"responses\""));
+        assert!(content.contains("web_search = \"disabled\""));
+    });
+}
+
+#[test]
 fn prepare_codex_home_for_launch_fresh_removes_stale_state() {
     let home = tempfile::tempdir().unwrap();
     with_home(home.path(), || {

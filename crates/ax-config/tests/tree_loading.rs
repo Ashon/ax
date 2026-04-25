@@ -35,6 +35,43 @@ fn load_merges_child_workspaces_with_prefix() {
 }
 
 #[test]
+fn load_merges_child_agent_providers_and_applies_child_default() {
+    let root_dir = tempfile::tempdir().unwrap();
+    let root = root_dir.path();
+    let child = root.join("child");
+
+    write_config(
+        &default_config_path(root),
+        "project: parent\nchildren:\n  sub:\n    dir: ./child\n    prefix: team\n",
+    );
+    write_config(
+        &default_config_path(&child),
+        "\
+project: child
+default_agent_provider: local
+agent_providers:
+  local:
+    runtime: codex
+    base_url: http://127.0.0.1:8000/v1
+workspaces:
+  worker:
+    dir: .
+    runtime: codex
+",
+    );
+
+    let cfg = Config::load(default_config_path(root)).expect("load");
+    assert!(cfg.agent_providers.contains_key("local"));
+    assert_eq!(
+        cfg.workspaces
+            .get("team.worker")
+            .expect("child workspace")
+            .agent_provider,
+        "local"
+    );
+}
+
+#[test]
 fn load_tree_preserves_hierarchy() {
     let root_dir = tempfile::tempdir().unwrap();
     let root = root_dir.path();

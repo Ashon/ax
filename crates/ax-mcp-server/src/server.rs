@@ -595,6 +595,8 @@ pub struct TeamWorkspaceSpecInput {
     #[serde(default)]
     pub runtime: Option<String>,
     #[serde(default)]
+    pub agent_provider: Option<String>,
+    #[serde(default)]
     pub codex_model_reasoning_effort: Option<String>,
     #[serde(default)]
     pub agent: Option<String>,
@@ -1017,17 +1019,11 @@ impl Server {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let note = req.note.trim();
         if note.is_empty() {
-            return Err(rmcp::ErrorData::invalid_params(
-                "note is required",
-                None,
-            ));
+            return Err(rmcp::ErrorData::invalid_params("note is required", None));
         }
         let current: TaskResponse = self
             .daemon
-            .request(
-                MessageType::GetTask,
-                &GetTaskPayload { id: req.id.clone() },
-            )
+            .request(MessageType::GetTask, &GetTaskPayload { id: req.id.clone() })
             .await
             .map_err(tool_error)?;
         // Only promote when the task is still pending; in-progress
@@ -1068,10 +1064,7 @@ impl Server {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let reason = req.reason.trim();
         if reason.is_empty() {
-            return Err(rmcp::ErrorData::invalid_params(
-                "reason is required",
-                None,
-            ));
+            return Err(rmcp::ErrorData::invalid_params("reason is required", None));
         }
         let payload = UpdateTaskPayload {
             id: req.id,
@@ -1105,10 +1098,7 @@ impl Server {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let reason = req.reason.trim();
         if reason.is_empty() {
-            return Err(rmcp::ErrorData::invalid_params(
-                "reason is required",
-                None,
-            ));
+            return Err(rmcp::ErrorData::invalid_params("reason is required", None));
         }
         let update_payload = UpdateTaskPayload {
             id: req.id.clone(),
@@ -1168,10 +1158,7 @@ impl Server {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let summary = req.summary.trim();
         if summary.is_empty() {
-            return Err(rmcp::ErrorData::invalid_params(
-                "summary is required",
-                None,
-            ));
+            return Err(rmcp::ErrorData::invalid_params("summary is required", None));
         }
         let clean_files: Vec<String> = req
             .dirty_files
@@ -1504,6 +1491,32 @@ impl Server {
             if let Some(runtime) = &runtime_name {
                 info.insert("runtime".into(), serde_json::Value::String(runtime.clone()));
             }
+            if !ws.agent_provider.trim().is_empty() {
+                info.insert(
+                    "agent_provider".into(),
+                    serde_json::Value::String(ws.agent_provider.trim().to_owned()),
+                );
+                if let Some(provider) = cfg.agent_providers.get(ws.agent_provider.trim()) {
+                    if !provider.model.trim().is_empty() {
+                        info.insert(
+                            "model".into(),
+                            serde_json::Value::String(provider.model.trim().to_owned()),
+                        );
+                    }
+                    if !provider.base_url.trim().is_empty() {
+                        info.insert(
+                            "base_url".into(),
+                            serde_json::Value::String(provider.base_url.trim().to_owned()),
+                        );
+                    }
+                    if !provider.web_search.trim().is_empty() {
+                        info.insert(
+                            "web_search".into(),
+                            serde_json::Value::String(provider.web_search.trim().to_owned()),
+                        );
+                    }
+                }
+            }
             info.insert(
                 "launch_mode".into(),
                 serde_json::Value::String(launch_mode.into()),
@@ -1560,10 +1573,7 @@ impl Server {
                     );
                 }
                 if let Some(tid) = ws_info.current_task_id {
-                    info.insert(
-                        "current_task_id".into(),
-                        serde_json::Value::String(tid),
-                    );
+                    info.insert("current_task_id".into(), serde_json::Value::String(tid));
                 }
             }
             if let Some(path) = instruction_file {
@@ -2104,15 +2114,9 @@ impl Server {
                         .find(|w| w.name == req.to)
                         .and_then(|w| w.last_activity_at)
                     {
-                        e = format!(
-                            "{e} (target last active at {})",
-                            ts.to_rfc3339(),
-                        );
+                        e = format!("{e} (target last active at {})", ts.to_rfc3339(),);
                     } else {
-                        e = format!(
-                            "{e} (target {:?} is not currently registered)",
-                            req.to,
-                        );
+                        e = format!("{e} (target {:?} is not currently registered)", req.to,);
                     }
                 }
                 return Ok(tool_execution_error(e));
@@ -2600,6 +2604,10 @@ fn matches_agent_query(info: &serde_json::Map<String, serde_json::Value>, query:
         "dir",
         "description",
         "runtime",
+        "agent_provider",
+        "model",
+        "base_url",
+        "web_search",
         "command",
         "state",
         "instructions_preview",
@@ -2746,6 +2754,7 @@ impl TeamWorkspaceSpecInput {
             description: self.description.unwrap_or_default(),
             shell: self.shell.unwrap_or_default(),
             runtime: self.runtime.unwrap_or_default(),
+            agent_provider: self.agent_provider.unwrap_or_default(),
             codex_model_reasoning_effort: self.codex_model_reasoning_effort.unwrap_or_default(),
             agent: self.agent.unwrap_or_default(),
             instructions: self.instructions.unwrap_or_default(),

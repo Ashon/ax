@@ -339,9 +339,13 @@ pub(crate) fn parse_list_sessions_result(output: &Output) -> Result<Vec<SessionI
     let stdout = String::from_utf8_lossy(&output.stdout);
     if !output.status.success() {
         let combined = format!("{}{}", stdout, String::from_utf8_lossy(&output.stderr));
-        // "no server running" is how tmux signals an empty-but-healthy
-        // state; surface it as an empty list rather than an error.
-        if combined.contains("no server running") {
+        // tmux reports "no sessions" differently across platforms.
+        // Surface an absent server/socket as an empty list rather than
+        // failing capacity checks before the first session exists.
+        if combined.contains("no server running")
+            || (combined.contains("error connecting to")
+                && combined.contains("No such file or directory"))
+        {
             return Ok(Vec::new());
         }
         return Err(TmuxError::Command {
@@ -422,6 +426,23 @@ malformed line
     #[test]
     fn parse_list_sessions_stdout_on_empty_returns_empty() {
         let sessions = parse_list_sessions_stdout("").unwrap();
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn parse_list_sessions_result_treats_missing_socket_as_empty() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let output = Output {
+            status: std::process::ExitStatus::from_raw(1 << 8),
+            stdout: Vec::new(),
+            stderr:
+                b"error connecting to /private/tmp/tmux-501/default (No such file or directory)"
+                    .to_vec(),
+        };
+
+        let sessions = parse_list_sessions_result(&output).unwrap();
         assert!(sessions.is_empty());
     }
 }
