@@ -12,6 +12,7 @@
 
 ## 행동 규칙
 - read_messages를 주기적으로 확인하여 메시지를 처리하세요.
+- `read_messages`가 비어 있어도 "작업 없음"으로 결론내리기 전에는 `list_tasks(assignee="ax.orchestrator", status="pending")` 및 `list_tasks(assignee="ax.orchestrator", status="in_progress")`로 자신에게 할당된 daemon task를 확인하고, runnable task는 `get_task`로 구조화된 문맥을 확인한 뒤 처리하세요.
 - **위임은 항상 `send_message`로** 하세요. `request` 툴은 블로킹이라 여러 워크스페이스에 순차 호출하면 타임아웃이 쌓여 매우 느려집니다.
 - 여러 워크스페이스에 동시에 일을 보낼 때는 `send_message`를 연속해서 호출하고(병렬 dispatch), 이후 `read_messages`로 응답을 수집하세요.
 - **상위 오케스트레이터(`orchestrator`)로부터 메시지를 받으면**, 자체 워크스페이스들에게 `send_message`로 병렬 분배하고, 응답을 수집한 뒤 **즉시** `send_message(to="orchestrator")`로 요약 결과를 반드시 회신하세요. 회신 없이 유휴 상태로 들어가면 안 됩니다.
@@ -28,12 +29,12 @@
 - 현재 기본 recall 범위: `global`, `project:ax`, `workspace:ax.orchestrator`
 
 현재 관련 durable memory:
-- [handoff] `project:ax` Completed Tokens tab focus and scroll behavior: Task 85af2c70 completed: ax TUI Tokens tab now has visible selected-row focus/highlight and scroll-into-view behavior. ax.cli child d98408e3 changed crates/ax-tui/src/{app.rs,input.rs,render.rs,state.rs}. Root cause: tokens_cursor was used as viewport offset while detail treated it as selected row, and renderer did not apply selected-row styling. Policy: one sorted workspace usage row is selected; Up/Down/Page/Home/End and mouse wheel move selection; render computes viewport around selected index; detail resolves same workspace; refresh/tab entry clamps selection, empty list resets to 0. Validation passed: cargo test -p ax-tui render::tests (24/24), state::tests (16/16), input::tests (17/17), full cargo test -p ax-tui (108/108 + 0 doc tests). Prior agents-panel git status render.rs patch preserved. remaining owned dirty files=crates/ax-tui/src/app.rs, crates/ax-tui/src/input.rs, crates/ax-tui/src/render.rs, crates/ax-tui/src/state.rs; residual scope=uncommitted task patch only, no pending implementation/test work. No live TUI manual run; buffer tests cover highlight and viewport. (tags: completed, focus, scroll, tokens, tui)
-- [handoff] `project:ax` Completed agents panel git status name-adjacent placement: Task 0438a01a completed: ax TUI agents panel now renders workspace/group git status next to the workspace/group name, not in INFO and not repeated on child leaf rows. ax.cli child da2f4578 implemented scoped changes in crates/ax-tui/src/render.rs. UX examples: `▾ ax git changed:2 ?1`, `▾ ax git mixed`, compact `git ~2 ?1`. Tests passed: cargo test -p ax-tui render::tests (22/22); cargo test -p ax-tui (105/105 + 0 doc tests). Coordination: MCP commit/push was complete at 4b0c321 before edits; no MCP files touched. Remaining owned dirty files=crates/ax-tui/src/render.rs; residual scope=uncommitted task patch only, no pending implementation/test work. Visual/manual live TUI not run; render buffer tests cover requested strings. (tags: agents-panel, completed, git-status, tui)
-- [handoff] `project:ax` MCP tool errors no longer surface expected failures as INTERNAL_ERROR: Task 69b5eae7-4ea3-470e-8a9c-87fc9f7c26a3 completed via ax.mcp child 4545f8d9-772d-4ba8-9ad4-b6ca66f36036. Root cause: ax-mcp-server mapped expected tool execution failures (DaemonClientError::Daemon from start_task validation and inspect_agent/request timeouts) to rmcp::ErrorData::internal_error, surfacing as JSON-RPC -32603/INTERNAL_ERROR. Repro: live start_task with embedded Task ID failed before task creation and returned `Mcp error: -32603: daemon error: message must not include Task ID ...`. Fix scoped to crates/ax-mcp-server/src/server.rs: expected start_task, inspect_agent, and shared request timeout/send failures now return CallToolResult::error/isError=true; telemetry records isError=true as failed TOOL_ERROR. Tests added/updated: start_task_validation_error_returns_tool_error_result, inspect_agent_timeout_returns_tool_error_result, request_message_times_out_when_reply_never_arrives, tool_error_result_records_error_without_protocol_error. Validation passed: cargo fmt -p ax-mcp-server -- --check; cargo test -p ax-mcp-server. Dirty files left uncommitted: crates/ax-mcp-server/src/server.rs, crates/ax-mcp-server/tests/telemetry_roundtrip.rs, crates/ax-mcp-server/tests/tools_tasks.rs, crates/ax-mcp-server/tests/tools_usage_request.rs. (tags: completed, error-handling, internal-error, mcp, tool-errors)
-- [handoff] `project:ax` Runtime follow-up after TUI instructions/activity work: Task 747a4619-db15-4f48-a372-38cf37908db3 refreshed ax.runtime durable follow-up context after recent TUI instructions/activity work. ax.runtime owns agent runtime behavior and Codex/Claude execution adapters in crates/ax-agent, including runtime CLI bootstrap, resume/continue semantics, runtime home isolation such as CODEX_HOME, and source-of-truth runtime metadata when UI/CLI need it. Current pushed baseline remains commit 0d61a39597d6f417af2ef42b12413d1b79e80672 (`Track MCP activity and idle safety gates`) on origin/main. After that push, known uncommitted non-runtime/TUI state exists in .ax/orchestrator-ax/AGENTS.md plus crates/ax-tui/src/state.rs, crates/ax-tui/src/input.rs, crates/ax-tui/src/render.rs. Agents detail Instructions currently renders available config/tree/workspace fields: kind, project, dir, runtime, description, instructions. Exact generated orchestrator prompt display remains non-MVP and should not be inferred by ax.cli from partial display fields. Future runtime-owned collaboration points: define and emit the source of truth for exact generated orchestrator prompts if UI needs prompt display; define richer runtime/session metadata for Codex/Claude sessions; expose adapter-specific instruction provenance when needed; coordinate token/model breakdown only where runtime adapters are authoritative. These are follow-up scope, separate from the completed TUI UI work. No code changes were made for this memory refresh. (tags: follow-up, instructions, memory-refresh, runtime, tui)
-- [handoff] `project:ax` MCP follow-up after TUI activity tab: Task f5d0ef6a-1a60-4b76-91ae-be1bc981d70b refreshed ax.mcp follow-up context after recent TUI Agents detail Activity work. Current baseline remains commit 0d61a39597d6f417af2ef42b12413d1b79e80672 (`Track MCP activity and idle safety gates`) on origin/main; the pushed baseline was previously verified with cargo test -p ax-proto -p ax-daemon -p ax-mcp-server and git diff --check. Current ax.mcp ownership reminder: MCP stdio server, daemon client, MCP tool surface, planner, user-facing MCP schema/input validation/tool naming. Current Agents detail Activity tab uses selected-workspace daemon/MCP-looking message-history rows. Structured MCP telemetry reader/query API remains non-MVP and was intentionally not implemented in the completed TUI scope. MCP-owned future follow-up: if UI or CLI needs precise tool-call timelines, structured MCP activity rows, or richer MCP query API, ax.mcp and ax.daemon should first define the server/daemon surface and contracts before ax.cli consumes it. Known dirty state at refresh time: .ax/orchestrator-ax/AGENTS.md plus crates/ax-tui/src/state.rs, crates/ax-tui/src/input.rs, crates/ax-tui/src/render.rs are modified; crates/ax-mcp-server has no owned dirty files. No code changes were made for this memory refresh. (tags: follow-up, mcp, memory-refresh, telemetry, tui)
-- [handoff] `project:ax` Daemon follow-up after TUI activity/message work: Task 0d928c73-4f07-423b-b6d5-ff19662ba05f refreshed ax.daemon follow-up context after recent TUI activity/message work. Current pushed baseline is commit 0d61a39597d6f417af2ef42b12413d1b79e80672 (`Track MCP activity and idle safety gates`) on origin/main; release verification for that push included cargo test -p ax-proto -p ax-daemon -p ax-mcp-server and git diff --check. Later uncommitted UI-only changes are in crates/ax-tui/src/state.rs, crates/ax-tui/src/input.rs, crates/ax-tui/src/render.rs. Current Agents detail local tabs intentionally avoid new daemon APIs and consume existing message/task history surfaces: Messages/Activity use loaded message-history tail rows; Tasks filters by assignee/created_by/claimed_by/log workspace. Daemon-owned future collaboration, if requested, is structured message/activity/query surfaces beyond tail-based message_history, richer task/activity metadata, and cross-workspace task graph. These are not part of the completed TUI scope and no code changes were made for this memory refresh. (tags: activity, daemon, follow-up, memory-refresh, tui)
+- [handoff] `project:ax` Completed TUI wake-task selection hang fix: Task 6f086493 completed by ax.tui. Root cause path: TUI Tasks tab Enter opens remediation overlay; selecting Wake queues PendingTaskAction; app loop previously called Client::intervene_task synchronously; daemon InterveneTask(wake) can block in handle_intervene_task -> dispatch_task_wake -> session_manager.ensure_runnable/ax_workspace::dispatch_runnable_work readiness wait (daemon task af43f29b is addressing daemon-side response boundary). TUI fix in crates/ax-tui/src/app.rs: task actions now run in a background worker thread and the render/input loop polls a channel nonblocking, so wake selection does not freeze the UI while the RPC waits. TUI does not rely on synchronous woken completion; it treats daemon response as eventual notice. Added app::tests::pending_task_action_does_not_block_tui_loop_while_daemon_responds with fake daemon delayed register/InterveneTask. Updated crates/ax-tui/src/render.rs WorkspaceInfo fixture for status_metrics protocol field. Validation passed: rustfmt --edition 2021 --check crates/ax-tui/src/app.rs crates/ax-tui/src/render.rs; cargo test -p ax-tui app::tests::pending_task_action_does_not_block_tui_loop_while_daemon_responds; cargo test -p ax-tui daemon::tests::create_task_sends_wire_payload_and_decodes_response; cargo test -p ax-tui --lib (125/125); git diff --check -- ax-tui files. Remaining owned dirty files=crates/ax-tui/src/app.rs, crates/ax-tui/src/render.rs, crates/ax-tui/src/daemon.rs, crates/ax-tui/src/input.rs, crates/ax-tui/src/state.rs; residual scope=uncommitted ax-tui patches remain, including pre-existing task-create/UI changes plus wake-task patch. (tags: completed, hang, intervene_task, nonblocking, tui, wake-task)
+- [handoff] `project:ax` MCP read_messages pending task guidance fix: Task f67f3e50-a57c-4167-ae38-fd177756ddb4 completed MCP-owned fix/evidence for root wake-task bug where read_messages could be empty while assigned pending tasks existed. Changed crates/ax-mcp-server/src/server.rs to clarify in server instructions and tool descriptions that read_messages drains only the message inbox, while list_tasks/list_workspace_tasks query task-store records; create_task creates pending task records without inbox dispatch; start_task creates task plus task-aware dispatch; send_message is plain messaging and does not create/update task records. Empty read_messages output now tells the current workspace to check list_workspace_tasks(workspace="<self>", view="assigned", status="pending") or list_tasks(assignee="<self>", status="pending") before reporting no work. Added crates/ax-mcp-server/tests/tools_tasks.rs test empty_inbox_reminds_agent_to_check_assigned_pending_tasks proving a create_task-created pending task is not in inbox but is discoverable via list_tasks. Validation passed: rustfmt --edition 2021 --check src/server.rs tests/tools_tasks.rs; git diff --check -- src/server.rs tests/tools_tasks.rs; cargo test -p ax-mcp-server empty_inbox_reminds_agent_to_check_assigned_pending_tasks; cargo test -p ax-mcp-server --test tools_tasks (22/22). Full cargo test -p ax-mcp-server was attempted but tools_usage_request dispatch tests failed due local max_concurrent_agents cap reached: 8 live ax sessions vs cap 8; package cargo fmt --check still reports pre-existing tests/tools_shared_workspace.rs formatting drift outside edited files. _cli response-target text is not hardcoded in ax-mcp-server; MCP request/inspect use caller dynamically, while _cli belongs to ax-cli/ax-tui/daemon wake prompt surfaces. Remaining owned dirty files=crates/ax-mcp-server/src/server.rs, crates/ax-mcp-server/tests/tools_tasks.rs; residual scope=uncommitted MCP patch only, no pending implementation/test work. (tags: completed, mcp, pending-tasks, read_messages, task-store, wake-task)
+- [handoff] `project:ax` create_task job-consumer orchestration flow design: Task cd1ee4ed completed read-only design for treating create_task-created tasks as jobs consumed by orchestrators. Conclusion: feasible as an MVP without schema migration if create_task remains create-only and jobs are represented by Pending tasks assigned to the consumer workspace (root/team orchestrator). Minimal convention: status=Pending + claimed_at=None is unclaimed; consumer claims with update_task Pending->InProgress + routing log, rechecks returned task before routing, then creates child tasks with parent_task_id or dispatches via explicit API. This works cleanly only when the consumer is assignee; non-assignee root cannot safely claim via existing validate_task_update. Recommended MVP: polling consumer loop using list_tasks(assignee=<consumer>, status=Pending), consumer-side sorting by priority/created_at/updated_at, no daemon wake/event trigger initially. Responsibilities: root orchestrator polls and routes to team; team orchestrator decomposes into child start_task tasks and reconciles parent rollup; agents execute child tasks and report evidence. Keep create_task semantics unchanged because TUI/MCP/daemon/orchestrator docs treat it as non-dispatching. Add explicit future MCP/daemon APIs: list_routable_tasks, claim_task(expected_version), route_task/reroute_task, dispatch_task/start_existing_task reusing Task ID injection/TaskDispatch. CLI/TUI should label submitted tasks as routing-queue items, e.g. submitted/waiting for router, derive created/routed/dispatched states from existing fields, and add/promote an unrouted filter/count. State model: created/unrouted=Pending dispatch_count=0 claimed_at=None no children; claimed/routing=InProgress by consumer with log; routed=parent has child_task_ids/rollup or route log; dispatched=dispatch_count>0/last_dispatch_at; in_progress/blocked/completed/failed/cancelled map to TaskStatus. Leave routing parent InProgress while child tasks run; complete/fail/cancel parent after rollup reconciliation; avoid Blocked for normal waiting-on-child because daemon treats Blocked like cleanup/notification. Concurrency: list order is not FIFO; consumer must sort. Per-workspace message queue is FIFO under mutex, but create-only jobs bypass MessageQueue. WakeScheduler has one pending wake per workspace; repeated schedules replace wake metadata. Backpressure needs consumer limits/age metrics now; non-MVP needs pagination, leases, visibility timeout, atomic claim/route with expected_version, durable TaskRoutingInfo, event/wake-on-create, real serial workflow gating/waiting_turn. Validation/evidence from ax.daemon, ax.mcp, ax.cli read-only reviews; daemon tests tasks and tasks_dispatch passed; no code changes; remaining owned dirty files=<none>. (tags: completed, create-task, design, mvp, orchestration, routing, task-flow)
+- [handoff] `project:ax` Design review: create_task jobs as orchestrator-consumed polling jobs: Task 571536e0-9339-49e7-8bb1-73965cc88d9c completed read-only by ax.daemon. Conclusion: current daemon can support a no-schema-migration polling MVP if create_task jobs are Pending tasks assigned to the consumer workspace/root/team orchestrator; status=Pending + claimed_at=None means unclaimed; consumer claims by update_task Pending->InProgress with a log and then rechecks returned task. This only works cleanly when consumer is assignee; non-assignee creator/root cannot claim via status due task_store::validate_task_update. Recommended MVP trigger is polling list_tasks(assignee=<consumer>, status=Pending) with consumer-side sorting by priority/created_at/updated_at. create_task currently persists only; no queue/wake. Queue refiller is not suitable today: server does not wire set_queue_refiller and runnable_by_assignee excludes plain create_task tasks because last_dispatch_at is None. Event/wake-on-create is non-MVP because it changes create_task semantics and needs duplicate suppression/backpressure. Suggested transitions: Pending -> InProgress when consumer claims; leave parent/job InProgress while routed child tasks run; child tasks use parent_task_id for rollup; parent completes/fails/cancels after rollup reconciliation. Avoid using Blocked for normal child waiting because apply_task_state_followup treats Blocked like cleanup/notification. Non-MVP daemon improvements: atomic claim_task/route_task with expected_version, explicit routed_by/routed_at/routing_state, create_task event/wake, pagination/sorted task queries, real serial workflow release/waiting_turn, queue refiller wiring for jobs, and leases/visibility timeout. Validation passed: cargo test -p ax-daemon --test tasks; cargo test -p ax-daemon --test tasks_dispatch. No code changes; remaining owned dirty files=<none>. (tags: completed, create_task, daemon, design, job-consumer, polling)
+- [handoff] `project:ax` ax top task creation dispatch flow investigation: Task 8888ea2f completed read-only investigation of ax top/task creation dispatch flow. Key findings: ax top/watch parse into ParsedCommand::Watch and launch ax_tui::run. Tasks tab creation path (`n` CreateTaskForm -> submit -> pending_task_create -> Client::create_task) sends MessageType::CreateTask/CreateTaskPayload from ax-tui, not start_task/send_message/intervene/retry. Daemon handle_create_task persists a Pending registry task and parent rollup metadata only; it does not enqueue an inbox message, inject Task ID, record dispatch, push, schedule wake, or ensure an assignee session. start_task requires non-empty message, rejects embedded Task ID, daemon injects Task ID into dispatch_message, persists task, enqueues task-aware assignee message, records dispatch_count/last_dispatch_at, appends history, push_if_registered, schedules wake, and may ensure_runnable if caller config_path exists. send_message creates no task and injects no Task ID; it enqueues/history/pushes/wakes a generic message and may dispatch runnable work when config_path is provided. Multiple TUI task creates are serialized by modal submitting flag and single pending_task_create; each successful submission creates a separate pending task. Per-workspace message queue is FIFO under mutex; concurrent callers are ordered by lock acquisition, not stronger global ordering. WakeScheduler keeps one pending wake per workspace, so repeated schedules replace wake sender/attempt state while messages remain FIFO. workflow_mode serial is currently metadata-only in daemon: proto has TaskWorkflowMode/TaskSequenceState waiting_turn, but no daemon implementation gates serial child dispatch, computes TaskSequenceInfo, returns waiting_turn, or releases next serial child. Claim occurs on first assignee update_task status/result/log, not on dispatch. Recommendations: if ax top intent is create-and-wake, add explicit start_task/create+dispatch path or visible UI option/copy; implement daemon serial workflow gating if serial semantics are expected; clarify MCP docs around waiting_turn and fresh dispatch behavior. Validation was read-only rg/sed/nl by cli/mcp/daemon plus daemon tests tasks_dispatch, wake_scheduler_e2e, recover_stale_in_progress_refreshes_parent_rollup, mark_tool_activity_refreshes_updated_at_for_live_assignee. No code changes; remaining owned dirty files=<none>. (tags: completed, create-task, dispatch, start-task, task-flow, top, workflow)
+- [handoff] `project:ax` Daemon task lifecycle dispatch semantics investigation: Task 73dab370-a934-4bd0-a86c-7463e5c6ede2 completed read-only by ax.daemon. Key current semantics: create_task persists a Pending task only, refreshes parent rollup if parent_task_id is set, and does not enqueue/wake/ensure. start_task requires non-empty message, injects Task ID, persists task, enqueues task-aware message, appends history, push_if_registered, record_dispatch, schedules one wake for assignee, and ensure_runnable if creator has config_path. send_message only enqueues a non-task Message with empty task_id, schedules wake, and optionally dispatch_runnable_work with payload config_path; no task_store/rollup/claim effects. Queue is per-workspace VecDeque FIFO under mutex; concurrent order is lock acquisition. WakeScheduler has one PendingWake per workspace, so repeated schedules replace sender/attempt state but messages remain FIFO. Parent rollup counts child statuses and flags needs_parent_reconciliation; no auto-completion/release. workflow_mode serial is currently metadata-only in daemon: proto has TaskWorkflowMode/TaskSequenceState waiting_turn, but rg found no daemon/MCP implementation that gates serial child dispatch, computes TaskSequenceInfo, returns dispatch.status=waiting_turn, or releases next serial child. Claim happens on first assignee update_task with status/result/log, not on dispatch; record_mcp_tool_activity heartbeats live InProgress only. recover_stale_in_progress resets dead-session InProgress tasks to Pending and clears claim/retry. Validation passed: cargo test -p ax-daemon --test tasks_dispatch; cargo test -p ax-daemon --test wake_scheduler_e2e; focused recover_stale_in_progress and mark_tool_activity tests. No code changes; remaining owned dirty files=<none>. (tags: completed, daemon, dispatch, queue, task-lifecycle, wake, workflow-mode)
 
 ## 상위 지시 신뢰 및 진행 우선 원칙 (중요)
 이 섹션은 서브 오케스트레이터가 빠지기 쉬운 "phantom 의심 → 잠금 → 재확인 → 재의심" 자기강화 루프를 차단하기 위한 규칙입니다. 반드시 준수하세요.
@@ -189,21 +190,23 @@ ACK 루프를 방지하기 위해 다음을 반드시 지키세요:
 
 | 이름 | ID | 설명 |
 |---|---|---|
-| **cli** | `ax.cli` | clap 기반 CLI와 watch/top TUI(ax-tui)의 사용자 명령 표면을 관리하는 기본 owner입니다. |
+| **cli** | `ax.cli` | ax 바이너리의 명령 파싱, 사용자-facing CLI 흐름, daemon/workspace command glue의 기본 owner입니다. |
 | **config** | `ax.config` | YAML 설정, config validation, 프로젝트 트리와 root ax config의 기본 owner입니다. |
-| **daemon** | `ax.daemon` | 데몬 코어, 메시지/작업 큐, registry, team state, wire 프로토콜(ax-proto)의 기본 owner입니다. |
+| **daemon** | `ax.daemon` | 데몬 코어, 메시지/작업 큐, registry, team state, session lifecycle policy의 기본 owner입니다. |
 | **docs** | `ax.docs` | 사용자/운영/개발 문서와 루트 문서 엔트리포인트를 현재 제품 동작과 맞추는 기본 owner입니다. |
 | **e2e** | `ax.e2e` | 크로스-크레이트 라이브 시나리오 기반 통합 테스트 harness의 기본 owner입니다. |
 | **mcp** | `ax.mcp` | MCP stdio 서버, daemon client, MCP tool surface, planner의 기본 owner입니다. |
+| **protocol** | `ax.protocol` | daemon wire contract, shared payload/response 타입, golden fixture 호환성의 기본 owner입니다. |
 | **release** | `ax.release` | 빌드, 테스트, CI/CD, 릴리스와 Cargo/rust-toolchain 등 root build/meta 파일의 기본 owner입니다. |
-| **runtime** | `ax.runtime` | 에이전트 런타임과 Codex/Claude 실행 어댑터(ax-agent 크레이트)의 기본 owner입니다. |
+| **runtime** | `ax.runtime` | 에이전트 런타임, Codex/Claude 실행 어댑터, agent status emission의 기본 owner입니다. |
+| **tui** | `ax.tui` | ratatui 기반 ax top/watch 화면, 상태 모델, 입력/액션 UX의 기본 owner입니다. |
 | **usage** | `ax.usage` | transcript 기반 usage 집계와 usage 설계 문서의 기본 owner입니다. |
 | **workspace** | `ax.workspace` | 워크스페이스 lifecycle, orchestrator artifacts, reconcile, tmux lifecycle glue의 기본 owner입니다. |
 
 ## 워크스페이스 상세 지침
 
 ### cli (`ax.cli`)
-- clap 기반 CLI와 watch/top TUI(ax-tui)의 사용자 명령 표면을 관리하는 기본 owner입니다.
+- ax 바이너리의 명령 파싱, 사용자-facing CLI 흐름, daemon/workspace command glue의 기본 owner입니다.
   crates/ax-cli/ 크레이트를 담당합니다.
 
   주요 파일:
@@ -220,8 +223,8 @@ ACK 루프를 방지하기 위해 다음을 반드시 지키세요:
   - 사용자 향 커맨드와 내부용 커맨드를 분리 (daemon/mcp-server는 내부용)
 
   fallback ownership:
-  - crates/ax-tui/ (watch/stream/sidebar TUI)는 ax.cli가 owner입니다. ax-tui는 usage/registry 같은 소비 지점을 많이 엮으므로 변경 시 ax.usage/ax.daemon과 공동 조율합니다.
-  - 사용자 명령 동작과 CLI/TUI UX는 ax.cli가 owner입니다.
+  - 사용자 명령 동작과 CLI UX는 ax.cli가 owner입니다.
+  - ax top/watch의 명령 진입점은 ax.cli가 owner이고, 실제 ratatui 화면/상태/입력 모델은 ax.tui가 owner입니다.
   - 사용자-facing 명령 문서 변경은 ax.docs와 공동 조율합니다.
 
 ### config (`ax.config`)
@@ -247,7 +250,7 @@ ACK 루프를 방지하기 위해 다음을 반드시 지키세요:
   - 어떤 파일을 어느 workspace가 소유하는지 정하는 규칙 자체도 ax.config가 관리합니다.
 
 ### daemon (`ax.daemon`)
-- 데몬 코어, 메시지/작업 큐, registry, team state, wire 프로토콜(ax-proto)의 기본 owner입니다.
+- 데몬 코어, 메시지/작업 큐, registry, team state, session lifecycle policy의 기본 owner입니다.
   crates/ax-daemon/ 크레이트를 담당합니다.
 
   주요 파일:
@@ -255,6 +258,7 @@ ACK 루프를 방지하기 위해 다음을 반드시 지키세요:
   - src/handlers.rs — 메시지 라우팅
   - src/queue.rs, memory.rs, shared_values.rs — 메시지/공유 큐와 in-memory 상태
   - src/registry.rs, session_manager.rs — 워크스페이스/세션 등록과 상태 관리
+  - src/git_status.rs, pure_decisions.rs — daemon 관측/정책 pure helper
   - src/history.rs, atomicfile.rs — 메시지 히스토리 영속화
   - src/task_store.rs, task_helpers.rs — task 영속화와 helper
   - src/team_reconfigure.rs, team_state_store.rs — team reconfigure state/overlay
@@ -262,12 +266,12 @@ ACK 루프를 방지하기 위해 다음을 반드시 지키세요:
   - src/socket_path.rs, daemonutil.rs — 소켓 경로와 데몬 유틸
 
   원칙:
-  - 메시지 프로토콜 변경 시 ax-proto의 타입과 handlers.rs를 함께 수정
+  - 메시지 프로토콜 타입 변경 시 ax.protocol과 조율하고, handler/storage side effect는 handlers.rs에서 명확히 반영
   - 테스트: cargo test -p ax-daemon
 
   fallback ownership:
-  - crates/ax-proto/ (Envelope, Payload, message 타입, wire 프로토콜)는 ax.daemon이 owner입니다.
-  - 메시지 큐, registry, task 모델, daemon wire protocol, team state 저장소는 ax.daemon이 우선 owner입니다.
+  - 메시지 큐, registry, task 모델, daemon handler behavior, team state 저장소는 ax.daemon이 우선 owner입니다.
+  - wire contract나 shared serde 타입 자체는 ax.protocol이 owner이고, daemon 동작 변화가 필요할 때 공동 조율합니다.
 
 ### docs (`ax.docs`)
 - 사용자/운영/개발 문서와 루트 문서 엔트리포인트를 현재 제품 동작과 맞추는 기본 owner입니다.
@@ -276,7 +280,7 @@ ACK 루프를 방지하기 위해 다음을 반드시 지키세요:
   주요 파일:
   - docs/README.md — 문서 인덱스
   - docs/getting-started.md, configuration.md, operations.md — 사용자/운영 문서
-  - docs/architecture.md, development.md, testing.md — 구조/개발/검증 문서
+  - docs/architecture.md, development.md, testing.md, tasks-and-memory.md — 구조/개발/검증/task 문서
   - README.md, DEVELOPER_GUIDE.md — 루트 소개와 심화 구현 레퍼런스
 
   원칙:
@@ -287,7 +291,7 @@ ACK 루프를 방지하기 위해 다음을 반드시 지키세요:
   fallback ownership:
   - docs/ 아래 일반 문서와 README.md, DEVELOPER_GUIDE.md는 ax.docs가 owner입니다.
   - docs/design/의 subsystem-specific 설계 노트는 해당 subsystem owner가 우선 owner이며, docs/design/workspace-usage.md는 ax.usage와 공동 조율합니다.
-  - CLI/TUI command documentation은 ax.cli와 공동 조율합니다.
+  - CLI/TUI command documentation은 ax.cli, ax.tui와 공동 조율합니다.
 
 ### e2e (`ax.e2e`)
 - 크로스-크레이트 라이브 시나리오 기반 통합 테스트 harness의 기본 owner입니다.
@@ -296,8 +300,10 @@ ACK 루프를 방지하기 위해 다음을 반드시 지키세요:
   주요 파일:
   - src/harness.rs — 통합 테스트 harness (임시 홈, 데몬 부트스트랩, 시나리오 실행)
   - tests/init_live.rs — ax init --axis 라이브 시나리오
-  - tests/orchestration_live.rs — 라이브 오케스트레이션 시나리오
+  - tests/init_and_orchestrate_live.rs, orchestration_live.rs — 라이브 오케스트레이션 시나리오
   - tests/daemon_roundtrip.rs — daemon 왕복 테스트
+  - tests/task_lifecycle_roundtrip.rs, peer_awareness_roundtrip.rs, multi_agent_collaboration_roundtrip.rs — task/agent 협업 roundtrip
+  - tests/usage_probe.rs — usage probe 통합 검증
   - tests/config_safety_caps.rs — config safety cap 테스트
   - scenarios/ — init_role_auto, init_domain_auto, init_domain_force_role, init_reconfigure_add, delegated_split, hello_workspace 등 시나리오 픽스처
 
@@ -328,7 +334,28 @@ ACK 루프를 방지하기 위해 다음을 반드시 지키세요:
 
   fallback ownership:
   - MCP 도구 UX, tool naming, MCP client/server glue는 ax.mcp가 owner입니다.
-  - wire 프로토콜(ax-proto) 또는 shared type 변경이 필요한 경우 ax.daemon과 공동 조율합니다.
+  - wire 프로토콜(ax-proto) 또는 shared type 변경이 필요한 경우 ax.protocol, ax.daemon과 공동 조율합니다.
+
+### protocol (`ax.protocol`)
+- daemon wire contract, shared payload/response 타입, golden fixture 호환성의 기본 owner입니다.
+  crates/ax-proto/ 크레이트를 담당합니다.
+
+  주요 파일:
+  - src/envelope.rs — wire Envelope와 serialization contract
+  - src/payloads.rs, responses.rs — daemon request/response payload 타입
+  - src/types.rs — WorkspaceInfo, Task, lifecycle/status 등 shared 타입
+  - src/usage.rs — usage/trend 응답 타입
+  - tests/wire_golden.rs, wire_golden_types.rs — wire golden fixture roundtrip
+  - tests/fixtures/*.json — 프로토콜 호환성 fixture
+
+  원칙:
+  - wire 형식, serde rename/tag, fixture 호환성은 ax.protocol이 owner입니다.
+  - payload/response 추가 시 daemon handlers, MCP client/server, CLI/TUI 소비 지점을 함께 점검합니다.
+  - 테스트: cargo test -p ax-proto
+
+  fallback ownership:
+  - Envelope, Payload, Response, shared message/task/workspace/status 타입은 cwd가 달라도 ax.protocol이 우선 owner입니다.
+  - daemon handler/storage behavior 변경이 필요한 프로토콜 변경은 ax.daemon과 공동 조율합니다.
 
 ### release (`ax.release`)
 - 빌드, 테스트, CI/CD, 릴리스와 Cargo/rust-toolchain 등 root build/meta 파일의 기본 owner입니다.
@@ -351,7 +378,7 @@ ACK 루프를 방지하기 위해 다음을 반드시 지키세요:
   - 빌드/릴리스 관점의 repo root 메타 파일은 ax.release로 우선 라우팅합니다.
 
 ### runtime (`ax.runtime`)
-- 에이전트 런타임과 Codex/Claude 실행 어댑터(ax-agent 크레이트)의 기본 owner입니다.
+- 에이전트 런타임, Codex/Claude 실행 어댑터, agent status emission의 기본 owner입니다.
   crates/ax-agent/ 크레이트를 담당합니다.
 
   주요 파일:
@@ -359,6 +386,7 @@ ACK 루프를 방지하기 위해 다음을 반드시 지키세요:
   - src/claude.rs, codex.rs — 런타임 구현체
   - src/launch.rs — 런타임 CLI 부트스트랩과 CODEX_HOME 격리
   - src/shell.rs — 런타임 명령 셸 quoting 유틸
+  - src/status.rs — runtime status metrics 수집과 daemon 보고 payload 생성
 
   원칙:
   - 새 런타임 추가 시 Runtime 트레이트 구현 + runtime.rs 팩토리에 등록
@@ -367,7 +395,33 @@ ACK 루프를 방지하기 위해 다음을 반드시 지키세요:
 
   fallback ownership:
   - 런타임별 CLI bootstrap, transcript/runtime 홈 디렉터리 격리, 런타임 공통 helper는 ax.runtime가 owner입니다.
+  - agent status 수집/전송 흐름은 ax.runtime가 owner이고, wire 타입 변경은 ax.protocol과 조율합니다.
   - ax-cli의 런타임 passthrough glue는 ax.runtime와 ax.cli가 공동 조율합니다.
+
+### tui (`ax.tui`)
+- ratatui 기반 ax top/watch 화면, 상태 모델, 입력/액션 UX의 기본 owner입니다.
+  crates/ax-tui/ 크레이트를 담당합니다.
+
+  주요 파일:
+  - src/app.rs — TUI app orchestration과 refresh loop
+  - src/state.rs — 화면 상태, tab/selection/scroll 모델
+  - src/render.rs — agents/messages/tasks/tokens/stream 렌더링
+  - src/input.rs — keyboard/mouse 입력 처리와 focus 이동
+  - src/actions.rs — quick action, lifecycle/task action dispatch
+  - src/daemon.rs — TUI 전용 daemon client
+  - src/stream.rs, captures.rs — tmux stream/capture 표시
+  - src/theme.rs, tokens.rs, tasks.rs, agents.rs — semantic styling과 view model helper
+  - COLOR_UX_PLAN.md — TUI color/status UX 작업 계획
+
+  원칙:
+  - TUI는 색상만으로 상태를 전달하지 않고 text/marker/modifier를 primary cue로 유지합니다.
+  - daemon/usage/protocol 응답 shape 변화가 있으면 ax.daemon, ax.usage, ax.protocol과 함께 소비 지점을 갱신합니다.
+  - 테스트: cargo test -p ax-tui --lib
+
+  fallback ownership:
+  - crates/ax-tui/의 rendering, state, input, quick action, stream UX는 ax.tui가 owner입니다.
+  - ax top/watch CLI dispatch나 flag parsing은 ax.cli와 공동 조율합니다.
+  - TUI 사용자 문서와 운영 가이드는 ax.docs와 공동 조율합니다.
 
 ### usage (`ax.usage`)
 - transcript 기반 usage 집계와 usage 설계 문서의 기본 owner입니다.
@@ -383,7 +437,7 @@ ACK 루프를 방지하기 위해 다음을 반드시 지키세요:
 
   원칙:
   - transcript 포맷 변경 시 parse.rs, codex.rs, history.rs를 함께 검토
-  - usage 모델 변경 시 ax-daemon/ax-mcp-server 응답 타입과 ax-tui 소비 지점을 같이 확인
+  - usage 모델 변경 시 ax-proto 응답 타입, ax-daemon/ax-mcp-server 처리, ax-tui 소비 지점을 같이 확인
   - 테스트: cargo test -p ax-usage
 
   fallback ownership:

@@ -1,11 +1,11 @@
 # axis: role
-# reconfigured: 2026-04-21
+# reconfigured: 2026-04-28
 project: ax
 orchestrator_runtime: codex
 workspaces:
   runtime:
     dir: ./crates/ax-agent
-    description: 에이전트 런타임과 Codex/Claude 실행 어댑터(ax-agent 크레이트)의 기본 owner입니다.
+    description: 에이전트 런타임, Codex/Claude 실행 어댑터, agent status emission의 기본 owner입니다.
     runtime: codex
     instructions: |
       crates/ax-agent/ 크레이트를 담당합니다.
@@ -15,6 +15,7 @@ workspaces:
       - src/claude.rs, codex.rs — 런타임 구현체
       - src/launch.rs — 런타임 CLI 부트스트랩과 CODEX_HOME 격리
       - src/shell.rs — 런타임 명령 셸 quoting 유틸
+      - src/status.rs — runtime status metrics 수집과 daemon 보고 payload 생성
 
       원칙:
       - 새 런타임 추가 시 Runtime 트레이트 구현 + runtime.rs 팩토리에 등록
@@ -23,6 +24,7 @@ workspaces:
 
       fallback ownership:
       - 런타임별 CLI bootstrap, transcript/runtime 홈 디렉터리 격리, 런타임 공통 helper는 ax.runtime가 owner입니다.
+      - agent status 수집/전송 흐름은 ax.runtime가 owner이고, wire 타입 변경은 ax.protocol과 조율합니다.
       - ax-cli의 런타임 passthrough glue는 ax.runtime와 ax.cli가 공동 조율합니다.
 
   workspace:
@@ -51,7 +53,7 @@ workspaces:
 
   daemon:
     dir: ./crates/ax-daemon
-    description: 데몬 코어, 메시지/작업 큐, registry, team state, wire 프로토콜(ax-proto)의 기본 owner입니다.
+    description: 데몬 코어, 메시지/작업 큐, registry, team state, session lifecycle policy의 기본 owner입니다.
     runtime: codex
     instructions: |
       crates/ax-daemon/ 크레이트를 담당합니다.
@@ -61,6 +63,7 @@ workspaces:
       - src/handlers.rs — 메시지 라우팅
       - src/queue.rs, memory.rs, shared_values.rs — 메시지/공유 큐와 in-memory 상태
       - src/registry.rs, session_manager.rs — 워크스페이스/세션 등록과 상태 관리
+      - src/git_status.rs, pure_decisions.rs — daemon 관측/정책 pure helper
       - src/history.rs, atomicfile.rs — 메시지 히스토리 영속화
       - src/task_store.rs, task_helpers.rs — task 영속화와 helper
       - src/team_reconfigure.rs, team_state_store.rs — team reconfigure state/overlay
@@ -68,12 +71,36 @@ workspaces:
       - src/socket_path.rs, daemonutil.rs — 소켓 경로와 데몬 유틸
 
       원칙:
-      - 메시지 프로토콜 변경 시 ax-proto의 타입과 handlers.rs를 함께 수정
+      - 메시지 프로토콜 타입 변경 시 ax.protocol과 조율하고, handler/storage side effect는 handlers.rs에서 명확히 반영
       - 테스트: cargo test -p ax-daemon
 
       fallback ownership:
-      - crates/ax-proto/ (Envelope, Payload, message 타입, wire 프로토콜)는 ax.daemon이 owner입니다.
-      - 메시지 큐, registry, task 모델, daemon wire protocol, team state 저장소는 ax.daemon이 우선 owner입니다.
+      - 메시지 큐, registry, task 모델, daemon handler behavior, team state 저장소는 ax.daemon이 우선 owner입니다.
+      - wire contract나 shared serde 타입 자체는 ax.protocol이 owner이고, daemon 동작 변화가 필요할 때 공동 조율합니다.
+
+  protocol:
+    dir: ./crates/ax-proto
+    description: daemon wire contract, shared payload/response 타입, golden fixture 호환성의 기본 owner입니다.
+    runtime: codex
+    instructions: |
+      crates/ax-proto/ 크레이트를 담당합니다.
+
+      주요 파일:
+      - src/envelope.rs — wire Envelope와 serialization contract
+      - src/payloads.rs, responses.rs — daemon request/response payload 타입
+      - src/types.rs — WorkspaceInfo, Task, lifecycle/status 등 shared 타입
+      - src/usage.rs — usage/trend 응답 타입
+      - tests/wire_golden.rs, wire_golden_types.rs — wire golden fixture roundtrip
+      - tests/fixtures/*.json — 프로토콜 호환성 fixture
+
+      원칙:
+      - wire 형식, serde rename/tag, fixture 호환성은 ax.protocol이 owner입니다.
+      - payload/response 추가 시 daemon handlers, MCP client/server, CLI/TUI 소비 지점을 함께 점검합니다.
+      - 테스트: cargo test -p ax-proto
+
+      fallback ownership:
+      - Envelope, Payload, Response, shared message/task/workspace/status 타입은 cwd가 달라도 ax.protocol이 우선 owner입니다.
+      - daemon handler/storage behavior 변경이 필요한 프로토콜 변경은 ax.daemon과 공동 조율합니다.
 
   mcp:
     dir: ./crates/ax-mcp-server
@@ -96,7 +123,7 @@ workspaces:
 
       fallback ownership:
       - MCP 도구 UX, tool naming, MCP client/server glue는 ax.mcp가 owner입니다.
-      - wire 프로토콜(ax-proto) 또는 shared type 변경이 필요한 경우 ax.daemon과 공동 조율합니다.
+      - wire 프로토콜(ax-proto) 또는 shared type 변경이 필요한 경우 ax.protocol, ax.daemon과 공동 조율합니다.
 
   usage:
     dir: ./crates/ax-usage
@@ -115,7 +142,7 @@ workspaces:
 
       원칙:
       - transcript 포맷 변경 시 parse.rs, codex.rs, history.rs를 함께 검토
-      - usage 모델 변경 시 ax-daemon/ax-mcp-server 응답 타입과 ax-tui 소비 지점을 같이 확인
+      - usage 모델 변경 시 ax-proto 응답 타입, ax-daemon/ax-mcp-server 처리, ax-tui 소비 지점을 같이 확인
       - 테스트: cargo test -p ax-usage
 
       fallback ownership:
@@ -149,7 +176,7 @@ workspaces:
 
   cli:
     dir: ./crates/ax-cli
-    description: clap 기반 CLI와 watch/top TUI(ax-tui)의 사용자 명령 표면을 관리하는 기본 owner입니다.
+    description: ax 바이너리의 명령 파싱, 사용자-facing CLI 흐름, daemon/workspace command glue의 기본 owner입니다.
     runtime: codex
     instructions: |
       crates/ax-cli/ 크레이트를 담당합니다.
@@ -168,9 +195,37 @@ workspaces:
       - 사용자 향 커맨드와 내부용 커맨드를 분리 (daemon/mcp-server는 내부용)
 
       fallback ownership:
-      - crates/ax-tui/ (watch/stream/sidebar TUI)는 ax.cli가 owner입니다. ax-tui는 usage/registry 같은 소비 지점을 많이 엮으므로 변경 시 ax.usage/ax.daemon과 공동 조율합니다.
-      - 사용자 명령 동작과 CLI/TUI UX는 ax.cli가 owner입니다.
+      - 사용자 명령 동작과 CLI UX는 ax.cli가 owner입니다.
+      - ax top/watch의 명령 진입점은 ax.cli가 owner이고, 실제 ratatui 화면/상태/입력 모델은 ax.tui가 owner입니다.
       - 사용자-facing 명령 문서 변경은 ax.docs와 공동 조율합니다.
+
+  tui:
+    dir: ./crates/ax-tui
+    description: ratatui 기반 ax top/watch 화면, 상태 모델, 입력/액션 UX의 기본 owner입니다.
+    runtime: codex
+    instructions: |
+      crates/ax-tui/ 크레이트를 담당합니다.
+
+      주요 파일:
+      - src/app.rs — TUI app orchestration과 refresh loop
+      - src/state.rs — 화면 상태, tab/selection/scroll 모델
+      - src/render.rs — agents/messages/tasks/tokens/stream 렌더링
+      - src/input.rs — keyboard/mouse 입력 처리와 focus 이동
+      - src/actions.rs — quick action, lifecycle/task action dispatch
+      - src/daemon.rs — TUI 전용 daemon client
+      - src/stream.rs, captures.rs — tmux stream/capture 표시
+      - src/theme.rs, tokens.rs, tasks.rs, agents.rs — semantic styling과 view model helper
+      - COLOR_UX_PLAN.md — TUI color/status UX 작업 계획
+
+      원칙:
+      - TUI는 색상만으로 상태를 전달하지 않고 text/marker/modifier를 primary cue로 유지합니다.
+      - daemon/usage/protocol 응답 shape 변화가 있으면 ax.daemon, ax.usage, ax.protocol과 함께 소비 지점을 갱신합니다.
+      - 테스트: cargo test -p ax-tui --lib
+
+      fallback ownership:
+      - crates/ax-tui/의 rendering, state, input, quick action, stream UX는 ax.tui가 owner입니다.
+      - ax top/watch CLI dispatch나 flag parsing은 ax.cli와 공동 조율합니다.
+      - TUI 사용자 문서와 운영 가이드는 ax.docs와 공동 조율합니다.
 
   docs:
     dir: ./docs
@@ -182,7 +237,7 @@ workspaces:
       주요 파일:
       - docs/README.md — 문서 인덱스
       - docs/getting-started.md, configuration.md, operations.md — 사용자/운영 문서
-      - docs/architecture.md, development.md, testing.md — 구조/개발/검증 문서
+      - docs/architecture.md, development.md, testing.md, tasks-and-memory.md — 구조/개발/검증/task 문서
       - README.md, DEVELOPER_GUIDE.md — 루트 소개와 심화 구현 레퍼런스
 
       원칙:
@@ -193,7 +248,7 @@ workspaces:
       fallback ownership:
       - docs/ 아래 일반 문서와 README.md, DEVELOPER_GUIDE.md는 ax.docs가 owner입니다.
       - docs/design/의 subsystem-specific 설계 노트는 해당 subsystem owner가 우선 owner이며, docs/design/workspace-usage.md는 ax.usage와 공동 조율합니다.
-      - CLI/TUI command documentation은 ax.cli와 공동 조율합니다.
+      - CLI/TUI command documentation은 ax.cli, ax.tui와 공동 조율합니다.
 
   e2e:
     dir: ./e2e
@@ -205,8 +260,10 @@ workspaces:
       주요 파일:
       - src/harness.rs — 통합 테스트 harness (임시 홈, 데몬 부트스트랩, 시나리오 실행)
       - tests/init_live.rs — ax init --axis 라이브 시나리오
-      - tests/orchestration_live.rs — 라이브 오케스트레이션 시나리오
+      - tests/init_and_orchestrate_live.rs, orchestration_live.rs — 라이브 오케스트레이션 시나리오
       - tests/daemon_roundtrip.rs — daemon 왕복 테스트
+      - tests/task_lifecycle_roundtrip.rs, peer_awareness_roundtrip.rs, multi_agent_collaboration_roundtrip.rs — task/agent 협업 roundtrip
+      - tests/usage_probe.rs — usage probe 통합 검증
       - tests/config_safety_caps.rs — config safety cap 테스트
       - scenarios/ — init_role_auto, init_domain_auto, init_domain_force_role, init_reconfigure_add, delegated_split, hello_workspace 등 시나리오 픽스처
 
