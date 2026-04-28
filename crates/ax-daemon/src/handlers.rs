@@ -10,20 +10,24 @@ use uuid::Uuid;
 
 use ax_proto::payloads::{
     AgentLifecyclePayload, BroadcastPayload, CancelTaskPayload, ControlLifecyclePayload,
-    CreateTaskPayload, FinishTeamReconfigurePayload, GetSharedPayload, GetTaskPayload,
-    GetTeamStatePayload, InterveneTaskPayload, ListTasksPayload, ReadMessagesPayload,
-    RecallMemoriesPayload, RecordMcpToolActivityPayload, RegisterPayload, RememberMemoryPayload,
-    RemoveTaskPayload, SendMessagePayload, SetSharedPayload, SetStatusPayload, StartTaskPayload,
-    TeamReconfigurePayload, UpdateTaskPayload,
+    CreateTaskPayload, FinishTeamReconfigurePayload, GetAgentStatusMetricsPayload,
+    GetSharedPayload, GetTaskPayload, GetTeamStatePayload, InterveneTaskPayload,
+    ListAgentStatusMetricsPayload, ListTasksPayload, ReadMessagesPayload, RecallMemoriesPayload,
+    RecordMcpToolActivityPayload, RegisterPayload, RememberMemoryPayload, RemoveTaskPayload,
+    SendMessagePayload, SetSharedPayload, SetStatusPayload, StartTaskPayload,
+    TeamReconfigurePayload, UpdateAgentStatusMetricsPayload, UpdateTaskPayload,
 };
 use ax_proto::responses::{
-    AgentLifecycleResponse, BroadcastResponse, ControlLifecycleResponse, GetSharedResponse,
-    InterveneTaskResponse, ListSharedResponse, ListTasksResponse, ListWorkspacesResponse,
+    AgentLifecycleResponse, AgentStatusMetricsResponse, BroadcastResponse,
+    ControlLifecycleResponse, GetSharedResponse, InterveneTaskResponse,
+    ListAgentStatusMetricsResponse, ListSharedResponse, ListTasksResponse, ListWorkspacesResponse,
     MemoryResponse, ReadMessagesResponse, RecallMemoriesResponse, SendMessageResponse,
     StartTaskResponse, StatusResponse, TaskDispatch, TaskResponse, TeamApplyResponse,
     TeamPlanResponse, TeamStateResponse,
 };
-use ax_proto::types::{LifecycleAction, McpToolActivityStatus, Message, Task, TaskStatus};
+use ax_proto::types::{
+    AgentStatusMetrics, LifecycleAction, McpToolActivityStatus, Message, Task, TaskStatus,
+};
 use ax_proto::{Envelope, ErrorPayload, MessageType, ResponsePayload};
 use ax_workspace::{
     cleanup_orchestrator_state, dispatch_runnable_work, ensure_orchestrator,
@@ -41,7 +45,7 @@ use crate::session_manager::SessionManager;
 use crate::shared_values::SharedValues;
 use crate::task_helpers::{
     build_task_reminder_message, normalize_task_dispatch_body, parse_task_lifecycle_options,
-    task_aware_message,
+    task_aware_message, task_dispatch_content, OPERATOR_WORKSPACE_NAME,
 };
 use crate::task_store::{CreateTaskInput, TaskStore, TaskStoreError};
 use crate::team_reconfigure::TeamController;
@@ -144,6 +148,129 @@ pub(crate) fn handle_set_status(
             status: "ok".into(),
         },
     )
+}
+
+pub(crate) fn handle_update_agent_status_metrics(
+    ctx: &HandlerCtx,
+    env: &Envelope,
+    workspace: &str,
+) -> Result<Envelope, HandlerError> {
+    let payload: UpdateAgentStatusMetricsPayload = env
+        .decode_payload()
+        .map_err(|e| HandlerError::DecodePayload("update_agent_status_metrics", e))?;
+    require_registered(workspace)?;
+    validate_agent_status_metrics_payload(&payload)?;
+
+    let target = status_metrics_target_workspace(&payload.workspace, workspace)?;
+    let metrics = AgentStatusMetrics {
+        workspace: target.to_owned(),
+        agent: payload.agent.trim().to_owned(),
+        runtime_id: payload.runtime_id.trim().to_owned(),
+        runtime_name: payload.runtime_name.trim().to_owned(),
+        session_id: payload.session_id.trim().to_owned(),
+        context_tokens: payload.context_tokens,
+        context_window: payload.context_window,
+        usage_ratio: payload.usage_ratio,
+        last_activity_at: payload.last_activity_at,
+        work_state: payload.work_state,
+        compact_eligible: payload.compact_eligible,
+        freshness: payload.freshness,
+        source_quality: payload.source_quality,
+        updated_at: None,
+        status_title: String::new(),
+    };
+    let metrics = ctx
+        .registry
+        .update_status_metrics_at(target, metrics, Utc::now())
+        .ok_or_else(|| HandlerError::Logic(format!("workspace {target:?} is not registered")))?;
+
+    response(
+        &env.id,
+        &AgentStatusMetricsResponse {
+            metrics,
+            found: true,
+        },
+    )
+}
+
+pub(crate) fn handle_get_agent_status_metrics(
+    ctx: &HandlerCtx,
+    env: &Envelope,
+    workspace: &str,
+) -> Result<Envelope, HandlerError> {
+    let payload: GetAgentStatusMetricsPayload = env
+        .decode_payload()
+        .map_err(|e| HandlerError::DecodePayload("get_agent_status_metrics", e))?;
+    require_registered(workspace)?;
+
+    let target = if payload.workspace.trim().is_empty() {
+        workspace
+    } else {
+        payload.workspace.trim()
+    };
+    let (metrics, found) = ctx
+        .registry
+        .get_status_metrics(target)
+        .ok_or_else(|| HandlerError::Logic(format!("workspace {target:?} is not registered")))?;
+
+    response(&env.id, &AgentStatusMetricsResponse { metrics, found })
+}
+
+pub(crate) fn handle_list_agent_status_metrics(
+    ctx: &HandlerCtx,
+    env: &Envelope,
+    workspace: &str,
+) -> Result<Envelope, HandlerError> {
+    let _: ListAgentStatusMetricsPayload = env
+        .decode_payload()
+        .map_err(|e| HandlerError::DecodePayload("list_agent_status_metrics", e))?;
+    require_registered(workspace)?;
+
+    response(
+        &env.id,
+        &ListAgentStatusMetricsResponse {
+            metrics: ctx.registry.list_status_metrics(),
+        },
+    )
+}
+
+fn status_metrics_target_workspace<'a>(
+    payload_workspace: &'a str,
+    caller_workspace: &'a str,
+) -> Result<&'a str, HandlerError> {
+    let target = payload_workspace.trim();
+    if target.is_empty() {
+        return Ok(caller_workspace);
+    }
+    if target != caller_workspace {
+        return Err(HandlerError::Logic(format!(
+            "workspace must match registered caller {caller_workspace:?}"
+        )));
+    }
+    Ok(target)
+}
+
+fn validate_agent_status_metrics_payload(
+    payload: &UpdateAgentStatusMetricsPayload,
+) -> Result<(), HandlerError> {
+    if matches!(payload.context_tokens, Some(tokens) if tokens < 0) {
+        return Err(HandlerError::Logic(
+            "context_tokens must be non-negative".into(),
+        ));
+    }
+    if matches!(payload.context_window, Some(window) if window <= 0) {
+        return Err(HandlerError::Logic(
+            "context_window must be greater than zero when present".into(),
+        ));
+    }
+    if let Some(ratio) = payload.usage_ratio {
+        if !ratio.is_finite() || !(0.0..=1.0).contains(&ratio) {
+            return Err(HandlerError::Logic(
+                "usage_ratio must be between 0.0 and 1.0".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn handle_record_mcp_tool_activity(
@@ -399,6 +526,17 @@ pub(crate) fn handle_read_messages(
     } else {
         usize::try_from(payload.limit).unwrap_or(10)
     };
+    if ctx.queue.pending_count(workspace) == 0 {
+        if let Some(wake) = ctx.wake_scheduler.state(workspace) {
+            refill_runnable_task_messages(
+                ctx.task_store.as_ref(),
+                ctx.queue.as_ref(),
+                ctx.history.as_ref(),
+                workspace,
+                &wake.sender,
+            );
+        }
+    }
     let from = (!payload.from.is_empty()).then_some(payload.from.as_str());
     let messages = ctx.queue.dequeue(workspace, limit, from);
     ctx.registry.touch(workspace, Utc::now());
@@ -573,11 +711,14 @@ fn dispatch_task_start(
         TaskStartDispatchPlan::Queue { config_path, .. } => config_path,
     };
 
-    let msg = task_aware_message(&task.created_by, &task.assignee, &task.dispatch_message);
-    let msg = ctx.queue.enqueue(msg);
-    ctx.task_store
-        .record_dispatch(&task.id, &msg.to, msg.created_at);
-    ctx.history.append_message(&msg);
+    let msg = enqueue_task_message(
+        ctx.queue.as_ref(),
+        ctx.task_store.as_ref(),
+        ctx.history.as_ref(),
+        task,
+        &task.created_by,
+        &task.dispatch_message,
+    );
     push_if_registered(ctx, &task.assignee, &msg);
     ctx.wake_scheduler
         .schedule(&task.assignee, &task.created_by);
@@ -597,6 +738,40 @@ fn dispatch_task_start(
     })
 }
 
+fn enqueue_task_message(
+    queue: &MessageQueue,
+    task_store: &TaskStore,
+    history: &History,
+    task: &Task,
+    from: &str,
+    content: &str,
+) -> Message {
+    let msg = task_aware_message(from, &task.assignee, content);
+    let msg = queue.enqueue(msg);
+    task_store.record_dispatch(&task.id, &msg.to, msg.created_at);
+    history.append_message(&msg);
+    msg
+}
+
+pub(crate) fn refill_runnable_task_messages(
+    task_store: &TaskStore,
+    queue: &MessageQueue,
+    history: &History,
+    workspace: &str,
+    sender: &str,
+) -> usize {
+    let mut count = 0;
+    for task in task_store.runnable_by_assignee(workspace, Utc::now()) {
+        if queue.has_task_message(workspace, &task.id) {
+            continue;
+        }
+        let content = task_dispatch_content(&task, "");
+        enqueue_task_message(queue, task_store, history, &task, sender, &content);
+        count += 1;
+    }
+    count
+}
+
 fn dispatch_config_path_for_workspace(ctx: &HandlerCtx, workspace: &str) -> String {
     ctx.registry
         .get(workspace.trim())
@@ -610,24 +785,102 @@ fn dispatch_config_path_for_workspace(ctx: &HandlerCtx, workspace: &str) -> Stri
 /// available — lives in `pure_decisions::plan_task_wake` so it can
 /// be unit-tested without a daemon. This function carries the plan
 /// out.
-fn dispatch_task_wake(ctx: &HandlerCtx, task: &Task, sender: &str) -> Result<(), HandlerError> {
+#[derive(Debug, Clone)]
+struct WakeTaskDispatch {
+    status: String,
+    message_id: String,
+}
+
+fn dispatch_task_wake(
+    ctx: &HandlerCtx,
+    task: &Task,
+    sender: &str,
+) -> Result<WakeTaskDispatch, HandlerError> {
     let tmux = ctx.session_manager.tmux();
-    let plan = crate::pure_decisions::plan_task_wake(task, |ws| tmux.session_exists(ws));
+    let session_exists = |ws: &str| tmux.session_exists(ws);
+    let plan = crate::pure_decisions::plan_task_wake(task, session_exists);
     match plan {
+        crate::pure_decisions::WakePlan::EnsureRunnable {
+            config_path: _,
+            assignee,
+        } if tmux.session_exists(&assignee) => {
+            tmux.wake_workspace(&assignee, &wake_prompt(sender, false))
+                .map_err(|e| HandlerError::Logic(e.to_string()))?;
+            Ok(WakeTaskDispatch {
+                status: "woken".into(),
+                message_id: String::new(),
+            })
+        }
         crate::pure_decisions::WakePlan::EnsureRunnable {
             config_path,
             assignee,
-        } => ctx
-            .session_manager
-            .ensure_runnable(&config_path, &assignee, sender, false)
-            .map_err(|e| HandlerError::Logic(format!("wake task {}: {e}", task.id))),
+        } => {
+            let message_id = ensure_task_wake_message(ctx, task, sender);
+            ctx.wake_scheduler.schedule(&assignee, sender);
+            spawn_background_task_wake(
+                ctx.session_manager.clone(),
+                task.id.clone(),
+                config_path,
+                assignee,
+                sender.to_owned(),
+            )?;
+            Ok(WakeTaskDispatch {
+                status: "queued".into(),
+                message_id,
+            })
+        }
         crate::pure_decisions::WakePlan::DirectWake { assignee } => tmux
             .wake_workspace(&assignee, &wake_prompt(sender, false))
+            .map(|()| WakeTaskDispatch {
+                status: "woken".into(),
+                message_id: String::new(),
+            })
             .map_err(|e| HandlerError::Logic(e.to_string())),
         crate::pure_decisions::WakePlan::SessionMissing { assignee } => Err(HandlerError::Logic(
             format!("workspace {assignee:?} is not running"),
         )),
     }
+}
+
+fn ensure_task_wake_message(ctx: &HandlerCtx, task: &Task, sender: &str) -> String {
+    if ctx.queue.has_task_message(&task.assignee, &task.id) {
+        return String::new();
+    }
+    let reminder = build_task_reminder_message(task, "wake requested");
+    let msg = enqueue_task_message(
+        ctx.queue.as_ref(),
+        ctx.task_store.as_ref(),
+        ctx.history.as_ref(),
+        task,
+        sender,
+        &reminder,
+    );
+    push_if_registered(ctx, &task.assignee, &msg);
+    msg.id
+}
+
+fn spawn_background_task_wake(
+    session_manager: Arc<SessionManager<RealTmux>>,
+    task_id: String,
+    config_path: String,
+    assignee: String,
+    sender: String,
+) -> Result<(), HandlerError> {
+    std::thread::Builder::new()
+        .name("ax-task-wake-dispatch".into())
+        .spawn(move || {
+            if let Err(e) = session_manager.ensure_runnable(&config_path, &assignee, &sender, false)
+            {
+                tracing::warn!(
+                    task_id = %task_id,
+                    assignee = %assignee,
+                    error = %e,
+                    "background task wake dispatch failed"
+                );
+            }
+        })
+        .map(|_| ())
+        .map_err(|e| HandlerError::Logic(format!("spawn background task wake: {e}")))
 }
 
 pub(crate) fn handle_intervene_task(
@@ -653,8 +906,10 @@ pub(crate) fn handle_intervene_task(
 
     match crate::pure_decisions::plan_intervention(&payload.action) {
         crate::pure_decisions::InterventionPlan::Wake => {
-            dispatch_task_wake(ctx, &task, workspace)?;
-            "woken".clone_into(&mut resp.status);
+            let dispatch = dispatch_task_wake(ctx, &task, workspace)?;
+            dispatch.status.clone_into(&mut resp.status);
+            resp.message_id = dispatch.message_id;
+            resp.task = ctx.task_store.get(&task.id).unwrap_or(task.clone());
         }
         crate::pure_decisions::InterventionPlan::Interrupt => {
             let tmux = ctx.session_manager.tmux();
@@ -675,11 +930,14 @@ pub(crate) fn handle_intervene_task(
                 .map_err(|e| HandlerError::Logic(e.to_string()))?;
             ctx.queue.remove_task_messages(&task.assignee, &task.id);
             let reminder = build_task_reminder_message(&retried, payload.note.trim());
-            let msg = task_aware_message(workspace, &task.assignee, &reminder);
-            let msg = ctx.queue.enqueue(msg);
-            ctx.task_store
-                .record_dispatch(&task.id, &msg.to, msg.created_at);
-            ctx.history.append_message(&msg);
+            let msg = enqueue_task_message(
+                ctx.queue.as_ref(),
+                ctx.task_store.as_ref(),
+                ctx.history.as_ref(),
+                &retried,
+                workspace,
+                &reminder,
+            );
             push_if_registered(ctx, &task.assignee, &msg);
             ctx.wake_scheduler.schedule(&task.assignee, workspace);
             let config_path = retried.dispatch_config_path.trim();
@@ -720,7 +978,7 @@ pub(crate) fn handle_create_task(
         &payload.priority,
     )
     .map_err(|e| HandlerError::Logic(e.to_string()))?;
-    let task = ctx
+    let mut task = ctx
         .task_store
         .create(CreateTaskInput {
             title: payload.title,
@@ -736,8 +994,29 @@ pub(crate) fn handle_create_task(
             dispatch_config_path: String::new(),
         })
         .map_err(|e| HandlerError::Logic(e.to_string()))?;
+    if should_dispatch_operator_created_task(&task) {
+        let reminder = build_task_reminder_message(&task, "");
+        let msg = enqueue_task_message(
+            ctx.queue.as_ref(),
+            ctx.task_store.as_ref(),
+            ctx.history.as_ref(),
+            &task,
+            &task.created_by,
+            &reminder,
+        );
+        push_if_registered(ctx, &task.assignee, &msg);
+        ctx.wake_scheduler
+            .schedule(&task.assignee, &task.created_by);
+        task = ctx.task_store.get(&task.id).unwrap_or(task);
+    }
     ctx.registry.touch(workspace, Utc::now());
     response(&env.id, &TaskResponse { task })
+}
+
+fn should_dispatch_operator_created_task(task: &Task) -> bool {
+    task.created_by == OPERATOR_WORKSPACE_NAME
+        && !task.assignee.trim().is_empty()
+        && task.assignee != OPERATOR_WORKSPACE_NAME
 }
 
 pub(crate) fn handle_get_task(ctx: &HandlerCtx, env: &Envelope) -> Result<Envelope, HandlerError> {
@@ -1446,6 +1725,18 @@ pub(crate) fn handle_envelope(
             handle_set_status(ctx, env, workspace)
                 .unwrap_or_else(|e| error_envelope(&env.id, e.to_string())),
         ),
+        MessageType::UpdateAgentStatusMetrics => HandlerOutput::Response(
+            handle_update_agent_status_metrics(ctx, env, workspace)
+                .unwrap_or_else(|e| error_envelope(&env.id, e.to_string())),
+        ),
+        MessageType::GetAgentStatusMetrics => HandlerOutput::Response(
+            handle_get_agent_status_metrics(ctx, env, workspace)
+                .unwrap_or_else(|e| error_envelope(&env.id, e.to_string())),
+        ),
+        MessageType::ListAgentStatusMetrics => HandlerOutput::Response(
+            handle_list_agent_status_metrics(ctx, env, workspace)
+                .unwrap_or_else(|e| error_envelope(&env.id, e.to_string())),
+        ),
         MessageType::RecordMcpToolActivity => HandlerOutput::Response(
             handle_record_mcp_tool_activity(ctx, env, workspace)
                 .unwrap_or_else(|e| error_envelope(&env.id, e.to_string())),
@@ -1562,6 +1853,7 @@ mod tests {
 
     use tempfile::TempDir;
 
+    use ax_proto::types::{TaskPriority, TaskStartMode, TaskWorkflowMode};
     use ax_proto::{responses::AgentLifecycleResponse, ResponsePayload};
     use ax_workspace::TmuxBackend;
 
@@ -1736,6 +2028,208 @@ mod tests {
             .find(|entry| entry.info.name == "worker")
             .expect("registered worker");
         assert!(worker.last_active_at > stale);
+    }
+
+    #[test]
+    fn intervene_wake_with_config_and_missing_session_returns_without_sync_dispatch() {
+        let root = TempDir::new().expect("tempdir");
+        let ctx = test_ctx(root.path().join("daemon.sock"));
+        ctx.registry.register("_cli", "/tmp/cli", "", "");
+        let assignee = format!("missing-{}", Uuid::new_v4());
+        let task = ctx
+            .task_store
+            .create(CreateTaskInput {
+                title: "wake missing assignee".into(),
+                description: String::new(),
+                assignee: assignee.clone(),
+                created_by: "_cli".into(),
+                parent_task_id: String::new(),
+                start_mode: TaskStartMode::Default,
+                workflow_mode: TaskWorkflowMode::Parallel,
+                priority: TaskPriority::Normal,
+                stale_after_seconds: 0,
+                dispatch_body: "initial task body".into(),
+                dispatch_config_path: root
+                    .path()
+                    .join(".ax")
+                    .join("missing-config.yaml")
+                    .display()
+                    .to_string(),
+            })
+            .expect("create task");
+        let env = Envelope::new(
+            "wake-async",
+            MessageType::InterveneTask,
+            &InterveneTaskPayload {
+                id: task.id.clone(),
+                action: "wake".into(),
+                note: String::new(),
+                expected_version: None,
+            },
+        )
+        .expect("encode wake");
+
+        let started = std::time::Instant::now();
+        let response = handle_intervene_task(&ctx, &env, "_cli").expect("intervene wake");
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "wake should not wait for config dispatch readiness, took {elapsed:?}"
+        );
+        let decoded: InterveneTaskResponse = decode_response(&response);
+        assert_eq!(decoded.status, "queued");
+        assert!(!decoded.message_id.is_empty());
+        assert_eq!(decoded.task.dispatch_count, 1);
+        assert_eq!(ctx.queue.pending_count(&assignee), 1);
+        assert!(
+            ctx.wake_scheduler.state(&assignee).is_some(),
+            "async wake should leave scheduler entry for the assignee"
+        );
+    }
+
+    #[test]
+    fn update_agent_status_metrics_stores_snapshot_and_formatted_title() {
+        let root = TempDir::new().expect("tempdir");
+        let ctx = test_ctx(root.path().join("daemon.sock"));
+        ctx.registry.register("worker", "/tmp/worker", "", "");
+        let env = Envelope::new(
+            "metrics-update",
+            MessageType::UpdateAgentStatusMetrics,
+            &UpdateAgentStatusMetricsPayload {
+                agent: "worker".to_owned(),
+                runtime_id: "codex".to_owned(),
+                runtime_name: "Codex".to_owned(),
+                session_id: "session-1".to_owned(),
+                context_tokens: Some(142_000),
+                context_window: Some(200_000),
+                work_state: ax_proto::types::AgentWorkState::Idle,
+                compact_eligible: Some(true),
+                freshness: ax_proto::types::AgentStatusFreshness::Fresh,
+                source_quality: ax_proto::types::AgentStatusSourceQuality::Runtime,
+                ..UpdateAgentStatusMetricsPayload::default()
+            },
+        )
+        .expect("encode metrics update");
+
+        let response =
+            handle_update_agent_status_metrics(&ctx, &env, "worker").expect("update metrics");
+
+        let decoded: AgentStatusMetricsResponse = decode_response(&response);
+        assert!(decoded.found);
+        assert_eq!(
+            decoded.metrics.status_title,
+            "ax:worker ctx=142k/200k 71% idle compact=eligible"
+        );
+        assert_eq!(
+            decoded.metrics.source_quality,
+            ax_proto::types::AgentStatusSourceQuality::Runtime
+        );
+        let info = ctx.registry.list().pop().expect("registered workspace");
+        assert_eq!(info.status_text, decoded.metrics.status_title);
+        assert_eq!(info.status_metrics, Some(decoded.metrics));
+    }
+
+    #[test]
+    fn get_agent_status_metrics_returns_unknown_snapshot_before_runtime_update() {
+        let root = TempDir::new().expect("tempdir");
+        let ctx = test_ctx(root.path().join("daemon.sock"));
+        ctx.registry.register("worker", "/tmp/worker", "", "");
+        let env = Envelope::new(
+            "metrics-get",
+            MessageType::GetAgentStatusMetrics,
+            &GetAgentStatusMetricsPayload::default(),
+        )
+        .expect("encode metrics get");
+
+        let response = handle_get_agent_status_metrics(&ctx, &env, "worker").expect("get metrics");
+
+        let decoded: AgentStatusMetricsResponse = decode_response(&response);
+        assert!(!decoded.found);
+        assert_eq!(decoded.metrics.workspace, "worker");
+        assert_eq!(
+            decoded.metrics.status_title,
+            "ax:worker ctx=?/? ?% unknown compact=?"
+        );
+    }
+
+    #[test]
+    fn list_agent_status_metrics_includes_unknown_and_known_registered_agents() {
+        let root = TempDir::new().expect("tempdir");
+        let ctx = test_ctx(root.path().join("daemon.sock"));
+        ctx.registry.register("a", "/tmp/a", "", "");
+        ctx.registry.register("b", "/tmp/b", "", "");
+        ctx.registry
+            .update_status_metrics_at(
+                "b",
+                AgentStatusMetrics {
+                    context_tokens: Some(50_000),
+                    context_window: Some(100_000),
+                    work_state: ax_proto::types::AgentWorkState::Busy,
+                    compact_eligible: Some(false),
+                    ..AgentStatusMetrics::default()
+                },
+                Utc::now(),
+            )
+            .expect("store b metrics");
+        let env = Envelope::new(
+            "metrics-list",
+            MessageType::ListAgentStatusMetrics,
+            &ListAgentStatusMetricsPayload::default(),
+        )
+        .expect("encode metrics list");
+
+        let response = handle_list_agent_status_metrics(&ctx, &env, "a").expect("list metrics");
+
+        let decoded: ListAgentStatusMetricsResponse = decode_response(&response);
+        assert_eq!(decoded.metrics.len(), 2);
+        assert_eq!(decoded.metrics[0].workspace, "a");
+        assert_eq!(
+            decoded.metrics[0].status_title,
+            "ax:a ctx=?/? ?% unknown compact=?"
+        );
+        assert_eq!(
+            decoded.metrics[1].status_title,
+            "ax:b ctx=50k/100k 50% busy compact=ineligible"
+        );
+    }
+
+    #[test]
+    fn update_agent_status_metrics_rejects_invalid_numbers_and_spoofed_workspace() {
+        let root = TempDir::new().expect("tempdir");
+        let ctx = test_ctx(root.path().join("daemon.sock"));
+        ctx.registry.register("worker", "/tmp/worker", "", "");
+        let bad_context = UpdateAgentStatusMetricsPayload {
+            context_tokens: Some(-1),
+            ..UpdateAgentStatusMetricsPayload::default()
+        };
+        let bad_context_env = Envelope::new(
+            "metrics-bad-context",
+            MessageType::UpdateAgentStatusMetrics,
+            &bad_context,
+        )
+        .expect("encode bad context metrics");
+
+        let err = handle_update_agent_status_metrics(&ctx, &bad_context_env, "worker")
+            .expect_err("negative tokens rejected")
+            .to_string();
+        assert!(err.contains("context_tokens must be non-negative"));
+
+        let spoofed = UpdateAgentStatusMetricsPayload {
+            workspace: "other".to_owned(),
+            ..UpdateAgentStatusMetricsPayload::default()
+        };
+        let spoofed_env = Envelope::new(
+            "metrics-spoof",
+            MessageType::UpdateAgentStatusMetrics,
+            &spoofed,
+        )
+        .expect("encode spoof metrics");
+
+        let err = handle_update_agent_status_metrics(&ctx, &spoofed_env, "worker")
+            .expect_err("spoofed workspace rejected")
+            .to_string();
+        assert!(err.contains("workspace must match registered caller"));
     }
 
     #[test]

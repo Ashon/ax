@@ -84,9 +84,12 @@ Unix socket 기반 중앙 브로커입니다.
 
 ### 작업 dispatch
 
-1. orchestrator 또는 workspace가 메시지 / task 생성
-2. daemon이 queue/task state에 기록
-3. session manager가 대상 session을 ensure runnable
+1. orchestrator 또는 workspace가 메시지나 task dispatch를 요청
+2. daemon이 요청 종류에 맞게 queue / task state에 기록
+   - `send_message`: message queue에만 기록하고 task state는 만들지 않음
+   - `create_task`: pending task record만 만들고 inbox message / wake는 만들지 않음
+   - `start_task`: task record와 `Task ID:`가 주입된 dispatch message를 함께 만들고 wake
+3. dispatch가 있는 경우 session manager가 대상 session을 ensure runnable
 4. 필요하면 session 생성 또는 재시작
 5. tmux wake prompt 전송
 

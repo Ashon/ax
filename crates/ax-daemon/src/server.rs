@@ -15,7 +15,7 @@ use tokio::task::JoinHandle;
 use ax_proto::Envelope;
 
 use crate::git_status::GitStatusCache;
-use crate::handlers::{handle_envelope, HandlerCtx, HandlerOutput};
+use crate::handlers::{handle_envelope, refill_runnable_task_messages, HandlerCtx, HandlerOutput};
 use crate::history::{History, DEFAULT_HISTORY_MAX_SIZE};
 use crate::memory::Store as MemoryStore;
 use crate::queue::{FlusherHandle, MessageQueue};
@@ -71,6 +71,7 @@ impl Daemon {
         let wake_scheduler = WakeScheduler::new(queue.clone(), RealWakeBackend);
         let registry = Registry::new();
         let task_store = TaskStore::in_memory();
+        let history = History::in_memory(DEFAULT_HISTORY_MAX_SIZE);
         let ax_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ax"));
         let session_manager = Arc::new(
             SessionManager::new(
@@ -84,6 +85,7 @@ impl Daemon {
             .with_wake_scheduler(wake_scheduler.clone()),
         );
         attach_session_manager(&wake_scheduler, &session_manager);
+        attach_task_queue_refiller(&wake_scheduler, &task_store, &queue, &history);
         Self {
             socket_path,
             registry,
@@ -92,7 +94,7 @@ impl Daemon {
             memory_store: MemoryStore::in_memory(),
             task_store,
             team_controller,
-            history: History::in_memory(DEFAULT_HISTORY_MAX_SIZE),
+            history,
             wake_scheduler,
             session_manager,
         }
@@ -144,6 +146,12 @@ impl Daemon {
             .with_wake_scheduler(self.wake_scheduler.clone()),
         );
         attach_session_manager(&self.wake_scheduler, &self.session_manager);
+        attach_task_queue_refiller(
+            &self.wake_scheduler,
+            &self.task_store,
+            &self.queue,
+            &self.history,
+        );
         Ok(self)
     }
 
@@ -239,7 +247,8 @@ const SILENT_TASK_NUDGE_CAP: i64 = 5;
 /// so future additions to the task-lifecycle tool surface land in
 /// one place. Any MCP agent — Claude, Codex, or future runtimes —
 /// sees the same remediation menu.
-pub(crate) const SILENT_TASK_NUDGE_NOTE: &str = "Assignee looks idle but the task is still `in_progress`. \
+pub(crate) const SILENT_TASK_NUDGE_NOTE: &str =
+    "Assignee looks idle but the task is still `in_progress`. \
      Call one of the task-lifecycle MCP tools instead of leaving it open: \
      `report_task_progress` (heartbeat with a note), \
      `report_task_completion` (done — supply `dirty_files` and optional `residual_scope`), \
@@ -435,6 +444,26 @@ fn attach_session_manager(
     let sm = session_manager.clone();
     wake_scheduler.set_missing_session_ensurer(Box::new(move |workspace, sender| {
         sm.ensure_pending_wake_target(workspace, sender)
+    }));
+}
+
+fn attach_task_queue_refiller(
+    wake_scheduler: &Arc<WakeScheduler<RealWakeBackend>>,
+    task_store: &Arc<TaskStore>,
+    queue: &Arc<MessageQueue>,
+    history: &Arc<History>,
+) {
+    let task_store = task_store.clone();
+    let queue = queue.clone();
+    let history = history.clone();
+    wake_scheduler.set_queue_refiller(Box::new(move |workspace, sender| {
+        refill_runnable_task_messages(
+            task_store.as_ref(),
+            queue.as_ref(),
+            history.as_ref(),
+            workspace,
+            sender,
+        )
     }));
 }
 

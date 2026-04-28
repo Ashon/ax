@@ -448,12 +448,11 @@ impl TaskStore {
             task.logs.push(TaskLog {
                 timestamp: now,
                 workspace: OPERATOR_WORKSPACE_NAME.to_owned(),
-                message:
-                    "evidence hint: completion result contains no file paths or tool-command \
+                message: "evidence hint: completion result contains no file paths or tool-command \
                      fragments. Reviewers may want to spot-check — the Completion Reporting \
                      Contract suggests mentioning the files you touched or the command(s) \
                      that verified the change."
-                        .to_owned(),
+                    .to_owned(),
             });
             changed = true;
         }
@@ -618,12 +617,7 @@ impl TaskStore {
     /// live (`InProgress`) tasks assigned to `by`; everything else
     /// is a silent no-op so malformed or speculative task_ids cannot
     /// reshape state. Returns the snapshot on success.
-    pub fn mark_tool_activity(
-        &self,
-        id: &str,
-        by: &str,
-        when: DateTime<Utc>,
-    ) -> Option<Task> {
+    pub fn mark_tool_activity(&self, id: &str, by: &str, when: DateTime<Utc>) -> Option<Task> {
         let mut inner = self.inner.lock().expect("task store poisoned");
         let task = inner.get_mut(id)?;
         if task.removed_at.is_some()
@@ -832,8 +826,7 @@ fn validate_task_update(
             status_label(new_status).to_owned(),
         ));
     }
-    if matches!(new_status, TaskStatus::Completed)
-        && !matches!(task.status, TaskStatus::Completed)
+    if matches!(new_status, TaskStatus::Completed) && !matches!(task.status, TaskStatus::Completed)
     {
         let effective = result.unwrap_or(task.result.as_str());
         if !has_leftover_scope_declaration(effective) {
@@ -1199,13 +1192,7 @@ mod tests {
             })
             .expect("create");
         store
-            .update(
-                &task.id,
-                Some(TaskStatus::InProgress),
-                None,
-                None,
-                "worker",
-            )
+            .update(&task.id, Some(TaskStatus::InProgress), None, None, "worker")
             .expect("to in_progress");
         store.get(&task.id).expect("task")
     }
@@ -1636,8 +1623,7 @@ mod tests {
             t.updated_at = Utc::now() - chrono::Duration::seconds(500);
         }
 
-        let silent = store
-            .list_silent_in_progress(Utc::now(), chrono::Duration::seconds(60));
+        let silent = store.list_silent_in_progress(Utc::now(), chrono::Duration::seconds(60));
         assert!(silent.is_empty(), "selector should reject all fixtures");
     }
 
@@ -1695,13 +1681,7 @@ mod tests {
         // Blocked still counts as open (worker is still owning it).
         let blocked = seed_in_progress_task(&store);
         store
-            .update(
-                &blocked.id,
-                Some(TaskStatus::Blocked),
-                None,
-                None,
-                "worker",
-            )
+            .update(&blocked.id, Some(TaskStatus::Blocked), None, None, "worker")
             .expect("block");
         assert_eq!(store.count_open_for_assignee("worker"), 1);
     }
@@ -1725,10 +1705,7 @@ mod tests {
         assert!(snapshot.updated_at > before);
 
         let silent = store.list_silent_in_progress(now, chrono::Duration::seconds(60));
-        assert!(
-            silent.is_empty(),
-            "heartbeat must clear silent-exit state"
-        );
+        assert!(silent.is_empty(), "heartbeat must clear silent-exit state");
     }
 
     #[test]

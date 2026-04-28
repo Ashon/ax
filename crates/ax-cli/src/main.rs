@@ -72,12 +72,13 @@ Notes:
   --config defaults to the discovered ax config (.ax/config.yaml or ax.yaml)
   --socket defaults to ~/.local/state/ax/daemon.sock
   --ax-bin defaults to the current ax executable
-  ax messages drains pending messages from the synthetic _cli inbox
+  ax messages reads the synthetic _cli inbox; _cli is not an ax send/send_message target
   ax messages --history shows recent global message history without draining inboxes
 ";
 
 const ROOT_ORCHESTRATOR_FAILURE_HOLD_SCRIPT: &str = "\"$@\"\nstatus=$?\nif [ \"$status\" -ne 0 ] && [ \"$status\" -ne 130 ] && [ \"$status\" -ne 143 ]; then\n  printf '\\n[ax] Root orchestrator process exited unexpectedly with status %s.\\n' \"$status\"\n  printf '[ax] Common causes: runtime binary not found, auth/config issues, or a CLI crash.\\n'\n  printf '[ax] Press Enter to close this tmux session.\\n'\n  IFS= read -r _\nfi\nexit \"$status\"";
 const CLI_INBOX_WORKSPACE: &str = "_cli";
+const CLI_INBOX_REPLY_GUIDANCE: &str = "`_cli` is a local CLI inbox, not an addressable agent; reply to the sender or a supported parent path.";
 const MESSAGE_HISTORY_FILE_NAME: &str = "message_history.jsonl";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1115,6 +1116,7 @@ fn parse_send_args(argv: &[OsString], cwd: &Path) -> Result<ParsedCommand, CliEr
 
     let to =
         to.ok_or_else(|| CliError::Usage(format!("send requires a workspace target\n\n{USAGE}")))?;
+    reject_cli_inbox_send_target(&to)?;
     if message_parts.is_empty() {
         return Err(CliError::Usage(format!(
             "send requires a message body\n\n{USAGE}"
@@ -1127,6 +1129,15 @@ fn parse_send_args(argv: &[OsString], cwd: &Path) -> Result<ParsedCommand, CliEr
         socket_path,
         config_path: resolve_config_path(config_override, cwd)?,
     })
+}
+
+fn reject_cli_inbox_send_target(to: &str) -> Result<(), CliError> {
+    if to.trim() != CLI_INBOX_WORKSPACE {
+        return Ok(());
+    }
+    Err(CliError::Usage(format!(
+        "`{CLI_INBOX_WORKSPACE}` is the CLI inbox name, not an addressable workspace. Use `ax messages` to read it, or send to a real workspace/orchestrator.\n\n{USAGE}"
+    )))
 }
 
 fn parse_messages_args(argv: &[OsString], force_json: bool) -> Result<ParsedCommand, CliError> {
@@ -2139,6 +2150,7 @@ fn run_send(
     socket_path: &Path,
     config_path: &Path,
 ) -> Result<ExitCode, CliError> {
+    reject_cli_inbox_send_target(to)?;
     let mut client =
         DaemonClient::connect(socket_path, "orchestrator").map_err(SendCliError::Connect)?;
     let result = client
@@ -2812,12 +2824,12 @@ fn format_messages_output(
     }
     if messages.is_empty() {
         return Ok(format!(
-            "No pending messages in `{CLI_INBOX_WORKSPACE}` inbox.\nUse `ax messages --history` for recent global message history without draining inboxes.\n"
+            "No pending messages in `{CLI_INBOX_WORKSPACE}` inbox.\n{CLI_INBOX_REPLY_GUIDANCE}\nUse `ax messages --history` for recent global message history without draining inboxes.\n"
         ));
     }
 
     let mut out = format!(
-        "Drained {} pending message(s) from `{CLI_INBOX_WORKSPACE}` inbox; they are now removed from the queue.\n",
+        "Drained {} pending message(s) from `{CLI_INBOX_WORKSPACE}` inbox; they are now removed from the queue.\n{CLI_INBOX_REPLY_GUIDANCE}\n",
         messages.len()
     );
     for message in messages {
@@ -2864,7 +2876,7 @@ fn timeout_messages_output(json_output: bool) -> &'static str {
     if json_output {
         "[]\n"
     } else {
-        "No pending messages received in `_cli` inbox within timeout.\n"
+        "No pending messages received in `_cli` inbox within timeout.\n`_cli` is a local CLI inbox, not an addressable agent; reply to the sender or a supported parent path.\n"
     }
 }
 
@@ -3282,6 +3294,19 @@ mod tests {
     }
 
     #[test]
+    fn send_rejects_cli_inbox_target() {
+        let err = parse_args(
+            vec!["ax".into(), "send".into(), "_cli".into(), "hello".into()],
+            Path::new("/missing"),
+            Path::new("/tmp/ax"),
+        )
+        .expect_err("synthetic cli inbox should not be addressable");
+
+        assert!(err.to_string().contains("`_cli` is the CLI inbox name"));
+        assert!(err.to_string().contains("not an addressable workspace"));
+    }
+
+    #[test]
     fn messages_parses_filters_and_json_alias() {
         let parsed = parse_args(
             vec![
@@ -3380,6 +3405,7 @@ mod tests {
 
         let text = format_messages_output(&messages, false).expect("text output");
         assert!(text.contains("Drained 1 pending message(s) from `_cli` inbox"));
+        assert!(text.contains("not an addressable agent"));
         assert!(text.contains("── [02:30:00] from ax.orchestrator ──"));
         assert!(text.contains("Task ready"));
 
@@ -3394,6 +3420,7 @@ mod tests {
     fn format_messages_output_empty_names_cli_inbox_and_history_escape_hatch() {
         let text = format_messages_output(&[], false).expect("text output");
         assert!(text.contains("No pending messages in `_cli` inbox."));
+        assert!(text.contains("not an addressable agent"));
         assert!(text.contains("ax messages --history"));
     }
 
@@ -3434,7 +3461,7 @@ mod tests {
         assert_eq!(timeout_messages_output(true), "[]\n");
         assert_eq!(
             timeout_messages_output(false),
-            "No pending messages received in `_cli` inbox within timeout.\n"
+            "No pending messages received in `_cli` inbox within timeout.\n`_cli` is a local CLI inbox, not an addressable agent; reply to the sender or a supported parent path.\n"
         );
     }
 

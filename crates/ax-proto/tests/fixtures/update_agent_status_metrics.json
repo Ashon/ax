@@ -1,0 +1,1 @@
+{"id":"asm-1","type":"update_agent_status_metrics","payload":{"agent":"ax.daemon","runtime_id":"codex","runtime_name":"Codex","session_id":"sess-1","context_tokens":142000,"context_window":200000,"usage_ratio":0.71,"last_activity_at":"2026-04-28T07:00:00Z","work_state":"idle","compact_eligible":true,"freshness":"fresh","source_quality":"runtime"}}

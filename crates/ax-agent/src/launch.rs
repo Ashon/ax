@@ -3,6 +3,9 @@ use std::io;
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
 
+use crate::status::{
+    run_command_with_status, ClaudeMetricSource, CodexMetricSource, RuntimeStatusReporter,
+};
 use crate::{claude_project_path, prepare_codex_home_for_launch, Runtime};
 
 const CLAUDE_PROMPT_SUGGESTION_ENV: &str = "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION";
@@ -76,32 +79,43 @@ pub fn run_in_dir_with_options(
     let runtime = Runtime::normalize(runtime_name)
         .ok_or_else(|| LaunchError::UnsupportedRuntime(runtime_name.to_owned()))?;
     match runtime {
-        Runtime::Claude => run_claude(dir, options),
+        Runtime::Claude => run_claude(dir, workspace, socket_path, config_path, options),
         Runtime::Codex => run_codex(dir, workspace, socket_path, ax_bin, config_path, options),
     }
 }
 
-fn run_claude(dir: &Path, options: &LaunchOptions) -> Result<ExitStatus, LaunchError> {
+fn run_claude(
+    dir: &Path,
+    workspace: &str,
+    socket_path: &Path,
+    config_path: Option<&Path>,
+    options: &LaunchOptions,
+) -> Result<ExitStatus, LaunchError> {
     prepare_claude_launch(dir, options.fresh_start)?;
+    let mut reporter =
+        RuntimeStatusReporter::new(Runtime::Claude, workspace, dir, socket_path, config_path);
+    let source = ClaudeMetricSource::from_workspace_dir(dir);
 
     if !options.extra_args.is_empty() {
-        return spawn_claude(dir, false, &options.extra_args);
+        return spawn_claude(dir, false, &options.extra_args, &mut reporter, &source);
     }
     if options.fresh_start {
-        return spawn_claude(dir, false, &[]);
+        return spawn_claude(dir, false, &[], &mut reporter, &source);
     }
 
-    let primary = spawn_claude(dir, true, &options.extra_args)?;
+    let primary = spawn_claude(dir, true, &options.extra_args, &mut reporter, &source)?;
     if primary.success() {
         return Ok(primary);
     }
-    spawn_claude(dir, false, &[])
+    spawn_claude(dir, false, &[], &mut reporter, &source)
 }
 
 fn spawn_claude(
     dir: &Path,
     continue_session: bool,
     extra_args: &[String],
+    reporter: &mut RuntimeStatusReporter,
+    source: &ClaudeMetricSource,
 ) -> Result<ExitStatus, LaunchError> {
     let mut cmd = Command::new("claude");
     cmd.current_dir(dir)
@@ -113,7 +127,7 @@ fn spawn_claude(
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
-    cmd.status().map_err(|source| LaunchError::Launch {
+    run_command_with_status(&mut cmd, reporter, source).map_err(|source| LaunchError::Launch {
         program: "claude",
         source,
     })
@@ -135,6 +149,9 @@ fn run_codex(
         config_path,
         options.fresh_start,
     )?;
+    let mut reporter =
+        RuntimeStatusReporter::new(Runtime::Codex, workspace, dir, socket_path, config_path);
+    let source = CodexMetricSource::new(codex_home.clone());
 
     let mut cmd = Command::new("codex");
     cmd.args(codex_command_args(dir, &options.extra_args))
@@ -142,9 +159,11 @@ fn run_codex(
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
-    cmd.status().map_err(|source| LaunchError::Launch {
-        program: "codex",
-        source,
+    run_command_with_status(&mut cmd, &mut reporter, &source).map_err(|source| {
+        LaunchError::Launch {
+            program: "codex",
+            source,
+        }
     })
 }
 

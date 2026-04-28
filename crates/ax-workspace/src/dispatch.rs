@@ -306,7 +306,7 @@ fn wait_for_dispatch_target_ready<B: TmuxBackend>(
 
 fn wake_prompt(sender: &str, fresh: bool) -> String {
     let base = format!(
-        "대기 중인 메시지가 있습니다. `read_messages`로 확인하고 요청된 작업을 수행해 주세요. 회신이 필요하면 `send_message(to=\"{sender}\")`로 결과를 보내주세요."
+        "대기 중인 메시지가 있습니다. `read_messages`로 확인하고 요청된 작업을 수행해 주세요. `read_messages`가 비어 있어도 현재 워크스페이스에 할당된 daemon task를 `list_tasks(assignee=<self>, status=\"pending\")` 및 `list_tasks(assignee=<self>, status=\"in_progress\")`로 확인하고, runnable task는 `get_task`로 구조화된 문맥을 확인한 뒤 처리하세요. 회신이 필요하고 `{sender}`가 지원되는 `send_message` 대상임이 확실하면 `send_message(to=\"{sender}\")`로 결과를 보내고, 그렇지 않으면 현재 최종 응답 또는 지원되는 상위 reply path로 결과를 보고하세요."
     );
     if !fresh {
         return base;

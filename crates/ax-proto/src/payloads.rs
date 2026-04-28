@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::helpers::{is_false, is_zero_i64};
 use crate::types::{
-    LifecycleAction, McpToolActivityStatus, TaskStatus, TeamReconcileMode, TeamReconfigureAction,
+    AgentStatusFreshness, AgentStatusSourceQuality, AgentWorkState, LifecycleAction,
+    McpToolActivityStatus, TaskStatus, TeamReconcileMode, TeamReconfigureAction,
     TeamReconfigureChange,
 };
 
@@ -53,6 +54,50 @@ pub struct ReadMessagesPayload {
 pub struct SetStatusPayload {
     pub status: String,
 }
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateAgentStatusMetricsPayload {
+    /// Optional guard for callers that want to assert the target. Empty
+    /// means "the registered caller's workspace".
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub workspace: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub agent: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub runtime_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub runtime_name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<i64>,
+    /// 0.0-1.0 inclusive. If omitted, consumers may derive it from
+    /// context_tokens/context_window when both are known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_ratio: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default, skip_serializing_if = "AgentWorkState::is_unknown")]
+    pub work_state: AgentWorkState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compact_eligible: Option<bool>,
+    #[serde(default, skip_serializing_if = "AgentStatusFreshness::is_unknown")]
+    pub freshness: AgentStatusFreshness,
+    #[serde(default, skip_serializing_if = "AgentStatusSourceQuality::is_unknown")]
+    pub source_quality: AgentStatusSourceQuality,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GetAgentStatusMetricsPayload {
+    /// Empty means "the registered caller's workspace".
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub workspace: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ListAgentStatusMetricsPayload {}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RecordMcpToolActivityPayload {

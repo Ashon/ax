@@ -23,6 +23,183 @@ pub enum AgentStatus {
     Disconnected,
 }
 
+/// Runtime-reported coarse work state for an ax-defined agent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AgentWorkState {
+    #[default]
+    #[serde(rename = "unknown")]
+    Unknown,
+    #[serde(rename = "busy")]
+    Busy,
+    #[serde(rename = "idle")]
+    Idle,
+}
+
+impl AgentWorkState {
+    #[must_use]
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, Self::Unknown)
+    }
+
+    fn as_status_label(&self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Busy => "busy",
+            Self::Idle => "idle",
+        }
+    }
+}
+
+/// Freshness of the metric snapshot from the runtime's perspective.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AgentStatusFreshness {
+    #[default]
+    #[serde(rename = "unknown")]
+    Unknown,
+    #[serde(rename = "fresh")]
+    Fresh,
+    #[serde(rename = "stale")]
+    Stale,
+}
+
+impl AgentStatusFreshness {
+    #[must_use]
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, Self::Unknown)
+    }
+}
+
+/// Quality/source class for the metric snapshot.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AgentStatusSourceQuality {
+    #[default]
+    #[serde(rename = "unknown")]
+    Unknown,
+    /// Directly reported by the runtime adapter.
+    #[serde(rename = "runtime")]
+    Runtime,
+    /// Derived by ax from incomplete structured state.
+    #[serde(rename = "inferred")]
+    Inferred,
+}
+
+impl AgentStatusSourceQuality {
+    #[must_use]
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, Self::Unknown)
+    }
+}
+
+/// Structured source-of-truth status metrics for an ax-defined agent.
+///
+/// Optional numeric fields intentionally model "unknown"; callers must not
+/// infer unavailable runtime state from tmux title/capture text.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AgentStatusMetrics {
+    pub workspace: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub agent: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub runtime_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub runtime_name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage_ratio: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_activity_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "AgentWorkState::is_unknown")]
+    pub work_state: AgentWorkState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compact_eligible: Option<bool>,
+    #[serde(default, skip_serializing_if = "AgentStatusFreshness::is_unknown")]
+    pub freshness: AgentStatusFreshness,
+    #[serde(default, skip_serializing_if = "AgentStatusSourceQuality::is_unknown")]
+    pub source_quality: AgentStatusSourceQuality,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub status_title: String,
+}
+
+impl AgentStatusMetrics {
+    #[must_use]
+    pub fn unknown_for_workspace(workspace: impl Into<String>) -> Self {
+        let workspace = workspace.into();
+        let mut metrics = Self {
+            workspace: workspace.clone(),
+            agent: workspace,
+            ..Self::default()
+        };
+        metrics.status_title = metrics.formatted_status_title();
+        metrics
+    }
+
+    #[must_use]
+    pub fn with_status_title(mut self) -> Self {
+        self.status_title = self.formatted_status_title();
+        self
+    }
+
+    #[must_use]
+    pub fn formatted_status_title(&self) -> String {
+        let agent = non_empty_or(&self.agent, non_empty_or(&self.workspace, "?"));
+        let context_tokens = format_context_value(self.context_tokens);
+        let context_window = format_context_value(self.context_window);
+        let usage_percent = format_usage_percent(effective_usage_ratio(self));
+        let work_state = self.work_state.as_status_label();
+        let compact = match self.compact_eligible {
+            Some(true) => "eligible",
+            Some(false) => "ineligible",
+            None => "?",
+        };
+
+        format!(
+            "ax:{agent} ctx={context_tokens}/{context_window} {usage_percent} {work_state} compact={compact}"
+        )
+    }
+}
+
+fn non_empty_or<'a>(value: &'a str, fallback: &'a str) -> &'a str {
+    if value.is_empty() {
+        fallback
+    } else {
+        value
+    }
+}
+
+fn effective_usage_ratio(metrics: &AgentStatusMetrics) -> Option<f64> {
+    if let Some(ratio) = metrics.usage_ratio {
+        return ratio.is_finite().then_some(ratio);
+    }
+    match (metrics.context_tokens, metrics.context_window) {
+        (Some(tokens), Some(window)) if tokens >= 0 && window > 0 => {
+            Some(tokens as f64 / window as f64)
+        }
+        _ => None,
+    }
+}
+
+fn format_context_value(value: Option<i64>) -> String {
+    match value {
+        Some(n) if n >= 1000 => format!("{}k", (n + 500) / 1000),
+        Some(n) if n >= 0 => n.to_string(),
+        _ => "?".to_owned(),
+    }
+}
+
+fn format_usage_percent(ratio: Option<f64>) -> String {
+    match ratio {
+        Some(ratio) if ratio.is_finite() && ratio >= 0.0 => format!("{:.0}%", ratio * 100.0),
+        _ => "?%".to_owned(),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceInfo {
     pub name: String,
@@ -32,6 +209,8 @@ pub struct WorkspaceInfo {
     pub status: AgentStatus,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub status_text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_metrics: Option<AgentStatusMetrics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_status: Option<WorkspaceGitStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -544,4 +723,54 @@ pub struct Memory {
     pub superseded_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_metrics_title_formats_known_context_budget() {
+        let metrics = AgentStatusMetrics {
+            workspace: "ax.daemon".to_owned(),
+            context_tokens: Some(142_000),
+            context_window: Some(200_000),
+            work_state: AgentWorkState::Idle,
+            compact_eligible: Some(true),
+            ..AgentStatusMetrics::default()
+        };
+
+        assert_eq!(
+            metrics.formatted_status_title(),
+            "ax:ax.daemon ctx=142k/200k 71% idle compact=eligible"
+        );
+    }
+
+    #[test]
+    fn status_metrics_title_uses_explicit_ratio_and_unknown_fields() {
+        let metrics = AgentStatusMetrics {
+            workspace: "worker".to_owned(),
+            context_tokens: Some(10_000),
+            usage_ratio: Some(0.42),
+            compact_eligible: None,
+            ..AgentStatusMetrics::default()
+        };
+
+        assert_eq!(
+            metrics.formatted_status_title(),
+            "ax:worker ctx=10k/? 42% unknown compact=?"
+        );
+    }
+
+    #[test]
+    fn status_metrics_unknown_workspace_degrades_cleanly() {
+        let metrics = AgentStatusMetrics::unknown_for_workspace("worker");
+
+        assert_eq!(
+            metrics.status_title,
+            "ax:worker ctx=?/? ?% unknown compact=?"
+        );
+        assert!(metrics.context_tokens.is_none());
+        assert!(metrics.context_window.is_none());
+    }
 }

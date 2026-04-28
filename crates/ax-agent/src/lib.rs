@@ -11,6 +11,7 @@ mod codex;
 mod launch;
 mod runtime;
 mod shell;
+mod status;
 
 pub use claude::{claude_project_path, ClaudeProjectError};
 pub use codex::{

@@ -743,6 +743,7 @@ mod tests {
                 description: String::new(),
                 status: AgentStatus::Online,
                 status_text: "  long running job that is definitely more than limit".into(),
+                status_metrics: None,
                 git_status: None,
                 connected_at: None,
                 last_activity_at: None,
@@ -768,6 +769,7 @@ mod tests {
                 description: String::new(),
                 status: AgentStatus::Online,
                 status_text: String::new(),
+                status_metrics: None,
                 git_status: Some(WorkspaceGitStatus {
                     state: "dirty".into(),
                     modified: 2,
@@ -803,6 +805,7 @@ mod tests {
                 description: String::new(),
                 status: AgentStatus::Online,
                 status_text: String::new(),
+                status_metrics: None,
                 git_status: Some(WorkspaceGitStatus {
                     state: "non_git".into(),
                     message: "no .git directory".into(),

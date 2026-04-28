@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::types::{
-    LifecycleAction, LifecycleTarget, Memory, Message, Task, TeamApplyTicket, TeamReconfigurePlan,
-    TeamReconfigureState, WorkspaceInfo,
+    AgentStatusMetrics, LifecycleAction, LifecycleTarget, Memory, Message, Task, TeamApplyTicket,
+    TeamReconfigurePlan, TeamReconfigureState, WorkspaceInfo,
 };
 use crate::usage::WorkspaceTrend;
 
@@ -39,6 +39,17 @@ pub struct ReadMessagesResponse {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ListWorkspacesResponse {
     pub workspaces: Vec<WorkspaceInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentStatusMetricsResponse {
+    pub metrics: AgentStatusMetrics,
+    pub found: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ListAgentStatusMetricsResponse {
+    pub metrics: Vec<AgentStatusMetrics>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

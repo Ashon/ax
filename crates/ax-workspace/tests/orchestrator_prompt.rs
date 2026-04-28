@@ -95,6 +95,10 @@ fn orchestrator_prompt_requires_tracking_assigned_work_to_closure() {
     };
     let root_prompt = orchestrator_prompt(&root, "", "");
     for want in [
+        "`read_messages`가 비어 있어도 \"작업 없음\"으로 결론내리기 전",
+        "`list_tasks(assignee=\"orchestrator\", status=\"pending\")`",
+        "`list_tasks(assignee=\"orchestrator\", status=\"in_progress\")`",
+        "runnable task는 `get_task`로 구조화된 문맥을 확인",
         "오케스트레이터는 자신이 assign한 일이 실제 완료 결과, 명시적 blocker 보고, 실패 중 하나의 종결 상태에 도달할 때까지 계속 추적할 책임이 있습니다.",
         "assign한 일은 실제 완료 증거를 받거나, blocker를 상위에 명시적으로 보고하거나, 실패로 종료할 때까지 계속 소유하고 추적합니다.",
         "`remaining owned dirty files=<none|paths>`",
@@ -113,6 +117,10 @@ fn orchestrator_prompt_requires_tracking_assigned_work_to_closure() {
     };
     let sub_prompt = orchestrator_prompt(&child, &child.prefix, "orchestrator");
     for want in [
+        "`read_messages`가 비어 있어도 \"작업 없음\"으로 결론내리기 전",
+        "`list_tasks(assignee=\"shared.orchestrator\", status=\"pending\")`",
+        "`list_tasks(assignee=\"shared.orchestrator\", status=\"in_progress\")`",
+        "runnable task는 `get_task`로 구조화된 문맥을 확인",
         "오케스트레이터는 자신이 assign한 일이 실제 완료 결과, 명시적 blocker 보고, 실패 중 하나의 종결 상태에 도달할 때까지 계속 추적할 책임이 있습니다.",
         "assign한 일은 실제 완료 증거를 받거나, blocker를 상위에 명시적으로 보고하거나, 실패로 종료할 때까지 계속 소유하고 추적합니다.",
         "`remaining owned dirty files=<none|paths>`",

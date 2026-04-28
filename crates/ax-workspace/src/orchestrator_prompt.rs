@@ -222,6 +222,7 @@ fn section_role(ctx: &PromptCtx, out: &mut String) {
 fn section_behavior_rules(ctx: &PromptCtx, out: &mut String) {
     out.push_str("## 행동 규칙\n");
     out.push_str("- read_messages를 주기적으로 확인하여 메시지를 처리하세요.\n");
+    out.push_str(&format!("- `read_messages`가 비어 있어도 \"작업 없음\"으로 결론내리기 전에는 `list_tasks(assignee=\"{}\", status=\"pending\")` 및 `list_tasks(assignee=\"{}\", status=\"in_progress\")`로 자신에게 할당된 daemon task를 확인하고, runnable task는 `get_task`로 구조화된 문맥을 확인한 뒤 처리하세요.\n", ctx.self_name, ctx.self_name));
     out.push_str("- **위임은 항상 `send_message`로** 하세요. `request` 툴은 블로킹이라 여러 워크스페이스에 순차 호출하면 타임아웃이 쌓여 매우 느려집니다.\n");
     out.push_str("- 여러 워크스페이스에 동시에 일을 보낼 때는 `send_message`를 연속해서 호출하고(병렬 dispatch), 이후 `read_messages`로 응답을 수집하세요.\n");
     if ctx.is_root {

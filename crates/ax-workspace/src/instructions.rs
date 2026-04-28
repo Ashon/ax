@@ -169,6 +169,7 @@ fn message_handling_instruction_contract() -> String {
     [
         "## Message Handling Contract",
         "- 수신 작업을 처리할 때는 `read_messages`로 최신 메시지를 확인하고, 새 작업 요청, 명시적 질문, 새 사실, 요청한 증거가 있을 때만 회신하세요.",
+        "- `read_messages`가 비어 있어도 할 일이 없다고 결론내리기 전에는 현재 워크스페이스에 할당된 daemon task를 `list_tasks(assignee=<self>, status=\"pending\")` 및 `list_tasks(assignee=<self>, status=\"in_progress\")`로 확인하고, runnable task는 `get_task`로 구조화된 문맥을 확인한 뒤 처리하세요.",
         "- 결과나 추가 정보가 필요할 때만 `send_message`로 회신하세요. 단순 ACK/수신 확인/감사/상태 핑만의 메시지는 보내지 마세요.",
         "- 진행 상태 공유가 필요하면 `send_message` 대신 `set_status`를 사용하세요.",
         "- 처리 결과는 현재 작업을 요청한 발신자에게만 보내고, 새 작업/새 사실/명시적 질문/요청한 증거가 없으면 침묵을 기본값으로 두세요.",

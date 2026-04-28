@@ -54,7 +54,12 @@ name = "ax-agent"
 version = "0.1.0"
 dependencies = [
  "ax-config",
+ "ax-proto",
+ "ax-tmux",
+ "chrono",
  "hex",
+ "serde",
+ "serde_json",
  "sha1",
  "tempfile",
  "thiserror",

@@ -129,6 +129,65 @@ async fn list_tasks_returns_no_tasks_friendly_when_empty() {
 }
 
 #[tokio::test]
+async fn empty_inbox_reminds_agent_to_check_assigned_pending_tasks() {
+    let tmp = TempDir::new().expect("tempdir");
+    let handle = spawn_daemon(tmp.path()).await;
+    let orch = connect_server(handle.socket_path(), "orch").await;
+    let worker = connect_server(handle.socket_path(), "worker").await;
+
+    orch.create_task(Parameters(
+        serde_json::from_value(serde_json::json!({
+            "title": "queued without dispatch",
+            "assignee": "worker",
+        }))
+        .expect("decode"),
+    ))
+    .await
+    .expect("create");
+
+    let inbox = worker
+        .read_messages(Parameters(
+            serde_json::from_value(serde_json::json!({})).expect("decode"),
+        ))
+        .await
+        .expect("read");
+    let body = call_text(&inbox);
+    assert!(body.contains("No pending messages."), "body: {body}");
+    assert!(
+        body.contains("Message inbox and task store are separate"),
+        "body: {body}"
+    );
+    assert!(
+        body.contains(
+            "list_workspace_tasks(workspace=\"worker\", view=\"assigned\", status=\"pending\")"
+        ),
+        "body: {body}"
+    );
+    assert!(
+        body.contains("list_tasks(assignee=\"worker\", status=\"pending\")"),
+        "body: {body}"
+    );
+
+    let listed = worker
+        .list_tasks(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "assignee": "worker",
+                "status": "pending",
+            }))
+            .expect("decode"),
+        ))
+        .await
+        .expect("list");
+    let tasks: serde_json::Value = call_json(&listed);
+    assert_eq!(tasks["count"], 1);
+    assert_eq!(tasks["tasks"][0]["title"], "queued without dispatch");
+
+    orch.daemon().close().await;
+    worker.daemon().close().await;
+    handle.shutdown().await;
+}
+
+#[tokio::test]
 async fn list_workspace_tasks_both_view_aggregates_assigned_and_created() {
     let tmp = TempDir::new().expect("tempdir");
     let handle = spawn_daemon(tmp.path()).await;
@@ -429,10 +488,7 @@ async fn completion_contract_rejection_enqueues_reminder_in_worker_inbox() {
         ))
         .await
         .expect_err("missing marker must reject");
-    assert!(
-        err.to_string().contains("leftover-scope"),
-        "body: {err}"
-    );
+    assert!(err.to_string().contains("leftover-scope"), "body: {err}");
 
     // The worker's inbox should now have a durable reminder so next
     // poll surfaces the contract requirement again.
@@ -809,10 +865,7 @@ async fn report_task_completion_rejects_dirty_files_without_residual_scope() {
         ))
         .await
         .expect_err("dirty files without residual scope must fail");
-    assert!(
-        err.to_string().contains("residual_scope"),
-        "body: {err}"
-    );
+    assert!(err.to_string().contains("residual_scope"), "body: {err}");
 
     orch.daemon().close().await;
     worker.daemon().close().await;

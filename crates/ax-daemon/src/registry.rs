@@ -10,7 +10,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use tokio::sync::mpsc;
 
-use ax_proto::types::{AgentStatus, WorkspaceInfo};
+use ax_proto::types::{AgentStatus, AgentStatusMetrics, WorkspaceInfo};
 use ax_proto::Envelope;
 
 /// Bounded outbox size.
@@ -103,17 +103,19 @@ impl Registry {
         let mut inner = self.inner.lock().expect("registry poisoned");
         inner.next_id += 1;
         let id = inner.next_id;
-        let status_text = inner
-            .entries
-            .get(workspace)
-            .map(|e| e.info.status_text.clone())
+        let previous_info = inner.entries.get(workspace).map(|e| e.info.clone());
+        let status_text = previous_info
+            .as_ref()
+            .map(|info| info.status_text.clone())
             .unwrap_or_default();
+        let status_metrics = previous_info.and_then(|info| info.status_metrics);
         let info = WorkspaceInfo {
             name: workspace.to_owned(),
             dir: dir.to_owned(),
             description: description.to_owned(),
             status: AgentStatus::Online,
             status_text,
+            status_metrics,
             git_status: None,
             connected_at: Some(now),
             last_activity_at: Some(now),
@@ -203,8 +205,8 @@ impl Registry {
                 let mut info = e.info.clone();
                 info.last_activity_at = Some(e.last_active_at);
                 info.connection_generation = e.id;
-                info.idle_timeout_seconds = i64::try_from(e.idle_timeout.as_secs())
-                    .unwrap_or(i64::MAX);
+                info.idle_timeout_seconds =
+                    i64::try_from(e.idle_timeout.as_secs()).unwrap_or(i64::MAX);
                 info
             })
             .collect()
@@ -230,6 +232,48 @@ impl Registry {
         }
     }
 
+    /// Store a structured status metric snapshot for a registered
+    /// workspace. The daemon-owned tmux-visible status string is derived
+    /// from the same structured snapshot and exposed through
+    /// `WorkspaceInfo::status_text`.
+    pub fn update_status_metrics_at(
+        &self,
+        workspace: &str,
+        mut metrics: AgentStatusMetrics,
+        now: DateTime<Utc>,
+    ) -> Option<AgentStatusMetrics> {
+        let mut inner = self.inner.lock().expect("registry poisoned");
+        let entry = inner.entries.get_mut(workspace)?;
+        metrics.workspace = workspace.to_owned();
+        if metrics.agent.is_empty() {
+            metrics.agent = workspace.to_owned();
+        }
+        metrics.updated_at = Some(now);
+        metrics.status_title = metrics.formatted_status_title();
+        entry.info.status_text.clone_from(&metrics.status_title);
+        entry.info.status_metrics = Some(metrics.clone());
+        entry.last_active_at = now;
+        Some(metrics)
+    }
+
+    #[must_use]
+    pub fn get_status_metrics(&self, workspace: &str) -> Option<(AgentStatusMetrics, bool)> {
+        let inner = self.inner.lock().expect("registry poisoned");
+        let entry = inner.entries.get(workspace)?;
+        Some(status_metrics_for_entry(entry))
+    }
+
+    #[must_use]
+    pub fn list_status_metrics(&self) -> Vec<AgentStatusMetrics> {
+        self.inner
+            .lock()
+            .expect("registry poisoned")
+            .entries
+            .values()
+            .map(|entry| status_metrics_for_entry(entry).0)
+            .collect()
+    }
+
     /// Bump the last-active watermark on outbound traffic. Mirrors
     /// `Touch`; `connected_at` stays pinned to the initial
     /// registration time so clients can tell "since when has this
@@ -238,6 +282,22 @@ impl Registry {
         let mut inner = self.inner.lock().expect("registry poisoned");
         if let Some(entry) = inner.entries.get_mut(workspace) {
             entry.last_active_at = now;
+        }
+    }
+}
+
+fn status_metrics_for_entry(entry: &Entry) -> (AgentStatusMetrics, bool) {
+    match entry.info.status_metrics.clone() {
+        Some(mut metrics) => {
+            metrics.workspace = entry.info.name.clone();
+            metrics.status_title = metrics.formatted_status_title();
+            (metrics, true)
+        }
+        None => {
+            let mut metrics = AgentStatusMetrics::unknown_for_workspace(&entry.info.name);
+            metrics.last_activity_at = Some(entry.last_active_at);
+            metrics.status_title = metrics.formatted_status_title();
+            (metrics, false)
         }
     }
 }
@@ -268,5 +328,56 @@ mod tests {
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].info.status_text, "busy");
         assert_eq!(snapshot[0].last_active_at, marker);
+    }
+
+    #[test]
+    fn status_metrics_update_sets_structured_snapshot_and_title() {
+        let registry = Registry::new();
+        let _ = registry.register("worker", "/tmp/worker", "", "/tmp/config.yaml");
+        let marker = Utc
+            .with_ymd_and_hms(2026, 4, 28, 7, 0, 0)
+            .single()
+            .expect("valid timestamp");
+
+        let stored = registry
+            .update_status_metrics_at(
+                "worker",
+                AgentStatusMetrics {
+                    runtime_id: "codex".to_owned(),
+                    context_tokens: Some(142_000),
+                    context_window: Some(200_000),
+                    work_state: ax_proto::types::AgentWorkState::Idle,
+                    compact_eligible: Some(true),
+                    ..AgentStatusMetrics::default()
+                },
+                marker,
+            )
+            .expect("stored metrics");
+
+        assert_eq!(
+            stored.status_title,
+            "ax:worker ctx=142k/200k 71% idle compact=eligible"
+        );
+        let info = registry.list().pop().expect("registered workspace");
+        assert_eq!(info.status_text, stored.status_title);
+        assert_eq!(info.status_metrics, Some(stored));
+        assert_eq!(info.last_activity_at, Some(marker));
+    }
+
+    #[test]
+    fn status_metrics_query_degrades_to_unknown_snapshot() {
+        let registry = Registry::new();
+        let _ = registry.register("worker", "/tmp/worker", "", "/tmp/config.yaml");
+
+        let (metrics, found) = registry
+            .get_status_metrics("worker")
+            .expect("registered workspace");
+
+        assert!(!found);
+        assert_eq!(metrics.workspace, "worker");
+        assert_eq!(
+            metrics.status_title,
+            "ax:worker ctx=?/? ?% unknown compact=?"
+        );
     }
 }

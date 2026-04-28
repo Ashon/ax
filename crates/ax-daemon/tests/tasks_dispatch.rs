@@ -16,8 +16,8 @@ use tokio::net::UnixStream;
 
 use ax_daemon::{Daemon, DaemonHandle, WakeScheduler};
 use ax_proto::payloads::{
-    InterveneTaskPayload, ReadMessagesPayload, RegisterPayload, StartTaskPayload,
-    UpdateTaskPayload,
+    CreateTaskPayload, InterveneTaskPayload, ReadMessagesPayload, RegisterPayload,
+    StartTaskPayload, UpdateTaskPayload,
 };
 use ax_proto::responses::{
     InterveneTaskResponse, ReadMessagesResponse, StartTaskResponse, StatusResponse, TaskResponse,
@@ -198,6 +198,122 @@ async fn start_task_queues_a_task_aware_message_and_schedules_wake() {
     // cleared its pending entry.
     let scheduler: &WakeScheduler = &f.daemon.wake_scheduler;
     assert!(scheduler.state("worker").is_none());
+
+    f.handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn cli_create_task_queues_task_message_for_assignee() {
+    let f = spawn().await;
+    let mut cli = Client::connect(f.handle.socket_path());
+    let _: StatusResponse = cli.request(MessageType::Register, &register("_cli")).await;
+    let mut orch = Client::connect(f.handle.socket_path());
+    let _: StatusResponse = orch
+        .request(MessageType::Register, &register("orchestrator"))
+        .await;
+
+    let created: TaskResponse = cli
+        .request(
+            MessageType::CreateTask,
+            &CreateTaskPayload {
+                title: "triage new operator task".into(),
+                description: "created from the TUI".into(),
+                assignee: "orchestrator".into(),
+                parent_task_id: String::new(),
+                start_mode: String::new(),
+                workflow_mode: String::new(),
+                priority: String::new(),
+                stale_after_seconds: 0,
+            },
+        )
+        .await;
+    assert_eq!(created.task.created_by, "_cli");
+    assert_eq!(created.task.status, TaskStatus::Pending);
+    assert_eq!(created.task.dispatch_count, 1);
+    assert!(
+        f.daemon.wake_scheduler.state("orchestrator").is_some(),
+        "operator-created task should schedule a wake for its assignee"
+    );
+
+    let drained: ReadMessagesResponse = orch
+        .request(
+            MessageType::ReadMessages,
+            &ReadMessagesPayload {
+                limit: 10,
+                from: String::new(),
+            },
+        )
+        .await;
+    assert_eq!(drained.messages.len(), 1);
+    let msg = &drained.messages[0];
+    assert_eq!(msg.from, "_cli");
+    assert_eq!(msg.to, "orchestrator");
+    assert_eq!(msg.task_id, created.task.id);
+    assert!(msg.content.contains("Task ID:"));
+    assert!(msg.content.contains("triage new operator task"));
+    assert!(
+        f.daemon.wake_scheduler.state("orchestrator").is_none(),
+        "draining the task message should clear the wake"
+    );
+
+    f.handle.shutdown().await;
+}
+
+#[tokio::test]
+async fn read_messages_rehydrates_dispatched_task_when_queue_entry_is_missing() {
+    let f = spawn().await;
+    let mut orch = Client::connect(f.handle.socket_path());
+    let _: StatusResponse = orch.request(MessageType::Register, &register("orch")).await;
+    let mut worker = Client::connect(f.handle.socket_path());
+    let _: StatusResponse = worker
+        .request(MessageType::Register, &register("worker"))
+        .await;
+
+    let started: StartTaskResponse = orch
+        .request(
+            MessageType::StartTask,
+            &StartTaskPayload {
+                title: "recover lost queue message".into(),
+                description: String::new(),
+                message: "handle the recovered task".into(),
+                assignee: "worker".into(),
+                parent_task_id: String::new(),
+                start_mode: String::new(),
+                workflow_mode: String::new(),
+                priority: String::new(),
+                stale_after_seconds: 0,
+            },
+        )
+        .await;
+    assert_eq!(f.daemon.queue.pending_count("worker"), 1);
+    assert_eq!(
+        f.daemon
+            .queue
+            .remove_task_messages("worker", &started.task.id),
+        1
+    );
+    assert_eq!(f.daemon.queue.pending_count("worker"), 0);
+    assert!(
+        f.daemon.wake_scheduler.state("worker").is_some(),
+        "simulated queue loss should leave the pending wake in place"
+    );
+
+    let drained: ReadMessagesResponse = worker
+        .request(
+            MessageType::ReadMessages,
+            &ReadMessagesPayload {
+                limit: 10,
+                from: String::new(),
+            },
+        )
+        .await;
+    assert_eq!(drained.messages.len(), 1);
+    assert_eq!(drained.messages[0].task_id, started.task.id);
+    assert!(drained.messages[0]
+        .content
+        .contains("handle the recovered task"));
+    assert_eq!(f.daemon.queue.pending_count("worker"), 0);
+    assert!(f.daemon.wake_scheduler.state("worker").is_none());
 
     f.handle.shutdown().await;
 }
@@ -420,9 +536,7 @@ async fn update_task_completion_drains_pending_task_messages() {
             &UpdateTaskPayload {
                 id: started.task.id.clone(),
                 status: Some(TaskStatus::Completed),
-                result: Some(
-                    "done; remaining owned dirty files=<none>; ran `cargo test`".into(),
-                ),
+                result: Some("done; remaining owned dirty files=<none>; ran `cargo test`".into()),
                 log: None,
                 confirm: Some(true),
             },

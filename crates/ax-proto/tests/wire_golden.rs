@@ -13,11 +13,13 @@
 //! is a stable contract; this test enforces it.
 
 use ax_proto::{
-    AgentLifecycleResponse, BroadcastPayload, BroadcastResponse, CancelTaskPayload,
-    ControlLifecycleResponse, CreateTaskPayload, Envelope, ErrorPayload, InterveneTaskPayload,
+    AgentLifecycleResponse, AgentStatusMetricsResponse, BroadcastPayload, BroadcastResponse,
+    CancelTaskPayload, ControlLifecycleResponse, CreateTaskPayload, Envelope, ErrorPayload,
+    GetAgentStatusMetricsPayload, InterveneTaskPayload, ListAgentStatusMetricsPayload,
     ListWorkspacesResponse, MessageType, RecordMcpToolActivityPayload, RegisterPayload,
     RememberMemoryPayload, ResponsePayload, SendMessagePayload, SendMessageResponse,
-    StartTaskResponse, StatusResponse, UpdateTaskPayload, UsageTrendsResponse,
+    StartTaskResponse, StatusResponse, UpdateAgentStatusMetricsPayload, UpdateTaskPayload,
+    UsageTrendsResponse,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
@@ -89,6 +91,33 @@ fn record_mcp_tool_activity_matches_wire_golden() {
         &MessageType::RecordMcpToolActivity,
     );
     assert_payload_roundtrip::<RecordMcpToolActivityPayload>("record_mcp_tool_activity");
+}
+
+#[test]
+fn update_agent_status_metrics_matches_wire_golden() {
+    assert_envelope_roundtrip(
+        "update_agent_status_metrics",
+        &MessageType::UpdateAgentStatusMetrics,
+    );
+    assert_payload_roundtrip::<UpdateAgentStatusMetricsPayload>("update_agent_status_metrics");
+}
+
+#[test]
+fn get_agent_status_metrics_matches_wire_golden() {
+    assert_envelope_roundtrip(
+        "get_agent_status_metrics",
+        &MessageType::GetAgentStatusMetrics,
+    );
+    assert_payload_roundtrip::<GetAgentStatusMetricsPayload>("get_agent_status_metrics");
+}
+
+#[test]
+fn list_agent_status_metrics_matches_wire_golden() {
+    assert_envelope_roundtrip(
+        "list_agent_status_metrics",
+        &MessageType::ListAgentStatusMetrics,
+    );
+    assert_payload_roundtrip::<ListAgentStatusMetricsPayload>("list_agent_status_metrics");
 }
 
 #[test]
@@ -204,6 +233,11 @@ where
 #[test]
 fn list_workspaces_response_matches_wire_golden() {
     assert_response_data_roundtrip::<ListWorkspacesResponse>("resp_list_workspaces");
+}
+
+#[test]
+fn agent_status_metrics_response_matches_wire_golden() {
+    assert_response_data_roundtrip::<AgentStatusMetricsResponse>("resp_agent_status_metrics");
 }
 
 #[test]

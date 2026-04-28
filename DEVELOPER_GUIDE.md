@@ -450,7 +450,7 @@ pub struct Child {
 | `unregister` | Client → Daemon | 워크스페이스 해제 |
 | `send_message` | Client → Daemon | 특정 워크스페이스에 메시지 전송 |
 | `broadcast` | Client → Daemon | 모든 워크스페이스에 브로드캐스트 |
-| `read_messages` | Client → Daemon | 대기 중인 메시지 읽기 |
+| `read_messages` | Client → Daemon | 대기 중인 inbox 메시지 읽기. task store 조회가 아님 |
 | `list_workspaces` | Client → Daemon | 활성 워크스페이스 목록 |
 | `set_status` | Client → Daemon | 워크스페이스 상태 텍스트 갱신 |
 | `set_shared` | Client → Daemon | 공유 키-값 저장 |
@@ -469,8 +469,8 @@ pub struct Child {
 
 ### Task 관련 동작
 
-- `create_task`는 `title`, `description`, `assignee`, `start_mode`, `priority`, `stale_after_seconds`를 받아 `pending` 상태 task를 만들고 `tasks.json`에 persist한다.
-- MCP `start_task`는 위 `create_task`를 호출한 뒤 새 `Task ID:`를 dispatch 메시지에 자동 주입하고, 메시지를 enqueue한 다음 대상 워크스페이스를 wake 한다. `start_mode="fresh"`이면 wake 전에 세션 재시작까지 포함한다.
+- `create_task`는 `title`, `description`, `assignee`, `start_mode`, `priority`, `stale_after_seconds`를 받아 `pending` 상태 task를 만들고 task store / snapshot에 persist한다. inbox message enqueue, `Task ID:` 주입, wake, session ensure는 하지 않는다.
+- MCP `start_task`는 새 task를 만들고 `Task ID:`를 dispatch 메시지에 자동 주입한 뒤, 메시지를 enqueue하고 대상 워크스페이스를 wake 한다. `start_mode="fresh"`이면 wake 전에 세션 재시작까지 포함한다.
 - `update_task`는 assignee 또는 creator가 로그를 남길 수 있고, 상태 변경과 `result` 설정은 assignee가 담당한다. 상태 전이는 `pending → in_progress → completed|failed` 단방향이다.
 - `get_task`와 `list_tasks` 응답은 단순 저장본이 아니라 daemon이 계산한 `stale_info`를 포함한다. 여기에는 pending message 수, 마지막 관련 메시지 시각, wake 재시도 상태, task/message divergence 정보가 들어간다.
 - `cancel_task`, `remove_task`, `intervene_task`는 각각 취소, 아카이브, bounded recovery(`wake`/`interrupt`/`retry`)를 daemon control path로 수행한다.
@@ -489,6 +489,7 @@ pub struct Child {
 - 워크스페이스별 독립 큐
 - `send_message`로 대상 큐에 enqueue
 - `read_messages`로 자신의 큐에서 dequeue (소비 후 삭제)
+- `read_messages`는 message queue만 소비하므로, 빈 결과가 assigned pending task 부재를 의미하지 않는다. task work는 `list_tasks` 또는 `list_workspace_tasks`로 별도 조회한다.
 - 대상 워크스페이스가 연결 중이면 `push_message`로 즉시 알림
 - MCP `send_message`/`request` 도구는 tmux로 즉시 wake를 시도하고, daemon의 `WakeScheduler`는 unread 메시지가 남아 있으면 idle 상태를 기다리며 backoff 재시도를 이어간다.
 
@@ -508,7 +509,7 @@ pub struct Child {
 | 도구 | 파라미터 | 설명 |
 |------|----------|------|
 | `send_message` | `to` (필수), `message` (필수) | 대상 워크스페이스에 메시지 전송 + 자동 웨이크 |
-| `read_messages` | `limit`, `from` | 대기 중인 메시지 읽기 |
+| `read_messages` | `limit`, `from` | 대기 중인 inbox 메시지 읽기. task store 조회가 아님 |
 | `broadcast_message` | `message` (필수) | 모든 워크스페이스에 브로드캐스트 |
 | `request` | `to` (필수), `message` (필수), `timeout` | 동기 요청-응답 (전송 → 웨이크 → 폴링 대기) |
 
@@ -537,11 +538,12 @@ pub struct Child {
 
 | 도구 | 파라미터 | 설명 |
 |------|----------|------|
-| `create_task` | `title` (필수), `description`, `assignee` (필수), `start_mode`, `priority`, `stale_after_seconds` | 새 task 생성만 수행. 즉시 실행은 `start_task`를 우선 사용 |
+| `create_task` | `title` (필수), `description`, `assignee` (필수), `start_mode`, `priority`, `stale_after_seconds` | pending task record만 생성. inbox message / wake / `Task ID:` 주입 없음 |
 | `start_task` | `title` (필수), `message` (필수), `description`, `assignee` (필수), `start_mode`, `priority`, `stale_after_seconds` | task 생성 + `Task ID:` 자동 주입 dispatch + wake |
 | `update_task` | `id` (필수), `status`, `result`, `log` | task 상태/결과 갱신 또는 progress log 추가 |
 | `get_task` | `id` (필수) | 단일 task 상세 조회 |
 | `list_tasks` | `assignee`, `created_by`, `status` | 조건별 task 목록 조회 |
+| `list_workspace_tasks` | `workspace`, `view`, `status` | workspace 기준 assigned / created / both task 조회 |
 | `cancel_task` | `id` (필수), `reason`, `expected_version` | active task 취소 |
 | `remove_task` | `id` (필수), `reason`, `expected_version` | terminal task 보관/숨김 |
 | `intervene_task` | `id` (필수), `action` (필수), `note`, `expected_version` | stuck task에 `wake`/`interrupt`/`retry` 적용 |

@@ -188,13 +188,29 @@ impl Server {
     }
 
     fn instructions(&self) -> String {
+        let workspace = self.daemon.workspace();
         format!(
             "You are the {:?} workspace agent in an ax multi-agent environment. \
              Use these tools to coordinate with other workspace agents. \
              Call list_agents to inspect configured agents from the active ax config, \
              call list_workspaces to see who is currently active, and read_messages \
-             periodically to check for incoming messages from other agents.",
-            self.daemon.workspace()
+             periodically to check for incoming messages from other agents. \
+             The message inbox is separate from the task store: before reporting that \
+             no work is pending, also call list_workspace_tasks with workspace={:?}, \
+             view=\"assigned\", status=\"pending\" or list_tasks with assignee={:?}, \
+             status=\"pending\".",
+            workspace, workspace, workspace
+        )
+    }
+
+    fn no_pending_messages_text(&self) -> String {
+        let workspace = self.daemon.workspace();
+        format!(
+            "No pending messages.\n\n\
+             [ax] Message inbox and task store are separate. Before reporting no work, \
+             check assigned pending tasks with \
+             list_workspace_tasks(workspace=\"{workspace}\", view=\"assigned\", status=\"pending\") \
+             or list_tasks(assignee=\"{workspace}\", status=\"pending\")."
         )
     }
 }
@@ -834,7 +850,7 @@ impl Server {
     /// the daemon's queue, with optional `dispatch_config_path` so
     /// the wake scheduler can ensure the recipient's session.
     #[tool(
-        description = "Send a message to another workspace agent. Use this to coordinate with other agents working on the same project."
+        description = "Send a message to another workspace agent. Use this to coordinate with configured workspace agents; this enqueues a message only and does not create or update task-store records."
     )]
     pub async fn send_message(
         &self,
@@ -865,7 +881,7 @@ impl Server {
     /// `read_messages` — drain pending messages from the caller's
     /// inbox; optional sender filter and limit (default 10).
     #[tool(
-        description = "Read pending messages from other workspace agents. Call this periodically to check for incoming coordination messages."
+        description = "Read pending messages from other workspace agents. This drains only the message inbox; it does not list pending task-store records. For wake-task/no-work checks, also inspect assigned pending tasks with list_workspace_tasks or list_tasks."
     )]
     pub async fn read_messages(
         &self,
@@ -887,7 +903,7 @@ impl Server {
 
         if resp.messages.is_empty() {
             return Ok(CallToolResult::success(vec![Content::text(
-                "No pending messages.",
+                self.no_pending_messages_text(),
             )]));
         }
         let mut out = String::new();
@@ -906,7 +922,7 @@ impl Server {
 
     /// `create_task` — record a pending task without dispatching it.
     #[tool(
-        description = "Create a task record and assign it to a workspace agent without dispatching it. Use start_task when work should begin immediately."
+        description = "Create a task record and assign it to a workspace agent without dispatching it. The assignee may need list_tasks/list_workspace_tasks to discover the pending task because no inbox message is created. Use start_task when work should begin immediately."
     )]
     pub async fn create_task(
         &self,
@@ -942,7 +958,7 @@ impl Server {
     /// initial dispatch. Serial workflow children may come back with
     /// `dispatch.status = "waiting_turn"`.
     #[tool(
-        description = "Create a task and let the daemon persist or release the initial task-aware dispatch. Prefer this over create_task + send_message when work should begin immediately; serial workflow children may return `dispatch.status=\"waiting_turn\"` until prior siblings become terminal."
+        description = "Create a task and let the daemon persist or release the initial task-aware dispatch, including a Task ID message for the assignee when dispatched. Prefer this over create_task + send_message when work should begin immediately; serial workflow children may return `dispatch.status=\"waiting_turn\"` until prior siblings become terminal."
     )]
     pub async fn start_task(
         &self,
@@ -1224,7 +1240,7 @@ impl Server {
     /// / status filters. Prefer `list_workspace_tasks` for
     /// workspace-centric views.
     #[tool(
-        description = "List tasks with optional raw filters. Returns all tasks if no filters are specified. Prefer `list_workspace_tasks` when querying tasks relative to a workspace."
+        description = "List tasks with optional raw filters. Returns all tasks if no filters are specified. Use this or list_workspace_tasks to find assigned pending work that may not appear in read_messages, especially tasks created with create_task. Prefer `list_workspace_tasks` when querying tasks relative to a workspace."
     )]
     pub async fn list_tasks(
         &self,
@@ -1259,7 +1275,7 @@ impl Server {
     /// `list_workspace_tasks` — assigned / created / both views for
     /// one workspace. Aggregates via two daemon calls when `both`.
     #[tool(
-        description = "List tasks relative to a workspace with an explicit view: tasks assigned to that workspace, tasks created by that workspace, or both."
+        description = "List tasks relative to a workspace with an explicit view: tasks assigned to that workspace, tasks created by that workspace, or both. Use view=\"assigned\" and status=\"pending\" before reporting no work after an empty read_messages result."
     )]
     pub async fn list_workspace_tasks(
         &self,

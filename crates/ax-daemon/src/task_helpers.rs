@@ -297,12 +297,18 @@ mod tests {
         assert!(has_concrete_evidence(
             "wrote greeter/hello.sh and ran it; remaining owned dirty files=<none>"
         ));
-        assert!(has_concrete_evidence("updated src/main.rs and tests/foo.rs"));
+        assert!(has_concrete_evidence(
+            "updated src/main.rs and tests/foo.rs"
+        ));
         assert!(has_concrete_evidence("./run.sh prints the expected line"));
         // Tool commands.
-        assert!(has_concrete_evidence("ran cargo test --workspace; 48 passed"));
+        assert!(has_concrete_evidence(
+            "ran cargo test --workspace; 48 passed"
+        ));
         assert!(has_concrete_evidence("pytest confirmed the new case"));
-        assert!(has_concrete_evidence("git commit -m 'fix' on current branch"));
+        assert!(has_concrete_evidence(
+            "git commit -m 'fix' on current branch"
+        ));
     }
 
     #[test]

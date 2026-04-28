@@ -19,15 +19,18 @@ pub mod usage;
 pub use envelope::{Envelope, ErrorPayload, MessageType, ResponsePayload};
 pub use payloads::{
     AgentLifecyclePayload, BroadcastPayload, CancelTaskPayload, ControlLifecyclePayload,
-    CreateTaskPayload, FinishTeamReconfigurePayload, GetSharedPayload, GetTaskPayload,
-    GetTeamStatePayload, InterveneTaskPayload, ListTasksPayload, ReadMessagesPayload,
-    RecallMemoriesPayload, RecordMcpToolActivityPayload, RegisterPayload, RememberMemoryPayload,
-    RemoveTaskPayload, SendMessagePayload, SetSharedPayload, SetStatusPayload, StartTaskPayload,
-    TeamReconfigurePayload, UpdateTaskPayload, UsageTrendWorkspace, UsageTrendsPayload,
+    CreateTaskPayload, FinishTeamReconfigurePayload, GetAgentStatusMetricsPayload,
+    GetSharedPayload, GetTaskPayload, GetTeamStatePayload, InterveneTaskPayload,
+    ListAgentStatusMetricsPayload, ListTasksPayload, ReadMessagesPayload, RecallMemoriesPayload,
+    RecordMcpToolActivityPayload, RegisterPayload, RememberMemoryPayload, RemoveTaskPayload,
+    SendMessagePayload, SetSharedPayload, SetStatusPayload, StartTaskPayload,
+    TeamReconfigurePayload, UpdateAgentStatusMetricsPayload, UpdateTaskPayload,
+    UsageTrendWorkspace, UsageTrendsPayload,
 };
 pub use responses::{
-    AgentLifecycleResponse, BroadcastResponse, ControlLifecycleResponse, GetSharedResponse,
-    InterveneTaskResponse, ListSharedResponse, ListTasksResponse, ListWorkspacesResponse,
+    AgentLifecycleResponse, AgentStatusMetricsResponse, BroadcastResponse,
+    ControlLifecycleResponse, GetSharedResponse, InterveneTaskResponse,
+    ListAgentStatusMetricsResponse, ListSharedResponse, ListTasksResponse, ListWorkspacesResponse,
     MemoryResponse, ReadMessagesResponse, RecallMemoriesResponse, SendMessageResponse,
     StartTaskResponse, StatusResponse, TaskDispatch, TaskResponse, TeamApplyResponse,
     TeamPlanResponse, TeamStateResponse, UsageTrendsResponse,

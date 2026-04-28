@@ -16,14 +16,14 @@ task는 단순 메시지보다 강한 추적 단위입니다.
 - parent-child rollup
 - stale 신호 계산
 - recovery action (`wake`, `interrupt`, `retry`)
-- fresh start / serial workflow 지원
+- fresh start와 workflow mode 메타데이터
 
 ### 주요 MCP 도구
 
 | 도구 | 용도 |
 |---|---|
-| `create_task` | task record만 생성 |
-| `start_task` | task 생성 + 초기 dispatch |
+| `create_task` | pending task record만 생성. inbox message / wake / `Task ID:` 주입 없음 |
+| `start_task` | task 생성 + `Task ID:` 주입 dispatch + wake |
 | `update_task` | status/result/log 업데이트 |
 | `get_task` | 단건 상세 조회 |
 | `list_tasks` | 전체 task 조회 |
@@ -44,7 +44,25 @@ task는 단순 메시지보다 강한 추적 단위입니다.
 기록만 먼저 남길 작업:
 
 1. `create_task`
-2. 나중에 별도 dispatch 또는 follow-up
+2. 소비자 / orchestrator가 `list_tasks` 또는 `list_workspace_tasks`로 조회
+3. 나중에 별도 dispatch 또는 follow-up
+
+### task와 message queue 경계
+
+`read_messages`는 workspace inbox만 읽습니다. `create_task`로 만든 pending task는
+inbox에 들어가지 않기 때문에, `read_messages`가 비어 있어도 assigned pending task가
+남아 있을 수 있습니다.
+
+대기 작업을 복구하거나 wake prompt 이후 no-work 여부를 판단할 때는 다음 조회를 함께
+확인합니다.
+
+```text
+list_workspace_tasks(workspace="<self>", view="assigned", status="pending")
+list_tasks(assignee="<self>", status="pending")
+```
+
+반대로 `send_message`는 일반 메시지만 만들며 task state를 생성하거나 갱신하지 않습니다.
+즉시 실행과 추적이 모두 필요한 작업은 `start_task`를 사용합니다.
 
 ### start mode
 
@@ -54,7 +72,8 @@ task는 단순 메시지보다 강한 추적 단위입니다.
 ### workflow mode
 
 - `parallel`: 기본값
-- `serial`: sibling child task를 순차 release
+- `serial`: sibling child task의 순차 실행 의도를 나타내는 메타데이터. 현재 daemon이 sibling
+  dispatch를 자동 gate/release하지는 않으므로 orchestrator가 진행 순서를 관리해야 합니다.
 
 ### 저장 위치
 

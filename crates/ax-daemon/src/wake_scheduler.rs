@@ -74,8 +74,9 @@ impl WakeBackend for RealWakeBackend {
 pub(crate) type RetryAfterSuccessful = Box<dyn Fn(&str) -> bool + Send + Sync + 'static>;
 
 /// Optional queue rehydrator: called when a due retry finds the
-/// inbox empty. Must return the number of messages it re-enqueued.
-pub(crate) type QueueRefiller = Box<dyn Fn(&str) -> usize + Send + Sync + 'static>;
+/// inbox empty. Receives the target workspace and original wake
+/// sender, and must return the number of messages it re-enqueued.
+pub(crate) type QueueRefiller = Box<dyn Fn(&str, &str) -> usize + Send + Sync + 'static>;
 
 /// Optional missing-session recovery: called when a due retry finds
 /// no live tmux session. `true` means the session was recreated and
@@ -214,7 +215,7 @@ impl<B: WakeBackend> WakeScheduler<B> {
                     inner
                         .refill
                         .as_ref()
-                        .map_or(0, |refill| refill(&pw.workspace))
+                        .map_or(0, |refill| refill(&pw.workspace, &pw.sender))
                 };
                 if refilled > 0 {
                     tracing::info!(
@@ -495,7 +496,7 @@ mod tests {
         backend.set_exists(true);
         backend.set_idle(true);
         let sched = WakeScheduler::new(queue, backend.clone());
-        sched.set_queue_refiller(Box::new(move |workspace| {
+        sched.set_queue_refiller(Box::new(move |workspace, _sender| {
             seed_message(&queue_clone, workspace);
             1
         }));

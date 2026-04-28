@@ -413,6 +413,7 @@ mod tests {
             description: String::new(),
             status: AgentStatus::Online,
             status_text: String::new(),
+            status_metrics: None,
             git_status: None,
             connected_at: None,
             last_activity_at: None,

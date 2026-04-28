@@ -335,9 +335,51 @@ fn dispatch_runnable_work_waits_for_new_session_then_wakes() {
 
         assert!(tmux.woke());
         assert!(tmux.idle_checks() >= 3);
-        assert!(tmux
-            .wake_prompt()
-            .contains("send_message(to=\"ax.orchestrator\")"));
+        let prompt = tmux.wake_prompt();
+        for want in [
+            "`read_messages`로 확인",
+            "`list_tasks(assignee=<self>, status=\"pending\")`",
+            "`list_tasks(assignee=<self>, status=\"in_progress\")`",
+            "`get_task`로 구조화된 문맥",
+            "지원되는 `send_message` 대상임이 확실하면",
+            "send_message(to=\"ax.orchestrator\")",
+        ] {
+            assert!(prompt.contains(want), "missing {want:?} in:\n{prompt}");
+        }
+    });
+}
+
+#[test]
+fn dispatch_wake_prompt_qualifies_cli_reply_path() {
+    let home = tempfile::tempdir().unwrap();
+    with_home(home.path(), || {
+        let config_path = write_config(
+            home.path(),
+            "project: root\nworkspaces:\n  worker:\n    dir: ./worker\n    runtime: claude\n",
+        );
+        let tmux = FakeTmux::with_idle_after_checks(1);
+
+        dispatch_runnable_work_with_options(
+            &tmux,
+            Path::new("/tmp/ax.sock"),
+            &config_path,
+            Path::new("/tmp/ax"),
+            "worker",
+            "_cli",
+            false,
+            DispatchOptions {
+                ready_timeout: Duration::from_millis(5),
+                ready_poll_interval: Duration::ZERO,
+                ready_settle_delay: Duration::ZERO,
+                ready_fallback_delay: Duration::ZERO,
+            },
+        )
+        .unwrap();
+
+        let prompt = tmux.wake_prompt();
+        assert!(prompt.contains("send_message(to=\"_cli\")"));
+        assert!(prompt.contains("지원되는 `send_message` 대상임이 확실하면"));
+        assert!(prompt.contains("현재 최종 응답 또는 지원되는 상위 reply path"));
     });
 }
 
