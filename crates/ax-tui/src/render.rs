@@ -19,7 +19,7 @@ use ax_config::ProjectNode;
 use ax_proto::types::{AgentStatus, WorkspaceGitStatus};
 
 use crate::agents::AgentEntry;
-use crate::state::{AgentDetailTab, App, Focus};
+use crate::state::{AgentDetailTab, App, CreateTaskField, Focus, ROOT_ORCHESTRATOR_WORKSPACE};
 use crate::stream::StreamView;
 use crate::theme::{self, Severity};
 
@@ -41,8 +41,14 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
     if app.quick_actions.open {
         // Overlay anchors to the list pane since that's where the
         // agents cursor lives when it's open.
-        let (list_area, _) = split_body_inner(body_area);
-        draw_quick_actions(f, area, list_area, app);
+        let layout = body_layout(body_area);
+        draw_quick_actions(f, area, layout.list, app);
+    }
+    if app.create_task_form.is_some() {
+        draw_create_task_form(f, area, app);
+    }
+    if app.orchestrator_message_form.is_some() {
+        draw_orchestrator_message_form(f, area, app);
     }
     if app.help_open {
         draw_help(f, area, app);
@@ -51,11 +57,54 @@ pub(crate) fn draw(f: &mut Frame, app: &mut App) {
     draw_footer(f, chunks[2], app);
 }
 
-/// Split the body's inner rect into `(list, detail)` vertical halves.
+const DASHBOARD_HEIGHT: u16 = 4;
+const DASHBOARD_MIN_WIDTH: u16 = 72;
+const DASHBOARD_MIN_BODY_HEIGHT: u16 = 14;
+
+#[derive(Debug, Clone, Copy)]
+struct BodyLayout {
+    dashboard: Option<Rect>,
+    frame: Rect,
+    list: Rect,
+    detail: Rect,
+}
+
+/// Compute the optional btop-style resource strip and the regular
+/// tabbed list/detail frame underneath it. Small terminals keep the
+/// old single-frame layout so the TUI degrades by hiding the strip
+/// instead of squeezing the primary workflow.
+fn body_layout(area: Rect) -> BodyLayout {
+    let dashboard_height = if area.width >= DASHBOARD_MIN_WIDTH
+        && area.height >= DASHBOARD_MIN_BODY_HEIGHT
+        && area.height > DASHBOARD_HEIGHT + 6
+    {
+        DASHBOARD_HEIGHT
+    } else {
+        0
+    };
+    let (dashboard, frame) = if dashboard_height > 0 {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(dashboard_height), Constraint::Min(1)])
+            .split(area);
+        (Some(chunks[0]), chunks[1])
+    } else {
+        (None, area)
+    };
+    let (list, detail) = split_body_inner(frame);
+    BodyLayout {
+        dashboard,
+        frame,
+        list,
+        detail,
+    }
+}
+
+/// Split the tab frame's inner rect into `(list, detail)` vertical halves.
 /// Returns the `list` rect first so the selected-row math anchors on
 /// the top pane. Gives list 45% and detail 55% by default — detail
 /// wins the extra row so long task logs / message content stay
-/// legible without scrolling. `compute_body_inner` wraps the border
+/// legible without scrolling. `body_layout` wraps the border
 /// math so overlays can recompute the same layout without repeating
 /// the outer block.
 fn split_body_inner(body_area: Rect) -> (Rect, Rect) {
@@ -95,10 +144,12 @@ fn draw_help(f: &mut Frame, frame: Rect, app: &App) {
             "global",
             vec![
                 ("?", "toggle this help"),
+                ("r", "refresh now"),
                 ("q / ctrl-c", "quit"),
-                ("[ / ]", "switch pane (list ↔ detail)"),
-                ("Tab / Shift-Tab", "cycle visible tab"),
+                ("Tab / Shift-Tab", "switch pane (list ↔ detail)"),
+                ("[ / ]", "local detail tab, else top-level tab"),
                 (tab_keys, tab_desc),
+                ("m", "message orchestrator"),
                 ("f", "cycle task filter"),
             ],
         ),
@@ -113,8 +164,26 @@ fn draw_help(f: &mut Frame, frame: Rect, app: &App) {
         (
             "list · tasks",
             vec![
+                ("n", "new task"),
                 ("↑ ↓ / j k", "move selected task"),
+                ("Enter", "open task action menu"),
                 ("wheel", "scroll list"),
+            ],
+        ),
+        (
+            "task form",
+            vec![
+                ("Tab / Shift-Tab", "move field"),
+                ("Enter", "create task"),
+                ("Esc", "cancel"),
+            ],
+        ),
+        (
+            "message form",
+            vec![
+                ("m", "open message form"),
+                ("Enter", "send message"),
+                ("Esc", "cancel"),
             ],
         ),
         (
@@ -130,7 +199,7 @@ fn draw_help(f: &mut Frame, frame: Rect, app: &App) {
             "detail",
             vec![
                 ("↑ ↓ / j k", "scroll detail"),
-                ("h / l", "cycle agent detail tab (agents only)"),
+                ("[ / ] / h / l", "cycle agent detail tab (agents only)"),
                 ("PgUp / PgDn", "scroll by page"),
                 ("g", "top"),
                 ("Esc", "back to list"),
@@ -206,6 +275,184 @@ fn draw_help(f: &mut Frame, frame: Rect, app: &App) {
             theme::muted(),
         ));
     }
+    f.render_widget(Paragraph::new(visible), inner);
+}
+
+fn draw_create_task_form(f: &mut Frame, frame: Rect, app: &App) {
+    let Some(form) = app.create_task_form.as_ref() else {
+        return;
+    };
+    let max_width = frame.width.saturating_sub(2).max(1);
+    let max_height = frame.height.saturating_sub(2).max(1);
+    let width = 72u16.min(max_width).max(30u16.min(max_width));
+    let height = 11u16.min(max_height).max(7u16.min(max_height));
+    let x = frame.x + frame.width.saturating_sub(width) / 2;
+    let y = frame.y + frame.height.saturating_sub(height) / 2;
+    let area = Rect::new(x, y, width, height);
+
+    f.render_widget(ratatui::widgets::Clear, area);
+    let block = Block::default().borders(Borders::ALL).title(" new task ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let field_width = inner.width.saturating_sub(14) as usize;
+    let mut lines = vec![
+        create_task_field_line(
+            CreateTaskField::Assignee,
+            "assignee *",
+            &form.assignee,
+            form.field == CreateTaskField::Assignee,
+            field_width,
+        ),
+        create_task_field_line(
+            CreateTaskField::Title,
+            "title *",
+            &form.title,
+            form.field == CreateTaskField::Title,
+            field_width,
+        ),
+        create_task_field_line(
+            CreateTaskField::Description,
+            "description",
+            &form.description,
+            form.field == CreateTaskField::Description,
+            field_width,
+        ),
+        Line::from(""),
+    ];
+
+    if let Some(error) = &form.error {
+        lines.push(Line::from(Span::styled(
+            crate::tasks::truncate(error, inner.width as usize),
+            theme::severity(Severity::Danger),
+        )));
+    } else if form.submitting {
+        lines.push(Line::from(Span::styled("creating task...", theme::info())));
+    } else {
+        let assignees = app.known_assignees();
+        let known = if assignees.is_empty() {
+            "known assignees: unavailable".to_owned()
+        } else {
+            format!(
+                "known assignees: {}",
+                crate::tasks::truncate(
+                    &assignees.join(", "),
+                    inner.width.saturating_sub(17) as usize,
+                )
+            )
+        };
+        lines.push(Line::from(Span::styled(known, theme::muted())));
+    }
+
+    lines.push(Line::from(Span::styled(
+        "tab/s-tab field · enter create · esc cancel",
+        theme::muted(),
+    )));
+
+    let visible: Vec<Line> = lines.into_iter().take(inner.height as usize).collect();
+    f.render_widget(Paragraph::new(visible), inner);
+}
+
+fn create_task_field_line(
+    field: CreateTaskField,
+    label: &'static str,
+    value: &str,
+    active: bool,
+    value_width: usize,
+) -> Line<'static> {
+    let mut display = crate::tasks::truncate(value, value_width.max(1));
+    if active {
+        display.push('_');
+    }
+    Line::from(vec![
+        Span::styled(format!("  {label:<12}"), theme::meta_label()),
+        Span::styled(
+            display,
+            if active {
+                theme::selection(true)
+            } else if value.is_empty() {
+                theme::disabled()
+            } else if field == CreateTaskField::Assignee {
+                theme::assignee()
+            } else {
+                Style::default()
+            },
+        ),
+    ])
+}
+
+fn draw_orchestrator_message_form(f: &mut Frame, frame: Rect, app: &App) {
+    let Some(form) = app.orchestrator_message_form.as_ref() else {
+        return;
+    };
+    let max_width = frame.width.saturating_sub(2).max(1);
+    let max_height = frame.height.saturating_sub(2).max(1);
+    let width = 72u16.min(max_width).max(34u16.min(max_width));
+    let height = 9u16.min(max_height).max(6u16.min(max_height));
+    let x = frame.x + frame.width.saturating_sub(width) / 2;
+    let y = frame.y + frame.height.saturating_sub(height) / 2;
+    let area = Rect::new(x, y, width, height);
+
+    f.render_widget(ratatui::widgets::Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" message orchestrator ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let value_width = inner.width.saturating_sub(12) as usize;
+    let mut display = crate::tasks::truncate(&form.message, value_width.max(1));
+    if !form.submitting {
+        display.push('_');
+    }
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("  to        ", theme::meta_label()),
+            Span::styled(ROOT_ORCHESTRATOR_WORKSPACE, theme::assignee()),
+        ]),
+        Line::from(vec![
+            Span::styled("  message * ", theme::meta_label()),
+            Span::styled(
+                display,
+                if form.message.is_empty() {
+                    theme::disabled()
+                } else {
+                    theme::selection(true)
+                },
+            ),
+        ]),
+        Line::from(""),
+    ];
+
+    if let Some(error) = &form.error {
+        lines.push(Line::from(Span::styled(
+            crate::tasks::truncate(error, inner.width as usize),
+            theme::severity(Severity::Danger),
+        )));
+    } else if form.submitting {
+        lines.push(Line::from(Span::styled(
+            format!("sending message to {ROOT_ORCHESTRATOR_WORKSPACE}..."),
+            theme::info(),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "plain message; no task will be created",
+            theme::muted(),
+        )));
+    }
+
+    lines.push(Line::from(Span::styled(
+        "enter send · esc cancel",
+        theme::muted(),
+    )));
+
+    let visible: Vec<Line> = lines.into_iter().take(inner.height as usize).collect();
     f.render_widget(Paragraph::new(visible), inner);
 }
 
@@ -843,6 +1090,10 @@ fn pad_or_trunc(s: &str, width: usize) -> String {
 
 fn draw_body(f: &mut Frame, area: Rect, app: &mut App) {
     app.ensure_stream_view_visible();
+    let layout = body_layout(area);
+    if let Some(dashboard) = layout.dashboard {
+        draw_dashboard_strip(f, dashboard, app);
+    }
     // Outer body block carries the tab strip in its top border so the
     // layout doesn't burn a row on a standalone tab row. The inner
     // area splits vertically into a list pane (top) and a detail
@@ -851,11 +1102,12 @@ fn draw_body(f: &mut Frame, area: Rect, app: &mut App) {
         .borders(Borders::ALL)
         // Border stays neutral — focus is communicated inline on the
         // list/detail pane titles so the outer frame doesn't strobe
-        // between cyan and default as the user toggles `[/]`.
+        // between cyan and default as the user toggles focus.
         .border_style(Style::default())
         .title(tabs_title(app));
-    f.render_widget(block, area);
-    let (list_area, detail_area) = split_body_inner(area);
+    f.render_widget(block, layout.frame);
+    let list_area = layout.list;
+    let detail_area = layout.detail;
     if list_area.width == 0 || list_area.height == 0 {
         return;
     }
@@ -1116,6 +1368,241 @@ fn centered_loading_area(area: Rect) -> Rect {
 /// colour.
 fn focus_border_style(app: &App, panel: Focus) -> Style {
     theme::focus_border(app.focus == panel)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DashboardMetrics {
+    expected_agents: usize,
+    online_agents: usize,
+    live_sessions: usize,
+    hot_sessions: usize,
+    task_total: usize,
+    task_active: usize,
+    task_blocked: usize,
+    task_stale: usize,
+    token_workspaces: usize,
+    token_total: u64,
+    message_count: usize,
+}
+
+fn dashboard_metrics(app: &App) -> DashboardMetrics {
+    let expected_agents = app
+        .agent_entries
+        .iter()
+        .filter(|entry| !entry.group)
+        .count()
+        .max(app.workspace_infos.len())
+        .max(app.workspace_dirs.len());
+    let online_agents = app
+        .workspace_infos
+        .values()
+        .filter(|w| matches!(w.status, AgentStatus::Online))
+        .count();
+    let live_sessions = app.sessions.len();
+    let now = std::time::Instant::now();
+    let hot_sessions = app
+        .sessions
+        .iter()
+        .filter(|session| app.captures.is_recently_active(&session.workspace, now))
+        .count();
+    let task_summary = crate::tasks::summarize_tasks(&app.tasks);
+    let task_active = task_summary.pending + task_summary.in_progress + task_summary.blocked;
+    let token_rows: Vec<&ax_proto::usage::WorkspaceTrend> = app
+        .usage_trends
+        .values()
+        .filter(|trend| trend.available && trend.total.total() > 0)
+        .collect();
+    let token_total = token_rows
+        .iter()
+        .map(|trend| trend.total.total().max(0) as u64)
+        .sum();
+
+    DashboardMetrics {
+        expected_agents,
+        online_agents,
+        live_sessions,
+        hot_sessions,
+        task_total: task_summary.total,
+        task_active,
+        task_blocked: task_summary.blocked,
+        task_stale: task_summary.stale,
+        token_workspaces: token_rows.len(),
+        token_total,
+        message_count: app.messages.len(),
+    }
+}
+
+fn draw_dashboard_strip(f: &mut Frame, area: Rect, app: &App) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(theme::muted())
+        .title(" resources ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let metrics = dashboard_metrics(app);
+    if inner.height < 2 || inner.width < 96 {
+        let text = compact_dashboard_text(&metrics, inner.width as usize);
+        f.render_widget(Paragraph::new(text).style(theme::muted()), inner);
+        return;
+    }
+
+    let cells = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Ratio(1, 4),
+            Constraint::Ratio(1, 4),
+            Constraint::Ratio(1, 4),
+            Constraint::Ratio(1, 4),
+        ])
+        .split(inner);
+    draw_dashboard_cell(
+        f,
+        cells[0],
+        "fleet",
+        format!(
+            "{}/{} online · {} tmux",
+            metrics.online_agents, metrics.expected_agents, metrics.live_sessions
+        ),
+        format!("{} hot", metrics.hot_sessions),
+        ratio(metrics.online_agents, metrics.expected_agents),
+        theme::agent_status(&AgentStatus::Online),
+    );
+    draw_dashboard_cell(
+        f,
+        cells[1],
+        "tasks",
+        format!("{} active / {}", metrics.task_active, metrics.task_total),
+        format!(
+            "{} blocked · {} stale",
+            metrics.task_blocked, metrics.task_stale
+        ),
+        ratio(metrics.task_active, metrics.task_total),
+        if metrics.task_blocked > 0 || metrics.task_stale > 0 {
+            theme::severity(Severity::Warning)
+        } else {
+            theme::task_status(&ax_proto::types::TaskStatus::InProgress, false)
+        },
+    );
+    draw_dashboard_cell(
+        f,
+        cells[2],
+        "tokens",
+        format!(
+            "{} / 24h",
+            crate::tokens::format_token_count(metrics.token_total as f64)
+        ),
+        format!("{} workspaces", metrics.token_workspaces),
+        ratio(
+            metrics.token_workspaces,
+            app.workspace_dirs
+                .len()
+                .max(app.usage_trends.len())
+                .max(metrics.token_workspaces),
+        ),
+        theme::traffic_up(),
+    );
+    draw_dashboard_cell(
+        f,
+        cells[3],
+        "activity",
+        format!("{} messages", metrics.message_count),
+        if app.streamed_workspace.is_some() {
+            "stream pinned".to_owned()
+        } else if app.daemon_running {
+            "daemon running".to_owned()
+        } else {
+            "daemon stopped".to_owned()
+        },
+        ratio(
+            metrics.hot_sessions.max(metrics.message_count.min(1)),
+            metrics.live_sessions.max(1),
+        ),
+        if app.daemon_running {
+            theme::info()
+        } else {
+            theme::disabled()
+        },
+    );
+}
+
+fn draw_dashboard_cell(
+    f: &mut Frame,
+    area: Rect,
+    label: &'static str,
+    value: String,
+    detail: String,
+    pct: f64,
+    style: Style,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let width = area.width as usize;
+    let value_width = width.saturating_sub(label.chars().count() + 4).max(1);
+    let mut lines = vec![Line::from(vec![
+        Span::styled(format!(" {label:<8}"), theme::meta_label()),
+        Span::styled(crate::tasks::truncate(&value, value_width), style),
+    ])];
+    if area.height > 1 {
+        let meter_width = width.saturating_sub(18).clamp(4, 14);
+        let mut spans = vec![Span::raw("  ")];
+        spans.extend(meter_spans(pct, meter_width, style));
+        spans.push(Span::styled(
+            format!(
+                " {}",
+                crate::tasks::truncate(&detail, width.saturating_sub(meter_width + 3))
+            ),
+            theme::muted(),
+        ));
+        lines.push(Line::from(spans));
+    }
+    f.render_widget(Paragraph::new(lines), area);
+}
+
+fn compact_dashboard_text(metrics: &DashboardMetrics, width: usize) -> String {
+    crate::tasks::truncate(
+        &format!(
+            " fleet {}/{} · tmux {} · tasks {}/{} blocked {} stale {} · tokens {} · msgs {}",
+            metrics.online_agents,
+            metrics.expected_agents,
+            metrics.live_sessions,
+            metrics.task_active,
+            metrics.task_total,
+            metrics.task_blocked,
+            metrics.task_stale,
+            crate::tokens::format_token_count(metrics.token_total as f64),
+            metrics.message_count,
+        ),
+        width.max(1),
+    )
+}
+
+fn meter_spans(pct: f64, width: usize, style: Style) -> Vec<Span<'static>> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let pct = pct.clamp(0.0, 1.0);
+    let filled = ((pct * width as f64).round() as usize).min(width);
+    let empty = width.saturating_sub(filled);
+    vec![
+        Span::styled("█".repeat(filled), style),
+        Span::styled("░".repeat(empty), theme::disabled()),
+    ]
+}
+
+fn ratio(numerator: usize, denominator: usize) -> f64 {
+    if denominator == 0 {
+        0.0
+    } else {
+        (numerator as f64 / denominator as f64).clamp(0.0, 1.0)
+    }
 }
 
 fn draw_messages(f: &mut Frame, area: Rect, app: &App) {
@@ -2945,6 +3432,16 @@ fn build_detail_lines<'a>(
 fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     let (text, style) = if let Some(notice) = &app.quick_notice {
         (notice.text.clone(), theme::notice(notice.error))
+    } else if app.orchestrator_message_form.is_some() {
+        (
+            "enter send · esc cancel · ctrl-c quit".to_owned(),
+            theme::muted(),
+        )
+    } else if app.create_task_form.is_some() {
+        (
+            "tab/s-tab field · enter create · esc cancel · ctrl-c quit".to_owned(),
+            theme::muted(),
+        )
     } else if let Some(msg) = &app.notice {
         (msg.text.clone(), theme::muted())
     } else if app.quick_actions.open {
@@ -2970,11 +3467,18 @@ fn focus_footer_hint(app: &App) -> String {
     } else {
         "1-4"
     };
-    let base = format!("[/] pane · Tab/{numeric_range} view · f filter · ? help · q quit");
+    let bracket_scope = if app.focus == Focus::Detail && app.stream == StreamView::Agents {
+        "local tab"
+    } else {
+        "view"
+    };
+    let base = format!(
+        "Tab/S-Tab pane · [/] {bracket_scope} · {numeric_range} view · m message · f filter · r refresh · ? help · q quit"
+    );
     let scoped = match app.focus {
         Focus::List => match app.stream {
             StreamView::Agents => "↑↓/jk agent · enter actions",
-            StreamView::Tasks => "↑↓/jk task",
+            StreamView::Tasks => "↑↓/jk task · n new · enter actions",
             StreamView::Messages | StreamView::Tokens => "↑↓/jk scroll · g/G head/tail",
             StreamView::Stream => {
                 if app.stream_follow_tail {
@@ -2990,9 +3494,9 @@ fn focus_footer_hint(app: &App) -> String {
                     app.agent_detail_tab,
                     AgentDetailTab::Messages | AgentDetailTab::Activity
                 ) {
-                    "h/l detail tab · ↑↓/jk scroll · g/G head/tail · esc list"
+                    "[/]/h/l detail tab · ↑↓/jk scroll · g/G head/tail · esc list"
                 } else {
-                    "h/l detail tab · ↑↓/jk scroll · g reset · esc list"
+                    "[/]/h/l detail tab · ↑↓/jk scroll · g reset · esc list"
                 }
             } else {
                 "↑↓/jk scroll · g reset · esc list"
@@ -3072,12 +3576,14 @@ mod tests {
     fn footer_hint_only_advertises_stream_shortcut_when_pinned() {
         let mut app = App::new();
         let hint = focus_footer_hint(&app);
-        assert!(hint.contains("Tab/1-4 view"));
-        assert!(!hint.contains("Tab/1-5 view"));
+        assert!(hint.contains("[/] view"));
+        assert!(hint.contains("1-4 view"));
+        assert!(!hint.contains("1-5 view"));
 
         app.streamed_workspace = Some("alpha".into());
         let hint = focus_footer_hint(&app);
-        assert!(hint.contains("Tab/1-5 view"));
+        assert!(hint.contains("[/] view"));
+        assert!(hint.contains("1-5 view"));
     }
 
     #[test]
@@ -3085,10 +3591,107 @@ mod tests {
         let mut app = App::new();
         app.focus = Focus::Detail;
         app.stream = StreamView::Agents;
-        assert!(focus_footer_hint(&app).contains("h/l detail tab"));
+        let hint = focus_footer_hint(&app);
+        assert!(hint.contains("[/] local tab"));
+        assert!(hint.contains("[/]/h/l detail tab"));
 
         app.stream = StreamView::Tasks;
-        assert!(!focus_footer_hint(&app).contains("h/l detail tab"));
+        let hint = focus_footer_hint(&app);
+        assert!(hint.contains("[/] view"));
+        assert!(!hint.contains("h/l detail tab"));
+    }
+
+    #[test]
+    fn create_task_form_renders_fields_and_known_assignees() {
+        let mut app = App::new();
+        app.workspace_dirs
+            .insert("alpha".into(), std::path::PathBuf::from("/tmp/alpha"));
+        app.open_create_task_form();
+        app.create_task_form.as_mut().unwrap().title = "Build queue".into();
+
+        let rendered = render_app_to_string(&mut app, 100, 24);
+
+        assert!(rendered.contains("new task"));
+        assert!(rendered.contains("assignee"));
+        assert!(rendered.contains("alpha"));
+        assert!(rendered.contains("title"));
+        assert!(rendered.contains("Build queue"));
+        assert!(rendered.contains("known assignees"));
+    }
+
+    #[test]
+    fn orchestrator_message_form_renders_target_and_plain_message_copy() {
+        let mut app = App::new();
+        app.open_orchestrator_message_form();
+        app.orchestrator_message_form.as_mut().unwrap().message = "Check queue".into();
+
+        let rendered = render_app_to_string(&mut app, 100, 24);
+
+        assert!(rendered.contains("message orchestrator"));
+        assert!(rendered.contains(ROOT_ORCHESTRATOR_WORKSPACE));
+        assert!(rendered.contains("Check queue"));
+        assert!(rendered.contains("no task"));
+    }
+
+    #[test]
+    fn dashboard_strip_renders_ax_resource_summary_on_roomy_terminals() {
+        let mut app = App::new();
+        app.daemon_running = true;
+        app.agent_entries = vec![
+            AgentEntry {
+                label: "alpha".into(),
+                workspace: "alpha".into(),
+                session_index: Some(0),
+                level: 0,
+                group: false,
+                reconcile: String::new(),
+            },
+            AgentEntry {
+                label: "beta".into(),
+                workspace: "beta".into(),
+                session_index: None,
+                level: 0,
+                group: false,
+                reconcile: String::new(),
+            },
+        ];
+        app.workspace_infos.insert(
+            "alpha".into(),
+            workspace_info("alpha", WorkspaceGitStatus::default()),
+        );
+        app.sessions = vec![ax_tmux::SessionInfo {
+            name: "ax-alpha".into(),
+            workspace: "alpha".into(),
+            attached: false,
+            windows: 1,
+        }];
+        app.tasks = vec![task_with_status("pending", TaskStatus::Pending), {
+            let mut blocked = task_with_status("blocked", TaskStatus::Blocked);
+            blocked.stale_after_seconds = 1;
+            blocked.updated_at = chrono::Utc::now() - chrono::Duration::seconds(5);
+            blocked
+        }];
+        app.usage_trends
+            .insert("alpha".into(), token_trend("alpha", 1200));
+        app.messages = vec![history_entry("alpha", "orchestrator", "progress")];
+
+        let rendered = render_app_to_string(&mut app, 128, 26);
+        assert!(rendered.contains("resources"));
+        assert!(rendered.contains("fleet"));
+        assert!(rendered.contains("1/2 online"));
+        assert!(rendered.contains("tasks"));
+        assert!(rendered.contains("2 active / 2"));
+        assert!(rendered.contains("tokens"));
+        assert!(rendered.contains("activity"));
+        assert!(rendered.contains("daemon running"));
+    }
+
+    #[test]
+    fn dashboard_strip_hides_on_small_terminals() {
+        let mut app = App::new();
+        let rendered = render_app_to_string(&mut app, 80, 12);
+        assert!(!rendered.contains("resources"));
+        assert!(rendered.contains("1·agents"));
     }
 
     #[test]
@@ -3302,7 +3905,7 @@ mod tests {
         let height = 20;
         let buffer = render_app_to_buffer(&mut app, width, height);
         let body_area = Rect::new(0, 1, width, height - 2);
-        let (pane_area, _) = split_body_inner(body_area);
+        let pane_area = body_layout(body_area).list;
         let rows_area = Rect::new(
             pane_area.x,
             pane_area.y + 1,
@@ -3788,6 +4391,7 @@ mod tests {
             description: String::new(),
             status: AgentStatus::Online,
             status_text: String::new(),
+            status_metrics: None,
             git_status: Some(git_status),
             connected_at: None,
             last_activity_at: None,
@@ -3828,6 +4432,23 @@ mod tests {
             })
             .collect();
         trend
+    }
+
+    fn task_with_status(id: &str, status: TaskStatus) -> Task {
+        let mut task = mock_task();
+        task.id = id.into();
+        task.status = status;
+        task
+    }
+
+    fn history_entry(from: &str, to: &str, content: &str) -> ax_daemon::HistoryEntry {
+        ax_daemon::HistoryEntry {
+            timestamp: chrono::Utc::now(),
+            from: from.into(),
+            to: to.into(),
+            content: content.into(),
+            task_id: String::new(),
+        }
     }
 
     fn mock_task() -> Task {

@@ -14,14 +14,28 @@ pub(crate) fn handle_key(app: &mut App, event: KeyEvent) {
     if event.kind == KeyEventKind::Release {
         return;
     }
-    // Global exits take precedence over overlay state so q / ctrl-c
-    // always closes the TUI, even mid-confirmation.
+    // Ctrl-c is always an emergency exit. Plain `q` remains global
+    // outside text-entry modals so task titles can still contain q.
     match event.code {
-        KeyCode::Char('q') => {
+        KeyCode::Char('c') if event.modifiers.contains(KeyModifiers::CONTROL) => {
             app.quit = true;
             return;
         }
-        KeyCode::Char('c') if event.modifiers.contains(KeyModifiers::CONTROL) => {
+        _ => {}
+    }
+
+    if app.orchestrator_message_form.is_some() {
+        handle_orchestrator_message_form_key(app, event);
+        return;
+    }
+
+    if app.create_task_form.is_some() {
+        handle_create_task_form_key(app, event);
+        return;
+    }
+
+    match event.code {
+        KeyCode::Char('q') => {
             app.quit = true;
             return;
         }
@@ -56,21 +70,25 @@ pub(crate) fn handle_key(app: &mut App, event: KeyEvent) {
 
     // Global bindings — active regardless of which panel is focused.
     // Arrow keys are deliberately *not* global: each panel owns them
-    // so a stray ↑/↓ can't leak across scopes. Tab switching moves to
-    // its own dedicated keys (Tab/Shift-Tab + visible numeric tabs)
-    // so operators can flip views without losing their place in
-    // Agents.
+    // so a stray ↑/↓ can't leak across scopes. Tab/Shift-Tab follow
+    // terminal accessibility convention and move focus between the
+    // list/detail panels; bracket keys are contextual tab navigation
+    // (focused local detail tabs first, otherwise top-level tabs).
     match event.code {
-        KeyCode::Char('[') | KeyCode::Char(']') => {
+        KeyCode::Tab => {
             app.cycle_focus(1);
             return;
         }
-        KeyCode::Tab => {
-            app.step_stream(1);
+        KeyCode::BackTab => {
+            app.cycle_focus(-1);
             return;
         }
-        KeyCode::BackTab => {
-            app.step_stream(-1);
+        KeyCode::Char('[') => {
+            handle_bracket_tab(app, -1);
+            return;
+        }
+        KeyCode::Char(']') => {
+            handle_bracket_tab(app, 1);
             return;
         }
         KeyCode::Char(c @ ('1' | '2' | '3' | '4' | '5')) => {
@@ -85,6 +103,15 @@ pub(crate) fn handle_key(app: &mut App, event: KeyEvent) {
             app.cycle_task_filter();
             return;
         }
+        KeyCode::Char('m') => {
+            app.open_orchestrator_message_form();
+            return;
+        }
+        KeyCode::Char('r') => {
+            app.force_refresh = true;
+            app.quick_notice = Some(Notice::new("refresh requested".into(), false));
+            return;
+        }
         _ => {}
     }
 
@@ -97,9 +124,17 @@ pub(crate) fn handle_key(app: &mut App, event: KeyEvent) {
     }
 }
 
+fn handle_bracket_tab(app: &mut App, delta: i32) {
+    if app.focus == Focus::Detail && app.stream == StreamView::Agents {
+        app.step_agent_detail_tab(delta);
+    } else {
+        app.step_stream(delta);
+    }
+}
+
 fn handle_list_key(app: &mut App, event: KeyEvent) {
     // Esc from the list cycles Back-a-step inside the list scope —
-    // clears any lingering notice but doesn't steal focus. `[/]`
+    // clears any lingering notice but doesn't steal focus. Tab
     // is the move to the detail pane.
     match app.stream {
         StreamView::Agents => match event.code {
@@ -109,6 +144,7 @@ fn handle_list_key(app: &mut App, event: KeyEvent) {
             _ => {}
         },
         StreamView::Tasks => match event.code {
+            KeyCode::Char('n') => app.open_create_task_form(),
             KeyCode::Up | KeyCode::Char('k') => app.move_task_selection(-1),
             KeyCode::Down | KeyCode::Char('j') => app.move_task_selection(1),
             KeyCode::Enter => open_task_overlay(app),
@@ -214,7 +250,7 @@ fn handle_detail_key(app: &mut App, event: KeyEvent) {
         KeyCode::PageDown => app.detail_scroll.shift(10),
         KeyCode::Home | KeyCode::Char('g') => app.detail_scroll.reset(),
         // Esc drops focus back to the list so operators can exit the
-        // detail scope without hitting `[/]` explicitly.
+        // detail scope without hitting Tab explicitly.
         KeyCode::Esc => app.focus = Focus::List,
         _ => {}
     }
@@ -248,6 +284,112 @@ pub(crate) fn handle_scroll(app: &mut App, direction: i32) {
             StreamView::Stream => app.scroll_stream(direction),
         },
         Focus::Detail => app.detail_scroll.shift(direction),
+    }
+}
+
+fn handle_create_task_form_key(app: &mut App, event: KeyEvent) {
+    if app
+        .create_task_form
+        .as_ref()
+        .is_some_and(|form| form.submitting)
+    {
+        return;
+    }
+
+    match event.code {
+        KeyCode::Esc => {
+            app.cancel_create_task_form();
+        }
+        KeyCode::Tab | KeyCode::Down => {
+            if let Some(form) = app.create_task_form.as_mut() {
+                form.step_field(1);
+            }
+        }
+        KeyCode::BackTab | KeyCode::Up => {
+            if let Some(form) = app.create_task_form.as_mut() {
+                form.step_field(-1);
+            }
+        }
+        KeyCode::Enter => {
+            app.submit_create_task_form();
+        }
+        KeyCode::Backspace => {
+            if let Some(form) = app.create_task_form.as_mut() {
+                form.active_value_mut().pop();
+                form.error = None;
+            }
+        }
+        KeyCode::Delete => {
+            if let Some(form) = app.create_task_form.as_mut() {
+                form.active_value_mut().clear();
+                form.error = None;
+            }
+        }
+        KeyCode::Char('u') if event.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(form) = app.create_task_form.as_mut() {
+                form.active_value_mut().clear();
+                form.error = None;
+            }
+        }
+        KeyCode::Char(c)
+            if !event
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            if let Some(form) = app.create_task_form.as_mut() {
+                form.active_value_mut().push(c);
+                form.error = None;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_orchestrator_message_form_key(app: &mut App, event: KeyEvent) {
+    if app
+        .orchestrator_message_form
+        .as_ref()
+        .is_some_and(|form| form.submitting)
+    {
+        return;
+    }
+
+    match event.code {
+        KeyCode::Esc => {
+            app.cancel_orchestrator_message_form();
+        }
+        KeyCode::Enter => {
+            app.submit_orchestrator_message_form();
+        }
+        KeyCode::Backspace => {
+            if let Some(form) = app.orchestrator_message_form.as_mut() {
+                form.message.pop();
+                form.error = None;
+            }
+        }
+        KeyCode::Delete => {
+            if let Some(form) = app.orchestrator_message_form.as_mut() {
+                form.message.clear();
+                form.error = None;
+            }
+        }
+        KeyCode::Char('u') if event.modifiers.contains(KeyModifiers::CONTROL) => {
+            if let Some(form) = app.orchestrator_message_form.as_mut() {
+                form.message.clear();
+                form.error = None;
+            }
+        }
+        KeyCode::Char(c)
+            if !event
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            if let Some(form) = app.orchestrator_message_form.as_mut() {
+                form.message.push(c);
+                form.error = None;
+            }
+        }
+        _ => {}
     }
 }
 
@@ -525,6 +667,85 @@ mod tests {
     }
 
     #[test]
+    fn n_on_tasks_opens_create_form_and_enter_queues_create() {
+        let mut app = App::new();
+        app.stream = StreamView::Tasks;
+        app.workspace_dirs
+            .insert("alpha".into(), std::path::PathBuf::from("/tmp/alpha"));
+
+        handle_key(&mut app, press(KeyCode::Char('n')));
+        assert!(app.create_task_form.is_some());
+        assert_eq!(
+            app.create_task_form.as_ref().unwrap().assignee,
+            "alpha",
+            "configured workspace should prefill assignee"
+        );
+
+        for c in "Build queue".chars() {
+            handle_key(&mut app, press(KeyCode::Char(c)));
+        }
+        handle_key(&mut app, press(KeyCode::Tab));
+        for c in "Wire top create form".chars() {
+            handle_key(&mut app, press(KeyCode::Char(c)));
+        }
+        handle_key(&mut app, press(KeyCode::Enter));
+
+        let pending = app.pending_task_create.expect("create queued");
+        assert_eq!(pending.draft.assignee, "alpha");
+        assert_eq!(pending.draft.title, "Build queue");
+        assert_eq!(pending.draft.description, "Wire top create form");
+        assert!(app.create_task_form.as_ref().unwrap().submitting);
+    }
+
+    #[test]
+    fn m_opens_orchestrator_message_form_and_enter_queues_send() {
+        let mut app = App::new();
+
+        handle_key(&mut app, press(KeyCode::Char('m')));
+        assert!(app.orchestrator_message_form.is_some());
+
+        for c in "Check queue health".chars() {
+            handle_key(&mut app, press(KeyCode::Char(c)));
+        }
+        handle_key(&mut app, press(KeyCode::Enter));
+
+        let pending = app
+            .pending_orchestrator_message
+            .expect("message send queued");
+        assert_eq!(pending.message, "Check queue health");
+        assert!(app.orchestrator_message_form.as_ref().unwrap().submitting);
+    }
+
+    #[test]
+    fn orchestrator_message_form_swallow_plain_q_but_ctrl_c_still_quits() {
+        let mut app = App::new();
+        app.open_orchestrator_message_form();
+
+        handle_key(&mut app, press(KeyCode::Char('q')));
+        assert!(!app.quit);
+        assert_eq!(app.orchestrator_message_form.as_ref().unwrap().message, "q");
+
+        let event = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        handle_key(&mut app, event);
+        assert!(app.quit);
+    }
+
+    #[test]
+    fn task_create_form_swallow_plain_q_but_ctrl_c_still_quits() {
+        let mut app = App::new();
+        app.stream = StreamView::Tasks;
+        app.open_create_task_form();
+
+        handle_key(&mut app, press(KeyCode::Char('q')));
+        assert!(!app.quit);
+        assert_eq!(app.create_task_form.as_ref().unwrap().title, "q");
+
+        let event = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        handle_key(&mut app, event);
+        assert!(app.quit);
+    }
+
+    #[test]
     fn overlay_enter_on_restart_sets_needs_confirm_then_queues_lifecycle() {
         let mut app = App::new();
         app.agent_entries = vec![crate::agents::AgentEntry {
@@ -574,32 +795,87 @@ mod tests {
     }
 
     #[test]
-    fn brackets_toggle_focus_between_panels() {
+    fn r_requests_immediate_refresh() {
         let mut app = App::new();
-        assert_eq!(app.focus, Focus::List);
-        handle_key(&mut app, press(KeyCode::Char(']')));
-        assert_eq!(app.focus, Focus::Detail);
-        handle_key(&mut app, press(KeyCode::Char(']')));
-        assert_eq!(app.focus, Focus::List);
-        // `[` and `]` behave identically with only two panels.
-        handle_key(&mut app, press(KeyCode::Char('[')));
-        assert_eq!(app.focus, Focus::Detail);
+        handle_key(&mut app, press(KeyCode::Char('r')));
+        assert!(app.force_refresh);
+        assert!(app
+            .quick_notice
+            .as_ref()
+            .is_some_and(|notice| notice.text.contains("refresh")));
     }
 
     #[test]
-    fn tab_key_cycles_tabs_from_any_focus() {
+    fn tab_and_backtab_toggle_focus_between_panels() {
         let mut app = App::new();
-        // Default is Agents; Tab walks to Messages without stealing
+        assert_eq!(app.stream, StreamView::Agents);
+        assert_eq!(app.focus, Focus::List);
+        handle_key(&mut app, press(KeyCode::Tab));
+        assert_eq!(app.focus, Focus::Detail);
+        assert_eq!(
+            app.stream,
+            StreamView::Agents,
+            "Tab moves focus without switching top-level tabs"
+        );
+        handle_key(&mut app, press(KeyCode::Tab));
+        assert_eq!(app.focus, Focus::List);
+        handle_key(&mut app, press(KeyCode::BackTab));
+        assert_eq!(app.focus, Focus::Detail);
+        assert_eq!(
+            app.stream,
+            StreamView::Agents,
+            "Shift-Tab moves focus backward without switching top-level tabs"
+        );
+        handle_key(&mut app, press(KeyCode::BackTab));
+        assert_eq!(app.focus, Focus::List);
+    }
+
+    #[test]
+    fn bracket_keys_cycle_tabs_from_any_focus() {
+        let mut app = App::new();
+        // Default is Agents; ] walks to Messages without stealing
         // the List↔Detail focus so operators can peek at other tabs.
         assert_eq!(app.stream, crate::stream::StreamView::Agents);
-        handle_key(&mut app, press(KeyCode::Tab));
+        handle_key(&mut app, press(KeyCode::Char(']')));
         assert_eq!(app.stream, crate::stream::StreamView::Messages);
         assert_eq!(app.focus, Focus::List);
 
         app.focus = Focus::Detail;
-        handle_key(&mut app, press(KeyCode::BackTab));
+        handle_key(&mut app, press(KeyCode::Char('[')));
         assert_eq!(app.stream, crate::stream::StreamView::Agents);
         assert_eq!(app.focus, Focus::Detail);
+    }
+
+    #[test]
+    fn bracket_keys_prefer_focused_agent_detail_tabs() {
+        let mut app = App::new();
+        app.stream = StreamView::Agents;
+        app.focus = Focus::Detail;
+        assert_eq!(app.agent_detail_tab, AgentDetailTab::Overview);
+
+        handle_key(&mut app, press(KeyCode::Char(']')));
+        assert_eq!(app.stream, StreamView::Agents);
+        assert_eq!(app.agent_detail_tab, AgentDetailTab::Tasks);
+
+        handle_key(&mut app, press(KeyCode::Char('[')));
+        assert_eq!(app.stream, StreamView::Agents);
+        assert_eq!(app.agent_detail_tab, AgentDetailTab::Overview);
+    }
+
+    #[test]
+    fn bracket_keys_switch_top_level_tabs_when_detail_has_no_local_tabs() {
+        let mut app = App::new();
+        app.stream = StreamView::Tasks;
+        app.focus = Focus::Detail;
+        app.agent_detail_tab = AgentDetailTab::Messages;
+
+        handle_key(&mut app, press(KeyCode::Char(']')));
+        assert_eq!(app.stream, StreamView::Tokens);
+        assert_eq!(
+            app.agent_detail_tab,
+            AgentDetailTab::Messages,
+            "non-agent detail panes do not consume bracket keys"
+        );
     }
 
     #[test]

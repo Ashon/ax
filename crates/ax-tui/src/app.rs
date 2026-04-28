@@ -7,13 +7,18 @@
 //! redrawn.
 
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, MouseEventKind};
 
 use crate::actions::{Notice, QuickActionId};
 use crate::daemon::Client;
-use crate::state::{App, PendingTaskAction, RefreshNoticeSource};
+use crate::state::{
+    App, PendingOrchestratorMessage, PendingTaskAction, PendingTaskCreate, RefreshNoticeSource,
+    ROOT_ORCHESTRATOR_WORKSPACE,
+};
 use crate::terminal::TerminalGuard;
 
 const REFRESH_INTERVAL: Duration = Duration::from_millis(250);
@@ -27,6 +32,17 @@ const USAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 /// without dragging in weeks of stale data.
 const USAGE_WINDOW_MINUTES: i64 = 24 * 60;
 const USAGE_BUCKET_MINUTES: i64 = 5;
+
+type TaskActionResult = Result<String, String>;
+type MessageSendResult = Result<String, String>;
+
+struct TaskActionJob {
+    receiver: Receiver<TaskActionResult>,
+}
+
+struct MessageSendJob {
+    receiver: Receiver<MessageSendResult>,
+}
 
 #[derive(Debug, Clone)]
 pub struct RunOptions {
@@ -48,6 +64,8 @@ pub enum RunError {
 pub fn run(opts: &RunOptions) -> Result<(), RunError> {
     let mut guard = TerminalGuard::install().map_err(RunError::Terminal)?;
     let mut app = App::new();
+    let mut task_action_job = None;
+    let mut message_send_job = None;
     refresh(&mut app, opts);
 
     loop {
@@ -72,13 +90,17 @@ pub fn run(opts: &RunOptions) -> Result<(), RunError> {
         }
 
         drain_pending_lifecycle(&mut app, opts);
-        drain_pending_task_action(&mut app, opts);
+        drain_pending_task_action(&mut app, opts, &mut task_action_job);
+        drain_pending_task_create(&mut app, opts);
+        drain_pending_orchestrator_message(&mut app, opts, &mut message_send_job);
         app.expire_notice();
 
-        let due = app
-            .last_refresh
-            .is_none_or(|t| t.elapsed() >= REFRESH_INTERVAL);
+        let due = app.force_refresh
+            || app
+                .last_refresh
+                .is_none_or(|t| t.elapsed() >= REFRESH_INTERVAL);
         if due {
+            app.force_refresh = false;
             app.tick_animation();
             refresh(&mut app, opts);
         }
@@ -115,11 +137,32 @@ fn drain_pending_lifecycle(app: &mut App, opts: &RunOptions) {
     crate::actions::apply_outcomes(app, outcomes);
 }
 
-fn drain_pending_task_action(app: &mut App, opts: &RunOptions) {
+fn drain_pending_task_action(app: &mut App, opts: &RunOptions, job: &mut Option<TaskActionJob>) {
+    if poll_task_action_job(app, opts, job) {
+        return;
+    }
     let Some(pending) = app.pending_task_action.take() else {
         return;
     };
-    let result = run_pending_task_action(&pending, opts);
+    let opts = opts.clone();
+    let (tx, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let result = run_pending_task_action(&pending, &opts).map_err(|e| e.to_string());
+        let _ = tx.send(result);
+    });
+    *job = Some(TaskActionJob { receiver });
+}
+
+fn poll_task_action_job(app: &mut App, opts: &RunOptions, job: &mut Option<TaskActionJob>) -> bool {
+    let Some(current) = job.as_ref() else {
+        return false;
+    };
+    let result = match current.receiver.try_recv() {
+        Ok(result) => result,
+        Err(TryRecvError::Empty) => return true,
+        Err(TryRecvError::Disconnected) => Err("task action worker disconnected".to_owned()),
+    };
+    *job = None;
     match result {
         Ok(text) => {
             app.quick_notice = Some(Notice::new(text, false));
@@ -128,6 +171,128 @@ fn drain_pending_task_action(app: &mut App, opts: &RunOptions) {
         Err(e) => {
             app.quick_notice = Some(Notice::new(format!("task action failed: {e}"), true));
         }
+    }
+    true
+}
+
+fn drain_pending_task_create(app: &mut App, opts: &RunOptions) {
+    let Some(pending) = app.pending_task_create.take() else {
+        return;
+    };
+    let result = run_pending_task_create(&pending, opts);
+    match result {
+        Ok(task) => {
+            app.create_task_form = None;
+            app.stream = crate::stream::StreamView::Tasks;
+            app.force_refresh = true;
+            app.quick_notice = Some(Notice::new(
+                format!(
+                    "created task {} · {}",
+                    crate::tasks::short_task_id(&task.id),
+                    task.assignee
+                ),
+                false,
+            ));
+            refresh_tasks(app, opts);
+        }
+        Err(e) => {
+            let text = format!("create task failed: {e}");
+            if let Some(form) = app.create_task_form.as_mut() {
+                form.submitting = false;
+                form.error = Some(text.clone());
+            }
+            app.quick_notice = Some(Notice::new(text, true));
+        }
+    }
+}
+
+fn run_pending_task_create(
+    pending: &PendingTaskCreate,
+    opts: &RunOptions,
+) -> Result<ax_proto::types::Task, crate::daemon::DaemonClientError> {
+    let mut client = Client::connect_as(&opts.socket_path, "_cli")?;
+    client.create_task(
+        &pending.draft.title,
+        &pending.draft.description,
+        &pending.draft.assignee,
+    )
+}
+
+fn drain_pending_orchestrator_message(
+    app: &mut App,
+    opts: &RunOptions,
+    job: &mut Option<MessageSendJob>,
+) {
+    if poll_message_send_job(app, opts, job) {
+        return;
+    }
+    let Some(pending) = app.pending_orchestrator_message.take() else {
+        return;
+    };
+    let opts = opts.clone();
+    let (tx, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let result = run_pending_orchestrator_message(&pending, &opts).map_err(|e| e.to_string());
+        let _ = tx.send(result);
+    });
+    *job = Some(MessageSendJob { receiver });
+}
+
+fn poll_message_send_job(
+    app: &mut App,
+    opts: &RunOptions,
+    job: &mut Option<MessageSendJob>,
+) -> bool {
+    let Some(current) = job.as_ref() else {
+        return false;
+    };
+    let result = match current.receiver.try_recv() {
+        Ok(result) => result,
+        Err(TryRecvError::Empty) => return true,
+        Err(TryRecvError::Disconnected) => Err("message send worker disconnected".to_owned()),
+    };
+    *job = None;
+    match result {
+        Ok(text) => {
+            app.orchestrator_message_form = None;
+            app.quick_notice = Some(Notice::new(text, false));
+            app.force_refresh = true;
+            refresh_messages(app, opts);
+        }
+        Err(e) => {
+            let text = format!("send message failed: {e}");
+            if let Some(form) = app.orchestrator_message_form.as_mut() {
+                form.submitting = false;
+                form.error = Some(text.clone());
+            }
+            app.quick_notice = Some(Notice::new(text, true));
+        }
+    }
+    true
+}
+
+fn run_pending_orchestrator_message(
+    pending: &PendingOrchestratorMessage,
+    opts: &RunOptions,
+) -> Result<String, crate::daemon::DaemonClientError> {
+    let config_path = std::env::current_dir()
+        .ok()
+        .and_then(ax_config::find_config_file);
+    let mut client = Client::connect_as(&opts.socket_path, "_cli")?;
+    let response = client.send_message(
+        ROOT_ORCHESTRATOR_WORKSPACE,
+        &pending.message,
+        config_path.as_deref(),
+    )?;
+    if response.message_id.is_empty() {
+        Ok(format!(
+            "message to {ROOT_ORCHESTRATOR_WORKSPACE} suppressed"
+        ))
+    } else {
+        Ok(format!(
+            "sent message to {ROOT_ORCHESTRATOR_WORKSPACE} · {}",
+            response.message_id
+        ))
     }
 }
 
@@ -399,7 +564,13 @@ fn walk_desired(node: &ax_config::ProjectNode, out: &mut std::collections::BTree
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::{UnixListener, UnixStream};
+
+    use ax_proto::payloads::{InterveneTaskPayload, RegisterPayload, SendMessagePayload};
+    use ax_proto::responses::{InterveneTaskResponse, SendMessageResponse, StatusResponse};
     use ax_proto::types::{Task, TaskStartMode, TaskStatus};
+    use ax_proto::{Envelope, MessageType, ResponsePayload};
     use chrono::Utc;
     use tempfile::TempDir;
 
@@ -458,6 +629,160 @@ mod tests {
             .messages_snapshot_error
             .as_deref()
             .is_some_and(|message| message.contains("line 1")));
+    }
+
+    #[test]
+    fn pending_task_action_does_not_block_tui_loop_while_daemon_responds() {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind fake daemon");
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept client");
+            let mut reader = BufReader::new(stream);
+
+            let register = read_env(&mut reader);
+            assert_eq!(register.r#type, MessageType::Register);
+            let register_payload: RegisterPayload =
+                register.decode_payload().expect("decode register");
+            assert_eq!(register_payload.workspace, "_cli");
+            thread::sleep(Duration::from_millis(250));
+            write_response(
+                reader.get_mut(),
+                &register.id,
+                &StatusResponse {
+                    status: "ok".into(),
+                },
+            );
+
+            let intervene = read_env(&mut reader);
+            assert_eq!(intervene.r#type, MessageType::InterveneTask);
+            let payload: InterveneTaskPayload =
+                intervene.decode_payload().expect("decode intervene");
+            assert_eq!(payload.id, "abcdef123456");
+            assert_eq!(payload.action, "wake");
+            assert_eq!(
+                payload.note, "requested from ax watch tasks tab",
+                "TUI wake path should use the task intervention API"
+            );
+            write_response(
+                reader.get_mut(),
+                &intervene.id,
+                &InterveneTaskResponse {
+                    task: mock_task(&payload.id),
+                    action: payload.action,
+                    status: "woken".into(),
+                    message_id: "message-1".into(),
+                },
+            );
+        });
+
+        let opts = RunOptions { socket_path };
+        let mut app = App::new();
+        app.pending_task_action = Some(PendingTaskAction {
+            action: QuickActionId::TaskWake,
+            task_id: "abcdef123456".into(),
+            expected_version: 7,
+        });
+        let mut job = None;
+
+        let started = Instant::now();
+        drain_pending_task_action(&mut app, &opts, &mut job);
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "starting the daemon request should not stall the render/input loop"
+        );
+        assert!(app.pending_task_action.is_none());
+        assert!(
+            job.is_some(),
+            "task action should be running in the background"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while job.is_some() && Instant::now() < deadline {
+            drain_pending_task_action(&mut app, &opts, &mut job);
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(job.is_none(), "background task action should complete");
+        let notice = app.quick_notice.as_ref().expect("completion notice");
+        assert!(notice.text.contains("wake task abcdef12"));
+        assert!(notice.text.contains("message queued"));
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn pending_orchestrator_message_uses_plain_send_message_path() {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind fake daemon");
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept client");
+            let mut reader = BufReader::new(stream);
+
+            let register = read_env(&mut reader);
+            assert_eq!(register.r#type, MessageType::Register);
+            let register_payload: RegisterPayload =
+                register.decode_payload().expect("decode register");
+            assert_eq!(register_payload.workspace, "_cli");
+            write_response(
+                reader.get_mut(),
+                &register.id,
+                &StatusResponse {
+                    status: "ok".into(),
+                },
+            );
+
+            let send = read_env(&mut reader);
+            assert_eq!(send.r#type, MessageType::SendMessage);
+            let payload: SendMessagePayload = send.decode_payload().expect("decode send_message");
+            assert_eq!(payload.to, ROOT_ORCHESTRATOR_WORKSPACE);
+            assert_eq!(payload.message, "check queue health");
+
+            write_response(
+                reader.get_mut(),
+                &send.id,
+                &SendMessageResponse {
+                    message_id: "msg-1".into(),
+                    status: "sent".into(),
+                },
+            );
+        });
+
+        let opts = RunOptions { socket_path };
+        let pending = PendingOrchestratorMessage {
+            message: "check queue health".into(),
+        };
+
+        let notice = run_pending_orchestrator_message(&pending, &opts).expect("send message");
+        assert!(notice.contains("sent message to orchestrator"));
+        assert!(notice.contains("msg-1"));
+        server.join().expect("server thread");
+    }
+
+    fn read_env(reader: &mut BufReader<UnixStream>) -> Envelope {
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("read envelope");
+        serde_json::from_str(line.trim_end()).expect("decode envelope")
+    }
+
+    fn write_response<T: serde::Serialize>(stream: &mut UnixStream, id: &str, payload: &T) {
+        let data = serde_json::value::RawValue::from_string(
+            serde_json::to_string(payload).expect("encode response data"),
+        )
+        .expect("raw response data");
+        let env = Envelope::new(
+            id,
+            MessageType::Response,
+            &ResponsePayload {
+                success: true,
+                data,
+            },
+        )
+        .expect("response envelope");
+        let mut bytes = serde_json::to_vec(&env).expect("encode response envelope");
+        bytes.push(b'\n');
+        stream.write_all(&bytes).expect("write response");
+        stream.flush().expect("flush response");
     }
 
     fn mock_task(id: &str) -> Task {

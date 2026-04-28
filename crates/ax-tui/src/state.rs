@@ -2,7 +2,7 @@
 //! or IO types means we can unit-test layout and input logic without
 //! a real terminal.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -16,6 +16,8 @@ use crate::actions::{Notice, QuickActionId, QuickActionState};
 use crate::captures::CaptureCache;
 use crate::tasks::TaskFilterMode;
 
+pub(crate) const ROOT_ORCHESTRATOR_WORKSPACE: &str = "orchestrator";
+
 #[derive(Debug, Clone)]
 pub(crate) struct PendingLifecycle {
     pub action: QuickActionId,
@@ -27,6 +29,93 @@ pub(crate) struct PendingTaskAction {
     pub action: QuickActionId,
     pub task_id: String,
     pub expected_version: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CreateTaskField {
+    Assignee,
+    Title,
+    Description,
+}
+
+impl CreateTaskField {
+    const ORDER: [Self; 3] = [Self::Assignee, Self::Title, Self::Description];
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CreateTaskDraft {
+    pub(crate) assignee: String,
+    pub(crate) title: String,
+    pub(crate) description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CreateTaskForm {
+    pub(crate) field: CreateTaskField,
+    pub(crate) assignee: String,
+    pub(crate) title: String,
+    pub(crate) description: String,
+    pub(crate) error: Option<String>,
+    pub(crate) submitting: bool,
+}
+
+impl CreateTaskForm {
+    pub(crate) fn new(default_assignee: String) -> Self {
+        Self {
+            field: CreateTaskField::Title,
+            assignee: default_assignee,
+            title: String::new(),
+            description: String::new(),
+            error: None,
+            submitting: false,
+        }
+    }
+
+    pub(crate) fn step_field(&mut self, delta: i32) {
+        let current = CreateTaskField::ORDER
+            .iter()
+            .position(|field| *field == self.field)
+            .unwrap_or(0);
+        let n = CreateTaskField::ORDER.len() as i32;
+        let next = (current as i32 + delta).rem_euclid(n) as usize;
+        self.field = CreateTaskField::ORDER[next];
+        self.error = None;
+    }
+
+    pub(crate) fn active_value_mut(&mut self) -> &mut String {
+        match self.field {
+            CreateTaskField::Assignee => &mut self.assignee,
+            CreateTaskField::Title => &mut self.title,
+            CreateTaskField::Description => &mut self.description,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingTaskCreate {
+    pub(crate) draft: CreateTaskDraft,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OrchestratorMessageForm {
+    pub(crate) message: String,
+    pub(crate) error: Option<String>,
+    pub(crate) submitting: bool,
+}
+
+impl OrchestratorMessageForm {
+    pub(crate) fn new() -> Self {
+        Self {
+            message: String::new(),
+            error: None,
+            submitting: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingOrchestratorMessage {
+    pub(crate) message: String,
 }
 use crate::agents::AgentEntry;
 use crate::stream::StreamView;
@@ -40,8 +129,8 @@ pub(crate) enum ViewMode {
     Grid,
 }
 
-/// Which half of the body the keyboard is scoped to. `[`/`]` toggles
-/// between the two; numeric keys pick a visible tab regardless of
+/// Which half of the body the keyboard is scoped to. Tab/Shift-Tab
+/// toggles between the two; numeric keys pick a visible tab regardless of
 /// focus. Arrow keys stay *inside* the focused half so navigation
 /// never leaks across panes by accident.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -223,6 +312,10 @@ pub(crate) struct App {
     /// app loop (where paths are available) and cleared.
     pub(crate) pending_lifecycle: Option<PendingLifecycle>,
     pub(crate) pending_task_action: Option<PendingTaskAction>,
+    pub(crate) create_task_form: Option<CreateTaskForm>,
+    pub(crate) pending_task_create: Option<PendingTaskCreate>,
+    pub(crate) orchestrator_message_form: Option<OrchestratorMessageForm>,
+    pub(crate) pending_orchestrator_message: Option<PendingOrchestratorMessage>,
     pub(crate) captures: CaptureCache,
     /// Rolled-up per-workspace token usage returned by the daemon's
     /// `usage_trends` handler. Persists across refresh ticks so the
@@ -244,6 +337,10 @@ pub(crate) struct App {
     pub(crate) streamed_workspace: Option<String>,
     pub(crate) stream_cursor: PaneCursor,
     pub(crate) stream_follow_tail: bool,
+    /// Set by the input handler when the operator requests an
+    /// immediate data refresh. The app loop consumes and clears it
+    /// before running the normal refresh path.
+    pub(crate) force_refresh: bool,
     pub(crate) last_refresh: Option<Instant>,
     pub(crate) daemon_running: bool,
     pub(crate) notice: Option<RefreshNotice>,
@@ -281,8 +378,13 @@ impl App {
             streamed_workspace: None,
             stream_cursor: PaneCursor::default(),
             stream_follow_tail: true,
+            force_refresh: false,
             pending_lifecycle: None,
             pending_task_action: None,
+            create_task_form: None,
+            pending_task_create: None,
+            orchestrator_message_form: None,
+            pending_orchestrator_message: None,
             captures: CaptureCache::default(),
             usage_trends: BTreeMap::new(),
             last_usage_refresh: None,
@@ -295,9 +397,10 @@ impl App {
         }
     }
 
-    /// Step the stream tab forward (+1) or backward (-1). Used by
-    /// Tab/Shift-Tab so `[/]` can stay reserved for list↔detail
-    /// toggling. The contextual Stream tab only participates after
+    /// Step the top-level stream tab forward (+1) or backward (-1).
+    /// Used by `]` / `[` when the current focus does not own local
+    /// detail tabs, while Tab/Shift-Tab stay reserved for focus
+    /// navigation. The contextual Stream tab only participates after
     /// a workspace has been pinned. Resets `detail_scroll` so the new
     /// tab's detail opens at the top instead of inheriting the
     /// previous view's scroll position.
@@ -315,7 +418,7 @@ impl App {
     }
 
     /// Advance the keyboard focus one panel forward (+1) or backward
-    /// (-1). `[` and `]` are the only keys that touch this; the rest
+    /// (-1). Tab/Shift-Tab are the only keys that touch this; the rest
     /// of the handler dispatches against `self.focus`.
     pub(crate) fn cycle_focus(&mut self, delta: i32) {
         let order = Focus::ORDER;
@@ -394,6 +497,103 @@ impl App {
     pub(crate) fn cycle_task_filter(&mut self) {
         self.task_filter = self.task_filter.next();
         self.clamp_task_selection();
+    }
+
+    pub(crate) fn open_create_task_form(&mut self) {
+        self.quick_actions.open = false;
+        self.quick_actions.confirm = false;
+        self.pending_task_create = None;
+        self.orchestrator_message_form = None;
+        self.pending_orchestrator_message = None;
+        self.create_task_form = Some(CreateTaskForm::new(self.default_task_assignee()));
+        self.quick_notice = None;
+    }
+
+    pub(crate) fn cancel_create_task_form(&mut self) {
+        self.create_task_form = None;
+        self.pending_task_create = None;
+        self.quick_notice = Some(Notice::new("task creation cancelled".into(), false));
+    }
+
+    pub(crate) fn submit_create_task_form(&mut self) {
+        let assignees = self.known_assignees();
+        let Some(form) = self.create_task_form.as_mut() else {
+            return;
+        };
+        match validate_create_task_form(form, &assignees) {
+            Ok(draft) => {
+                form.error = None;
+                form.submitting = true;
+                self.pending_task_create = Some(PendingTaskCreate { draft });
+                self.quick_notice = Some(Notice::new("creating task...".into(), false));
+            }
+            Err(error) => {
+                form.error = Some(error.clone());
+                self.quick_notice = Some(Notice::new(error, true));
+            }
+        }
+    }
+
+    pub(crate) fn open_orchestrator_message_form(&mut self) {
+        self.quick_actions.open = false;
+        self.quick_actions.confirm = false;
+        self.create_task_form = None;
+        self.pending_task_create = None;
+        self.pending_orchestrator_message = None;
+        self.orchestrator_message_form = Some(OrchestratorMessageForm::new());
+        self.quick_notice = None;
+    }
+
+    pub(crate) fn cancel_orchestrator_message_form(&mut self) {
+        self.orchestrator_message_form = None;
+        self.pending_orchestrator_message = None;
+        self.quick_notice = Some(Notice::new("message cancelled".into(), false));
+    }
+
+    pub(crate) fn submit_orchestrator_message_form(&mut self) {
+        let Some(form) = self.orchestrator_message_form.as_mut() else {
+            return;
+        };
+        match validate_orchestrator_message_form(form) {
+            Ok(message) => {
+                form.error = None;
+                form.submitting = true;
+                self.pending_orchestrator_message = Some(PendingOrchestratorMessage { message });
+                self.quick_notice = Some(Notice::new(
+                    format!("sending message to {ROOT_ORCHESTRATOR_WORKSPACE}..."),
+                    false,
+                ));
+            }
+            Err(error) => {
+                form.error = Some(error.clone());
+                self.quick_notice = Some(Notice::new(error, true));
+            }
+        }
+    }
+
+    pub(crate) fn known_assignees(&self) -> Vec<String> {
+        let mut names = BTreeSet::new();
+        names.extend(self.workspace_dirs.keys().cloned());
+        names.extend(self.workspace_infos.keys().cloned());
+        for entry in &self.agent_entries {
+            if !entry.group && !entry.workspace.trim().is_empty() {
+                names.insert(entry.workspace.clone());
+            }
+        }
+        for task in &self.tasks {
+            if !task.assignee.trim().is_empty() {
+                names.insert(task.assignee.clone());
+            }
+        }
+        names.into_iter().collect()
+    }
+
+    fn default_task_assignee(&self) -> String {
+        self.selected_task()
+            .and_then(|task| (!task.assignee.trim().is_empty()).then_some(task.assignee))
+            .or_else(|| self.selected_workspace().map(str::to_owned))
+            .or_else(|| self.known_assignees().into_iter().next())
+            .unwrap_or_default()
     }
 
     /// Move the message selection by `delta` rows. Positive walks
@@ -642,6 +842,38 @@ fn selectable_entry_positions(entries: &[AgentEntry]) -> Vec<usize> {
         .collect()
 }
 
+fn validate_create_task_form(
+    form: &CreateTaskForm,
+    known_assignees: &[String],
+) -> Result<CreateTaskDraft, String> {
+    let assignee = form.assignee.trim().to_owned();
+    if assignee.is_empty() {
+        return Err("assignee is required".to_owned());
+    }
+    if !known_assignees.is_empty() && !known_assignees.iter().any(|name| name == &assignee) {
+        return Err(format!("unknown assignee {assignee}"));
+    }
+
+    let title = form.title.trim().to_owned();
+    if title.is_empty() {
+        return Err("title is required".to_owned());
+    }
+
+    Ok(CreateTaskDraft {
+        assignee,
+        title,
+        description: form.description.trim().to_owned(),
+    })
+}
+
+fn validate_orchestrator_message_form(form: &OrchestratorMessageForm) -> Result<String, String> {
+    let message = form.message.trim().to_owned();
+    if message.is_empty() {
+        return Err("message is required".to_owned());
+    }
+    Ok(message)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -683,6 +915,80 @@ mod tests {
         assert_eq!(app.agent_detail_tab, AgentDetailTab::Overview);
         assert_eq!(app.detail_scroll.index, 0);
         assert!(app.agent_detail_follow_tail);
+    }
+
+    #[test]
+    fn create_task_form_defaults_to_selected_task_assignee() {
+        let mut app = App::new();
+        let mut task = mock_task();
+        task.assignee = "beta".into();
+        app.tasks = vec![task];
+        app.stream = StreamView::Tasks;
+
+        app.open_create_task_form();
+
+        let form = app.create_task_form.expect("form open");
+        assert_eq!(form.assignee, "beta");
+        assert_eq!(form.field, CreateTaskField::Title);
+    }
+
+    #[test]
+    fn create_task_submission_validates_required_fields_and_known_assignee() {
+        let mut app = App::new();
+        app.workspace_dirs
+            .insert("alpha".into(), PathBuf::from("/tmp/alpha"));
+        app.open_create_task_form();
+
+        app.submit_create_task_form();
+        assert!(app.pending_task_create.is_none());
+        assert!(app
+            .create_task_form
+            .as_ref()
+            .and_then(|form| form.error.as_deref())
+            .is_some_and(|error| error.contains("title")));
+
+        let form = app.create_task_form.as_mut().unwrap();
+        form.assignee = "missing".into();
+        form.title = "Ship feature".into();
+        app.submit_create_task_form();
+        assert!(app.pending_task_create.is_none());
+        assert!(app
+            .create_task_form
+            .as_ref()
+            .and_then(|form| form.error.as_deref())
+            .is_some_and(|error| error.contains("unknown assignee")));
+
+        let form = app.create_task_form.as_mut().unwrap();
+        form.assignee = "alpha".into();
+        app.submit_create_task_form();
+        let pending = app.pending_task_create.expect("create queued");
+        assert_eq!(pending.draft.assignee, "alpha");
+        assert_eq!(pending.draft.title, "Ship feature");
+        assert!(app.create_task_form.unwrap().submitting);
+    }
+
+    #[test]
+    fn orchestrator_message_form_queues_trimmed_plain_message() {
+        let mut app = App::new();
+        app.open_orchestrator_message_form();
+
+        app.submit_orchestrator_message_form();
+        assert!(app.pending_orchestrator_message.is_none());
+        assert!(app
+            .orchestrator_message_form
+            .as_ref()
+            .and_then(|form| form.error.as_deref())
+            .is_some_and(|error| error.contains("message")));
+
+        let form = app.orchestrator_message_form.as_mut().unwrap();
+        form.message = "  check queue health  ".into();
+        app.submit_orchestrator_message_form();
+
+        let pending = app
+            .pending_orchestrator_message
+            .expect("message send queued");
+        assert_eq!(pending.message, "check queue health");
+        assert!(app.orchestrator_message_form.unwrap().submitting);
     }
 
     fn mock_task() -> ax_proto::types::Task {
